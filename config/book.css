@@ -1,0 +1,152 @@
+/* ============================================================
+   config/book.css — pdf2epub 项目自维护的基础 EPUB 样式
+   目标:简单、稳定、跨阅读器兼容,不依赖旧 book.css
+   原则:相对单位、无过度复杂布局、图片自适应
+   ============================================================ */
+
+/* ---------- 基础排版 ---------- */
+body {
+  font-family: "Noto Serif CJK SC", "Source Han Serif SC",
+               "Songti SC", "SimSun", "STSong", serif;
+  font-size: 1em;
+  line-height: 1.75;
+  margin: 1.2em 1.5em;
+  color: #1a1a1a;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+p {
+  margin: 0.6em 0;
+  text-align: justify;
+  text-justify: inter-ideograph;
+}
+
+/* ---------- 标题层级 ---------- */
+h1, h2, h3, h4, h5, h6 {
+  font-family: "Noto Sans CJK SC", "Source Han Sans SC",
+               "Microsoft YaHei", "SimHei", sans-serif;
+  line-height: 1.35;
+  margin: 1.4em 0 0.6em;
+  page-break-after: avoid;
+}
+
+h1 {
+  font-size: 1.5em;
+  border-bottom: 1px solid #ccc;
+  padding-bottom: 0.25em;
+}
+h2 { font-size: 1.3em; }
+h3 { font-size: 1.15em; }
+h4 { font-size: 1.05em; }
+
+/* ---------- 图片:自适应阅读器宽度,不超出页面 ---------- */
+img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin: 1em auto;
+}
+
+figure {
+  margin: 1.2em 0;
+  text-align: center;
+  page-break-inside: avoid;
+}
+
+figcaption {
+  font-size: 0.85em;
+  color: #555;
+  margin-top: 0.4em;
+}
+
+/* ---------- 表格 ---------- */
+table {
+  border-collapse: collapse;
+  width: 100%;
+  max-width: 100%;
+  margin: 1em 0;
+  font-size: 0.92em;
+}
+
+th, td {
+  border: 1px solid #bbb;
+  padding: 0.35em 0.55em;
+  vertical-align: top;
+}
+
+th {
+  background: #f2f2f2;
+  font-weight: bold;
+}
+
+/* ---------- 数学公式:显示区域不被破坏 ---------- */
+.math.display {
+  display: block;
+  text-align: center;
+  margin: 1em 0;
+  overflow-x: auto;
+}
+
+.math.inline {
+  white-space: nowrap;
+}
+
+/* ---------- 脚注 ---------- */
+.footnotes {
+  font-size: 0.85em;
+  line-height: 1.5;
+  margin-top: 2em;
+  padding-top: 0.6em;
+  border-top: 1px solid #999;
+}
+
+.footnotes ol {
+  padding-left: 1.4em;
+  margin: 0.4em 0;
+}
+
+a.footnote-ref {
+  font-size: 0.8em;
+  vertical-align: super;
+  text-decoration: none;
+}
+
+/* ---------- 链接 ---------- */
+a {
+  color: #2a5db0;
+  text-decoration: none;
+}
+
+/* ---------- 代码块 ---------- */
+code {
+  font-family: Consolas, "Courier New", "NSimSun", monospace;
+  font-size: 0.9em;
+}
+
+pre {
+  white-space: pre-wrap;
+  font-size: 0.88em;
+  line-height: 1.5;
+  background: #f5f5f5;
+  border: 1px solid #ddd;
+  border-radius: 3px;
+  padding: 0.7em 0.9em;
+  margin: 1em 0;
+  page-break-inside: avoid;
+}
+
+pre code {
+  background: none;
+  border: none;
+  padding: 0;
+}
+
+/* ---------- 引用 ---------- */
+blockquote {
+  margin: 1em 0;
+  padding: 0.2em 1em;
+  border-left: 3px solid #999;
+  color: #444;
+  background: #fafafa;
+}
