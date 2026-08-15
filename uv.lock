@@ -288,12 +288,14 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "pymupdf4llm" },
+    { name = "pyyaml" },
     { name = "requests" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "pymupdf4llm", specifier = ">=1.28.2" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "requests", specifier = ">=2.34.2" },
 ]
 
