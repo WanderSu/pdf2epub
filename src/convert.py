@@ -19,6 +19,7 @@ import yaml
 from backends import get_backend
 from backends.base import ConversionResult, normalize_image_refs
 from detector.pdf_detector import PDFDetector, PDFType
+from paths import config_file
 
 IMAGES_DIR = "images"
 
@@ -39,7 +40,7 @@ def convert_auto(
 ) -> tuple[ConversionResult, object]:
     """自动检测并转换,返回 (ConversionResult, DetectionResult)。"""
     if config is None:
-        config = load_config(config_path or Path(__file__).resolve().parent.parent / "config" / "config.yaml")
+        config = load_config(config_path or config_file())
 
     pdf_path = Path(pdf_path)
     work_dir = Path(work_dir)

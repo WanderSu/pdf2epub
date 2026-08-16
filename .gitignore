@@ -14,6 +14,9 @@ logs/
 # 中间工作目录(Markdown + images)
 work/
 
+# 批处理测试输入目录(含大文件与损坏样本)
+books/
+
 # 测试产物
 tests/.pytest_cache/
 .pytest_cache/

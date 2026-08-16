@@ -285,7 +285,7 @@ wheels = [
 [[package]]
 name = "pdf2epub"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "pymupdf4llm" },
     { name = "pyyaml" },
