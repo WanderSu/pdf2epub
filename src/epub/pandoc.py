@@ -34,6 +34,7 @@ def build_epub(
     work_dir: str | Path,
     output_dir: str | Path,
     title: str | None = None,
+    author: str | None = None,
     css: str | Path = DEFAULT_CSS,
 ) -> Path:
     """用 Pandoc 将 work/book.md 转为 EPUB,返回 epub 路径。
@@ -58,6 +59,8 @@ def build_epub(
         "--metadata", f"title={title}",
         "--metadata", "lang=zh-CN",
     ]
+    if author:
+        cmd += ["--metadata", f"author={author}"]
     proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if proc.returncode != 0:
         raise RuntimeError(f"Pandoc 失败(exit={proc.returncode}): {proc.stderr[:500]}")
