@@ -20,6 +20,7 @@ from pathlib import Path
 import requests
 
 from .base import Backend, ConversionResult, normalize_image_refs
+from paths import load_api_key
 
 JOBS_URL = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
 MODEL = "PaddleOCR-VL-1.6"
@@ -51,9 +52,16 @@ class PaddleOCRAdapter(Backend):
         timeout: int = DEFAULT_TIMEOUT,
         poll_interval: int = POLL_INTERVAL,
     ) -> None:
-        self.token = token or os.environ.get("PADDLEOCR_TOKEN", "")
+        self.token = (
+            token
+            or os.environ.get("PADDLEOCR_TOKEN", "")
+            or load_api_key("PaddleOCR-VL")
+            or ""
+        )
         if not self.token:
-            raise PaddleOCRError("缺少 PaddleOCR-VL Token:请设置环境变量 PADDLEOCR_TOKEN")
+            raise PaddleOCRError(
+                "缺少 PaddleOCR-VL Token:请设置环境变量 PADDLEOCR_TOKEN 或项目根目录 apikey.json"
+            )
         self.use_chart_recognition = use_chart_recognition
         self.use_doc_orientation_classify = use_doc_orientation_classify
         self.use_doc_unwarping = use_doc_unwarping
