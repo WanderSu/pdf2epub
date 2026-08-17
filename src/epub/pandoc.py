@@ -16,12 +16,14 @@ DEFAULT_CSS = book_css()
 
 
 def infer_title(book_md: Path, fallback: str | None = None) -> str:
-    """从 Markdown 第一个一级标题推断书名。"""
+    """从 Markdown 标题推断书名:跳过过短/无意义的候选(如版权页'说明')。"""
     try:
         text = book_md.read_text(encoding="utf-8", errors="replace")
-        m = re.search(r"^#\s+(.+)$", text, re.MULTILINE)
-        if m:
-            return m.group(1).strip()
+        for m in re.finditer(r"^#\s+(.+)$", text, re.MULTILINE):
+            candidate = m.group(1).strip()
+            condensed = re.sub(r"\s+", "", candidate)
+            if len(condensed) >= 3:
+                return candidate
     except OSError:
         pass
     return fallback or book_md.parent.name
