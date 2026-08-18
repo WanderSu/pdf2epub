@@ -14,6 +14,7 @@ from pathlib import Path
 import pymupdf4llm
 
 from .base import Backend, ConversionResult, normalize_image_refs
+from markdown.bold import annotate_bold
 
 IMAGES_DIR = "images"
 
@@ -21,8 +22,9 @@ IMAGES_DIR = "images"
 class PyMuPDFBackend(Backend):
     name = "pymupdf"
 
-    def __init__(self, write_images: bool = True) -> None:
+    def __init__(self, write_images: bool = True, bold_fonts: list[str] | None = None) -> None:
         self.write_images = write_images
+        self.bold_fonts = bold_fonts or []
 
     def convert(self, pdf_path: str | Path, work_dir: str | Path) -> ConversionResult:
         """将电子版 PDF 转换为统一 Markdown + images/。"""
@@ -38,6 +40,8 @@ class PyMuPDFBackend(Backend):
             write_images=self.write_images,
             image_path=str(images_abs),
         )
+        if self.bold_fonts:
+            md = annotate_bold(md, pdf_path, extra_bold_fonts=self.bold_fonts)
         md = normalize_image_refs(md, images_abs)
 
         book_md = work_dir / "book.md"

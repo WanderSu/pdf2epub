@@ -54,7 +54,7 @@ def convert_auto(
     ocr_cfg = config.get(ocr_name, {})
 
     if detection.pdf_type == PDFType.TEXT:
-        result = get_backend("pymupdf").convert(pdf_path, work_dir)
+        result = get_backend("pymupdf", config.get("pymupdf", {})).convert(pdf_path, work_dir)
     elif detection.pdf_type == PDFType.SCANNED:
         result = get_backend(ocr_name, ocr_cfg).convert(pdf_path, work_dir)
     else:

@@ -15,6 +15,9 @@ mineru:
 # 本地 PyMuPDF4LLM
 pymupdf:
   write_images: true
+  # 强调字体列表:PDF 中用这些字体(如楷体/中宋)排版的文字,
+  # 提取后自动标注为 **粗体**(PyMuPDF4LLM 不保留字体信息)
+  bold_fonts: ["KaiTi", "STZhongsong", "FZZYSK1--GBK1-0", "FZTYSK--GBK1-0", "FZCYSCK--GBK1-0"]
 
 # PaddleOCR-VL 1.6(凭证:环境变量 PADDLEOCR_TOKEN,百度 AI Studio)
 paddleocr:
