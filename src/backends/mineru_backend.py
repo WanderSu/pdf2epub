@@ -17,6 +17,7 @@ import zipfile
 from pathlib import Path
 
 import requests
+import pymupdf
 
 from .base import Backend, ConversionResult, normalize_image_refs
 from paths import load_api_key
@@ -106,11 +107,47 @@ class MinerUAdapter(Backend):
         if not pdf_path.exists():
             raise MinerUError(f"文件不存在: {pdf_path}")
 
-        task_id = self._upload(pdf_path)
-        print(f"[mineru] 任务已提交: batch_id={task_id} (file={pdf_path.name})")
-        result = self._poll_batch(task_id, pdf_path.name)
-        print(f"[mineru] 解析完成, 下载结果...")
+        try:
+            task_id = self._upload(pdf_path)
+            print(f"[mineru] 任务已提交: batch_id={task_id} (file={pdf_path.name})")
+            result = self._poll_batch(task_id, pdf_path.name)
+        except MinerUError as e:
+            # 伪文字层等结构异常的文件 MinerU 会解析失败,降级为渲染纯图后重试
+            if "parsing failed" not in str(e) and "解析失败" not in str(e):
+                raise
+            print("[mineru] 原文件解析失败(可能为伪文字层),降级为渲染纯图后重试 ...")
+            rendered = self._render_to_image_pdf(pdf_path, work_dir)
+            try:
+                task_id = self._upload(rendered)
+                print(f"[mineru] 任务已提交(渲染版): batch_id={task_id}")
+                result = self._poll_batch(task_id, rendered.name)
+                print("[mineru] 降级 OCR 成功(渲染纯图版)")
+            finally:
+                rendered.unlink(missing_ok=True)
+        print("[mineru] 解析完成, 下载结果...")
         return self._unpack(result["full_zip_url"], work_dir, task_id)
+
+    @staticmethod
+    def _render_to_image_pdf(pdf_path: Path, work_dir: Path, dpi: int = 150, jpg_quality: int = 85) -> Path:
+        """将 PDF 渲染为纯图 PDF(JPEG 压缩),供 MinerU 重试。
+        部分 PDF 文字层损坏(MinerU 解析失败)但渲染正常,转为纯图后
+        即可正常 OCR。JPEG 质量 85 保持文字可读且体积可控(≤200MB)。
+        """
+        work_dir.mkdir(parents=True, exist_ok=True)
+        out_path = work_dir / "_rendered.pdf"
+        src = pymupdf.open(pdf_path)
+        out = pymupdf.open()
+        try:
+            for page in src:
+                pix = page.get_pixmap(dpi=dpi)
+                img = pix.tobytes("jpeg", jpg_quality=jpg_quality)
+                new_page = out.new_page(width=pix.width, height=pix.height)
+                new_page.insert_image(new_page.rect, stream=img)
+            out.save(out_path, garbage=3, deflate=True)
+        finally:
+            src.close()
+            out.close()
+        return out_path
 
     def _upload(self, pdf_path: Path) -> str:
         """申请上传 URL 并 PUT 上传,返回 batch_id。"""
