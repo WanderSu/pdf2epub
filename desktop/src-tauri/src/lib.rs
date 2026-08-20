@@ -78,6 +78,7 @@ async fn convert_file(
     }
 
     let app2 = app.clone();
+    let fp_for_stream = file_path.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let mut child = cmd
             .stdout(Stdio::piped())
@@ -85,11 +86,14 @@ async fn convert_file(
             .spawn()
             .map_err(|e| format!("无法启动 CLI({cli}): {e}"))?;
 
-        // stdout:逐行推送进度事件
+        // stdout:逐行推送进度事件(携带文件名,前端区分多任务)
         let stdout = child.stdout.take().unwrap();
         let mut last_line = String::new();
         for line in BufReader::new(stdout).lines().map_while(|l| l.ok()) {
-            let _ = app2.emit("conv://progress", line.clone());
+            let _ = app2.emit(
+                "conv://progress",
+                serde_json::json!({ "file": fp_for_stream, "line": line }),
+            );
             last_line = line;
         }
         let status = child.wait().map_err(|e| format!("CLI 退出失败: {e}"))?;
