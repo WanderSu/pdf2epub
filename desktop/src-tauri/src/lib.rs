@@ -18,21 +18,42 @@ impl Default for CliConfig {
     }
 }
 
-/// 探测 ebook-converter 可执行文件:环境变量 PDF2EPUB_CLI → 项目 .venv
+/// 探测 ebook-converter 可执行文件,优先级:
+/// 1. 设置页传入的 cli_path(调用方传参)
+/// 2. 环境变量 PDF2EPUB_CLI / PDF2EPUB_HOME
+/// 3. 基于 exe 位置向上查找项目 .venv(dev 与 release 均有效)
+/// 4. 基于 cwd 的候选路径
+/// 5. 兜底:PATH 中的 ebook-converter
 fn resolve_cli_path() -> String {
     if let Ok(p) = std::env::var("PDF2EPUB_CLI") {
         if !p.is_empty() {
             return p;
         }
     }
-    let candidates = [
-        // tauri dev:cwd = src-tauri
-        "../.venv/Scripts/ebook-converter.exe",
-        "../.venv/Scripts/ebook-converter",
-        // 安装后打包(目标目录相对)
-        "../../../.venv/Scripts/ebook-converter.exe",
-    ];
-    for c in candidates {
+    if let Ok(home) = std::env::var("PDF2EPUB_HOME") {
+        let home = PathBuf::from(home);
+        for rel in [".venv/Scripts/ebook-converter.exe", ".venv/Scripts/ebook-converter"] {
+            let p = home.join(rel);
+            if p.exists() {
+                return p.to_string_lossy().into_owned();
+            }
+        }
+    }
+    // 基于 exe 位置向上最多 5 级查找 .venv
+    if let Ok(exe) = std::env::current_exe() {
+        let mut dir = exe.parent().map(|p| p.to_path_buf());
+        for _ in 0..5 {
+            if let Some(d) = &dir {
+                let p = d.join(".venv/Scripts/ebook-converter.exe");
+                if p.exists() {
+                    return p.to_string_lossy().into_owned();
+                }
+                dir = d.parent().map(|p| p.to_path_buf());
+            }
+        }
+    }
+    // cwd 候选
+    for c in ["../.venv/Scripts/ebook-converter.exe", "../.venv/Scripts/ebook-converter"] {
         let p = PathBuf::from(c);
         if p.exists() {
             return p.to_string_lossy().into_owned();
@@ -60,9 +81,13 @@ async fn convert_file(
     output_dir: String,
     backend: Option<String>,
     retries: Option<u32>,
+    cli_path: Option<String>,
 ) -> Result<ConvertResult, String> {
     let state: State<CliConfig> = app.state();
-    let cli = state.cli_path.lock().unwrap().clone();
+    let cli = match cli_path {
+        Some(p) if !p.trim().is_empty() => p,
+        _ => state.cli_path.lock().unwrap().clone(),
+    };
     let mut cmd = Command::new(&cli);
     cmd.arg(&file_path)
         .arg("-o")
