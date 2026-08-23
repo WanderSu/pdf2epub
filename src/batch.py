@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,11 +35,24 @@ def sanitize_name(name: str) -> str:
     必要原因:PyMuPDF 的 C 库保存图片时会把路径中的空格替换为下划线,
     含空格的工作目录会导致图片写入失败。
     """
-    import re
-
     name = re.sub(r"[\s]+", "_", name.strip())
     name = re.sub(r'[\\/:*?"<>|]+', "_", name)
     return name or "book"
+
+
+def parse_title_author(stem: str) -> tuple[str, str | None]:
+    """解析文件名中的「标题 - 作者」模式。
+    匹配形如 "马克思主义与性少数解放 - 瑞士红星党" 的文件名:
+    - 以「空格-空格」分隔,前后两段
+    - 返回 (标题, 作者);不匹配时返回 (原文件名, None)
+    """
+    m = re.match(r"^(.*?)\s+-\s+(.+)$", stem)
+    if m:
+        title = re.sub(r"\s+", " ", m.group(1)).strip()
+        author = re.sub(r"\s+", " ", m.group(2)).strip()
+        if len(title) >= 2 and author:
+            return title, author
+    return stem, None
 
 
 @dataclass
@@ -142,7 +156,8 @@ def _process_pdf(source, config, work_root, output_dir, backend_override, t0, re
     # Markdown 清理(最小版)
     clean_file(conv.book_md)
 
-    epub = build_epub(conv.book_md, work, output_dir, title=source.stem)
+    title, author = parse_title_author(source.stem)
+    epub = build_epub(conv.book_md, work, output_dir, title=title, author=author)
     result.epub = epub
     result.elapsed = time.time() - t0
     logger.info("完成(%s/%s): %s → %s", result.pdf_type, result.backend, source.name, epub.name)
@@ -166,7 +181,8 @@ def _process_markdown(source, work_root, output_dir, t0, result, safe_stem) -> T
                 shutil.copy2(img, dst_images / img.name)
 
     clean_file(book_md)
-    epub = build_epub(book_md, work, output_dir, title=source.stem)
+    title, author = parse_title_author(source.stem)
+    epub = build_epub(book_md, work, output_dir, title=title, author=author)
     result.epub = epub
     result.elapsed = time.time() - t0
     logger.info("完成(markdown): %s → %s", source.name, epub.name)
