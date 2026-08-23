@@ -36,14 +36,25 @@ class Backend(ABC):
 def normalize_image_refs(md: str, images_abs: Path, images_dir: str = "images") -> str:
     """把 Markdown 中的图片引用前缀规范化为相对 images/。
 
-    不同后端输出的引用前缀不同(绝对路径 / 相对路径 / 正反斜杠),
+    不同后端输出的引用前缀不同(绝对路径 / 相对路径 / 相对 cwd / 正反斜杠),
     统一替换为 "images/xxx"(相对 work_dir)。
     """
-    prefix_abs = str(images_abs.resolve())
-    prefix_posix = prefix_abs.replace("\\", "/")
-    prefix_rel = str(images_abs)
-    prefix_rel_posix = prefix_rel.replace("\\", "/")
-    for prefix in {str(images_abs), prefix_rel_posix, prefix_abs, prefix_posix}:
+    import os
+
+    prefixes = {
+        str(images_abs),
+        str(images_abs).replace("\\", "/"),
+        str(images_abs.resolve()),
+        str(images_abs.resolve()).replace("\\", "/"),
+    }
+    # 相对 cwd 变体(pymupdf4llm 会把 image_path 相对化为 cwd 形式)
+    try:
+        rel_cwd = os.path.relpath(images_abs, os.getcwd())
+        prefixes.add(rel_cwd)
+        prefixes.add(rel_cwd.replace("\\", "/"))
+    except ValueError:
+        pass
+    for prefix in prefixes:
         md = md.replace(f"]({prefix}/", f"]({images_dir}/")
         md = md.replace(f'"]("{prefix}/', f'"]("{images_dir}/')  # 防御:带引号形式
     return md
