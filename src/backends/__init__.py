@@ -24,7 +24,10 @@ def get_backend(name: str, config: dict[str, Any] | None = None) -> Backend:
     config = config or {}
     name = (name or "").lower().strip()
     if name == "pymupdf":
-        return PyMuPDFBackend(write_images=config.get("write_images", True))
+        return PyMuPDFBackend(
+            write_images=config.get("write_images", True),
+            bold_fonts=config.get("bold_fonts", []),
+        )
     if name == "mineru":
         return MinerUAdapter(
             model_version=config.get("model_version", "vlm"),
