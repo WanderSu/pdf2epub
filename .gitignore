@@ -17,6 +17,9 @@ work/
 # 批处理测试输入目录(含大文件与损坏样本)
 books/
 
+# 真实书籍测试样本(不纳入版本控制)
+tests/
+
 # 测试产物
 tests/.pytest_cache/
 .pytest_cache/
