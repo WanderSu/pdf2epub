@@ -23,6 +23,11 @@ tests/
 # 本地 API 凭证(绝对不入库)
 apikey.json
 
+# Tauri 桌面端构建产物
+desktop/node_modules/
+desktop/src-tauri/target/
+desktop/dist/
+
 # 测试产物
 tests/.pytest_cache/
 .pytest_cache/
