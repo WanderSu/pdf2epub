@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# uv
+# .python-version 保留提交(固定项目 Python 版本)
+
+# 输出与日志
+output/
+logs/
+
+# 中间工作目录(Markdown + images)
+work/
+
+# 测试产物
+tests/.pytest_cache/
+.pytest_cache/
+
+# IDE
+.idea/
+.vscode/

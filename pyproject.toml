@@ -1,0 +1,16 @@
+[project]
+name = "pdf2epub"
+version = "0.1.0"
+description = "PDF → EPUB 电子书转换工具(统一输出高质量 EPUB)"
+requires-python = ">=3.12"
+dependencies = [
+    "pymupdf4llm>=1.28.2",
+    "requests>=2.34.2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = false
