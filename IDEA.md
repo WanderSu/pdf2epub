@@ -116,6 +116,14 @@ PDF 基本没有有效文字层。
 
 → 云端 OCR
 
+### 伪文字层(检测增强,已实现)
+
+部分 PDF 文字层损坏(嵌入字体无正确 ToUnicode 映射),提取出乱码但渲染正常。
+
+检测:统计页内「可疑字符」占比(私有区 / 替换符 / 框线绘图 / 杂项符号 / CJK 扩展区),超过阈值(25%)视为伪文字层页。
+
+处理:检测到疑似伪文字层时,**由用户手动决定是否改用 OCR**(单文件交互询问;批处理仅警告)。
+
 ### hybrid
 
 部分页面存在文字层，部分页面是扫描内容。
@@ -141,6 +149,12 @@ PDF 基本没有有效文字层。
 
 - MinerU Cloud
 - PaddleOCR-VL 1.6
+
+### 桌面端(Phase 8 新增)
+
+- Tauri 2 + React + Tailwind v4
+- UI 源自 Figma 设计稿,桥接 CLI 子进程
+- 构建工具链:Windows MSVC
 
 ### EPUB
 
@@ -170,10 +184,12 @@ PDF 基本没有有效文字层。
 所有来源最终都必须进入统一结构：
 
 ```text
-work/
+work/<书名>/
 ├── book.md
 └── images/
 ```
+
+> 注：实际实现中按书名分目录(`work/<书名>/`),便于多书并行与批处理跳过判定。
 
 不同解析器不能直接生成各自独立的 EPUB。
 
@@ -201,17 +217,19 @@ EPUB
 
 需要处理：
 
-- 多余空行
-- 页眉
-- 页脚
-- 页码
-- 跨页断行
-- OCR 异常空格
-- 重复标题
-- 空标题
-- Markdown 格式错误
-- 图片路径
-- 标题层级
+- 多余空行 ✅ 已实现(连续 ≥3 压缩)
+- 页眉 ⏳ 未实现(依赖 OCR 服务自身过滤)
+- 页脚 ⏳ 未实现(同上)
+- 页码 ✅ 已实现(独立纯数字行剔除)
+- 跨页断行 ✅ 已实现(结构感知拼接,保护代码块/表格)
+- OCR 异常空格 ⏳ 未实现(如 "Py Mu PDF 4 LLM" 类,待处理)
+- 重复标题 ⏳ 未实现
+- 空标题 ⏳ 未实现
+- Markdown 格式错误 ⏳ 未实现
+- 图片路径 ✅ 已实现(引用存在性校验)
+- 标题层级 ⏳ 未实现
+- 中文排版空格 ✅ 已实现(汉字-汉字/数字、中文标点两侧、标签与括号两侧)
+- 强调字体粗体标注 ✅ 已实现(`src/markdown/bold.py`,KaiTi/中宋等 → `**`)
 
 原则：
 
@@ -417,7 +435,9 @@ ocr_backend = paddleocr
 
 API Key 和 Endpoint 不得硬编码。
 
-使用环境变量或配置文件。
+使用环境变量或配置文件。✅ 已实现,读取顺序:显式参数 → 环境变量(`MINERU_API_TOKEN` / `PADDLEOCR_TOKEN`)→ 项目根 `apikey.json`(已 gitignore,由用户维护)。
+
+> 补充：MinerU 解析失败时(如伪文字层 PDF)自动降级为「渲染纯图(JPEG 压缩)后重试」,已固化在后端内。
 
 ---
 
@@ -469,27 +489,31 @@ ebook-converter ./books/
 ebook-converter/
 ├── src/
 │   ├── detector/
-│   │   └── pdf_detector.py
+│   │   └── pdf_detector.py      # 类型检测(含乱码率/伪文字层判定)
 │   ├── backends/
+│   │   ├── base.py              # Backend 抽象 + normalize_image_refs
 │   │   ├── pymupdf_backend.py
-│   │   ├── mineru_backend.py
+│   │   ├── mineru_backend.py    # 含渲染降级重试
 │   │   └── paddleocr_backend.py
 │   ├── markdown/
-│   │   ├── cleaner.py
-│   │   ├── validator.py
-│   │   └── images.py
+│   │   ├── cleaner.py           # 清理(页码/断行/空格/图片校验)
+│   │   └── bold.py              # 强调字体 → 粗体标注
 │   ├── epub/
-│   │   ├── pandoc.py
-│   │   └── validator.py
-│   └── cli.py
+│   │   └── pandoc.py            # Pandoc → EPUB 封装
+│   ├── batch.py                 # 批处理(重试/跳过/断点续跑)
+│   ├── convert.py               # 自动路由(text/scanned/hybrid)
+│   ├── cli.py                   # ebook-converter 命令入口
+│   └── paths.py                 # 路径与 apikey.json 凭证读取
 ├── config/
 │   ├── config.yaml
 │   └── book.css
-├── tests/
+├── desktop/                     # Tauri 2 桌面端(React + Tailwind v4,Figma 设计稿)
+├── tests/                       # 真实书测试样本(已 gitignore)
 ├── logs/
 ├── output/
 ├── pyproject.toml
-└── README.md
+├── README.md
+└── IDEA.md
 ```
 
 实际结构可以根据工程需要调整，不要求机械遵守。
@@ -510,6 +534,8 @@ ebook-converter/
 - 当前文件结构
 
 不要直接修改环境。
+
+✅ 已完成。
 
 ---
 
@@ -547,6 +573,11 @@ EPUB
 
 必须实际打开生成的 EPUB 进行验证。
 
+✅ 已完成。
+
+---
+
+
 ---
 
 ### Phase 3：电子 PDF → Markdown
@@ -571,6 +602,11 @@ EPUB
 - 含公式的 PDF
 - 含脚注的 PDF
 
+✅ 已完成。
+
+---
+
+
 ---
 
 ### Phase 4：MinerU Cloud
@@ -584,6 +620,11 @@ MinerU Cloud
  ↓
 统一 Markdown + images/
 ```
+
+✅ 已完成。
+
+---
+
 
 ---
 
@@ -600,6 +641,11 @@ PaddleOCR-VL 1.6
 ```
 
 确保其输出可以进入与 MinerU 完全相同的后处理流程。
+
+✅ 已完成。
+
+---
+
 
 ---
 
@@ -628,6 +674,11 @@ hybrid
 → hybrid 流程
 ```
 
+✅ 已完成。
+
+---
+
+
 ---
 
 ### Phase 7：批处理
@@ -639,6 +690,23 @@ hybrid
 - 重试
 - 跳过已完成文件
 - 断点续跑
+
+✅ 已完成。
+
+---
+
+### Phase 8：增强与桌面端(已完成)
+
+在 Phase 1-7 基础上追加：
+
+- ✅ 文件名「标题 - 作者」→ EPUB 元数据(`dc:title` / `dc:creator`)
+- ✅ 凭证支持项目根 `apikey.json`(环境变量优先,已 gitignore)
+- ✅ 伪文字层检测(乱码率)+ 运行时交互询问是否 OCR
+- ✅ MinerU 解析失败自动降级「渲染纯图(JPEG)重试」
+- ✅ 中文清理增强:页码剔除、跨页断行连接(结构感知)、中文空格修正、强调字体粗体标注
+- ✅ 桌面端:Tauri 2 + React,UI 源自 Figma 设计稿(瑞士国际主义风格),桥接 CLI 子进程 + 进度事件
+- ✅ 工具链:Windows MSVC(Visual Studio Build Tools + rustup stable-x86_64-pc-windows-msvc)
+- ✅ 发布:GitHub Release v0.1.0(绿色版 exe),MIT License,仓库公开
 
 ---
 
@@ -689,3 +757,5 @@ hybrid
 14. 优先简单、可靠、可维护，而不是功能堆砌。
 15. 不要为了处理一种特殊 PDF 而引入大量新的依赖。
 16. 优先保证最终 EPUB 的阅读体验，而不是追求中间 Markdown 的形式复杂度。
+17. 伪文字层等检测结果不可靠时，由用户手动决定是否使用 OCR，不强行自动判定。
+18. 凭证只存于环境变量或 `apikey.json`(gitignore)，绝不入库；Token 不打印、不进会话记录。
