@@ -2,6 +2,8 @@
 
 PDF → EPUB 电子书转换工具。统一处理**电子版 PDF**、**扫描版 PDF**、**MinerU 桌面端/云端输出**和**已有 Markdown**,自动检测、自动清理,输出排版良好的 EPUB。
 
+提供 **CLI** 与 **桌面端(Tauri + Figma 设计稿)** 两种使用方式。
+
 > 方案设计详见 [`IDEA.md`](IDEA.md)。
 
 ## 它能做什么
@@ -20,7 +22,31 @@ MinerU 输出 ──► full.md + images ──┤      (自动:页码/断行/�
 - **清理**:页码剔除、跨页断行连接、中文排版空格修正、强调字体标注粗体、图片引用校验
 - **批处理**:失败重试(指数退避)、跳过已完成、断点续跑、单文件失败不中断
 
-## 安装
+## 桌面端(推荐)
+
+基于 **Tauri 2 + React**,UI 源自 Figma 设计稿(瑞士国际主义风格,黑白 + 橙色强调,支持亮/暗主题)。
+
+- **Import**:拖放/选择 PDF、Markdown
+- **Queue**:转换队列,实时进度、日志、后端徽标(LOCAL / MINERU / PADDLE)
+- **Library**:转换结果,一键在资源管理器中定位
+- **Settings**:OCR 后端(auto / MinerU / PaddleOCR-VL)、输出目录、CLI 路径、清理选项、主题
+
+### 安装与运行
+
+发布版(绿色 exe,免安装):从 [Releases](https://github.com/WanderSu/pdf2epub/releases) 下载 `pdf2epub.exe`,**放到项目根目录**运行(自动定位 `.venv` 中的转换引擎;放其他位置需在 Settings 中手动填写 CLI 路径)。
+
+### 从源码构建
+
+```bash
+cd desktop
+npm install
+npm run tauri dev      # 开发模式
+npm run tauri build -- --no-bundle   # 构建 release exe(输出 src-tauri/target/release/)
+```
+
+前置要求:Node.js ≥ 20、Rust(stable-x86_64-pc-windows-msvc)、Visual Studio Build Tools(C++ workload)。
+
+## CLI 安装
 
 **依赖**:Python 3.12、[uv](https://docs.astral.sh/uv/)、[Pandoc](https://pandoc.org/installing.html)(≥3.0,需 `pandoc` 在 PATH 中)。
 
