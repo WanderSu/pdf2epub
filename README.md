@@ -1,5 +1,11 @@
 # pdf2epub
 
+[![Release](https://img.shields.io/github/v/release/WanderSu/pdf2epub?color=FF4D00&label=release)](https://github.com/WanderSu/pdf2epub/releases)
+[![Stars](https://img.shields.io/github/stars/WanderSu/pdf2epub?color=0A0A0A&label=stars)](https://github.com/WanderSu/pdf2epub)
+[![Platform](https://img.shields.io/badge/platform-Windows-0078D6)](https://github.com/WanderSu/pdf2epub/releases)
+
+**中文** | [English](README.en.md)
+
 PDF → EPUB 电子书转换工具。统一处理**电子版 PDF**、**扫描版 PDF**、**MinerU 桌面端/云端输出**和**已有 Markdown**,自动检测、自动清理,输出排版良好的 EPUB。
 
 提供 **CLI** 与 **桌面端(Tauri + Figma 设计稿)** 两种使用方式。
