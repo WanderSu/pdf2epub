@@ -33,7 +33,7 @@ uv sync        # 安装项目依赖
 | 3 电子 PDF → Markdown(PyMuPDF4LLM) | ✅ |
 | 4 MinerU Cloud(Adapter) | ✅ |
 | 5 PaddleOCR-VL 1.6(Adapter) | ✅ |
-| 6 PDF 类型自动检测 | ⏳ |
+| 6 PDF 类型自动检测 + backend 自动选择 | ✅ |
 | 7 批处理 | ⏳ |
 
 ## 后端适配器
