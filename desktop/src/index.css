@@ -1,0 +1,130 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300;0,14..32,400;0,14..32,500;0,14..32,600;0,14..32,700;0,14..32,800;0,14..32,900;1,14..32,300;1,14..32,400&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&display=swap');
+@import 'tailwindcss';
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-border: var(--border);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+}
+
+:root {
+  --background: #F5F4F0;
+  --foreground: #0A0A0A;
+  --card: #FFFFFF;
+  --card-foreground: #0A0A0A;
+  --primary: #FF4D00;
+  --primary-foreground: #FFFFFF;
+  --secondary: #EBEBEB;
+  --secondary-foreground: #0A0A0A;
+  --muted: #E8E7E3;
+  --muted-foreground: #6B6B6B;
+  --accent: #FF4D00;
+  --accent-foreground: #FFFFFF;
+  --border: #D0CFC9;
+  --ring: #FF4D00;
+  --radius: 2px;
+}
+
+.dark {
+  --background: #0C0C0C;
+  --foreground: #F0EFE9;
+  --card: #161616;
+  --card-foreground: #F0EFE9;
+  --primary: #FF4D00;
+  --primary-foreground: #FFFFFF;
+  --secondary: #1E1E1E;
+  --secondary-foreground: #F0EFE9;
+  --muted: #1A1A1A;
+  --muted-foreground: #8A8A8A;
+  --accent: #FF4D00;
+  --accent-foreground: #FFFFFF;
+  --border: #2A2A2A;
+  --ring: #FF4D00;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: 'Inter', system-ui, sans-serif;
+  background-color: var(--background);
+  color: var(--foreground);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Hide scrollbars by default, show on hover/scroll */
+* {
+  scrollbar-width: none;
+}
+*::-webkit-scrollbar {
+  display: none;
+}
+*:hover {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+*:hover::-webkit-scrollbar {
+  display: block;
+  width: 4px;
+}
+*:hover::-webkit-scrollbar-track {
+  background: transparent;
+}
+*:hover::-webkit-scrollbar-thumb {
+  background-color: var(--border);
+  border-radius: 2px;
+}
+
+/* Monospace utility */
+.font-mono {
+  font-family: 'JetBrains Mono', 'Courier New', monospace;
+}
+
+/* Crosshair mark utility */
+.crosshair {
+  position: relative;
+}
+.crosshair::before,
+.crosshair::after {
+  content: '';
+  position: absolute;
+  background-color: currentColor;
+}
+.crosshair::before {
+  width: 1px;
+  height: 8px;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+.crosshair::after {
+  width: 8px;
+  height: 1px;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
