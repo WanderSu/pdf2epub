@@ -20,6 +20,9 @@ books/
 # 真实书籍测试样本(不纳入版本控制)
 tests/
 
+# 本地 API 凭证(绝对不入库)
+apikey.json
+
 # 测试产物
 tests/.pytest_cache/
 .pytest_cache/

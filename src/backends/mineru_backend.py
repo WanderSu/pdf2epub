@@ -19,6 +19,7 @@ from pathlib import Path
 import requests
 
 from .base import Backend, ConversionResult, normalize_image_refs
+from paths import load_api_key
 
 DEFAULT_BASE_URL = "https://mineru.net/api/v4"
 DEFAULT_TIMEOUT = 600      # 轮询总超时(秒)
@@ -54,9 +55,16 @@ class MinerUAdapter(Backend):
         timeout: int = DEFAULT_TIMEOUT,
         poll_interval: int = POLL_INTERVAL,
     ) -> None:
-        self.token = token or os.environ.get("MINERU_API_TOKEN", "")
+        self.token = (
+            token
+            or os.environ.get("MINERU_API_TOKEN", "")
+            or load_api_key("MinerU")
+            or ""
+        )
         if not self.token:
-            raise MinerUError("缺少 MinerU API Token:请设置环境变量 MINERU_API_TOKEN")
+            raise MinerUError(
+                "缺少 MinerU API Token:请设置环境变量 MINERU_API_TOKEN 或项目根目录 apikey.json"
+            )
         self.base_url = base_url.rstrip("/")
         self.model_version = model_version
         self.is_ocr = is_ocr
