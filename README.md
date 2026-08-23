@@ -3,6 +3,7 @@
 [![Release](https://img.shields.io/github/v/release/WanderSu/pdf2epub?color=FF4D00&label=release)](https://github.com/WanderSu/pdf2epub/releases)
 [![Stars](https://img.shields.io/github/stars/WanderSu/pdf2epub?color=0A0A0A&label=stars)](https://github.com/WanderSu/pdf2epub)
 [![Platform](https://img.shields.io/badge/platform-Windows-0078D6)](https://github.com/WanderSu/pdf2epub/releases)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 **中文** | [English](README.en.md)
 
