@@ -152,6 +152,12 @@ def _process_pdf(source, config, work_root, output_dir, backend_override, t0, re
         conv, detection = convert_auto(source, work, config=config)
         result.backend = conv.backend
         result.pdf_type = detection.pdf_type.value
+        if getattr(detection, "suspicious_pages", 0) > 0:
+            logger.warning(
+                "⚠️ %s: %d/%d 页疑似文字层损坏(乱码),本地提取可能不可读;"
+                "如需 OCR 请用 --backend mineru/paddleocr 重跑",
+                source.name, detection.suspicious_pages, detection.total_pages,
+            )
 
     # Markdown 清理(最小版)
     clean_file(conv.book_md)

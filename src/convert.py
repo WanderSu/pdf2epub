@@ -71,17 +71,17 @@ def _convert_hybrid(
     detection,
 ) -> ConversionResult:
     """hybrid 流程:文字页本地提取,扫描页渲染为纯图 PDF 送 OCR,按页合并。"""
-    threshold = 50  # 与 PDFDetector 默认一致
-    text_idxs = [i for i, n in enumerate(detection.page_char_counts) if n >= threshold]
-    scanned_idxs = [i for i, n in enumerate(detection.page_char_counts) if n < threshold]
+    # 页级路由与 PDFDetector 判定一致(有效字符 + 乱码率)
+    text_idxs = list(detection.text_page_idxs)
+    scanned_idxs = [i for i in range(detection.total_pages) if i not in set(text_idxs)]
     print(f"[hybrid] 文字页 {len(text_idxs)} 页, 扫描页 {len(scanned_idxs)} 页")
 
-    # 1. 文字页 → PyMuPDF4LLM(页号 1-indexed)
+    # 1. 文字页 → PyMuPDF4LLM(pages 为 0-indexed)
     scan_work: Path | None = None
     if text_idxs:
         text_md = pymupdf4llm.to_markdown(
             str(pdf_path),
-            pages=[i + 1 for i in text_idxs],
+            pages=list(text_idxs),
             write_images=True,
             image_path=str(work_dir / IMAGES_DIR),
         )

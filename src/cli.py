@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 from batch import process_batch, setup_logging
+from detector.pdf_detector import PDFDetector
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,11 +46,45 @@ def main(argv: list[str] | None = None) -> int:
     setup_logging(log_file=log_file, verbose=args.verbose)
 
     paths = [Path(p) for p in args.paths]
+    backend_override = None if args.backend == "auto" else args.backend
+
+    # 交互询问:单文件 + auto + 交互终端 + 检测到疑似伪文字层(乱码)时,
+    # 由用户手动决定是否改用云端 OCR。批处理/非交互模式不询问。
+    if (
+        backend_override is None
+        and len(paths) == 1
+        and paths[0].is_file()
+        and paths[0].suffix.lower() == ".pdf"
+        and sys.stdin.isatty()
+    ):
+        det = PDFDetector().detect(paths[0])
+        if det.suspicious_pages > 0 and det.pdf_type.value != "scanned":
+            print(
+                f"⚠️ 检测到 {det.suspicious_pages}/{det.total_pages} 页疑似文字层损坏(乱码),"
+                f"本地提取的文本可能不可读(当前类型: {det.pdf_type.value})。"
+            )
+            choice = input(
+                "是否改用云端 OCR?\n"
+                "  [1] MinerU\n"
+                "  [2] PaddleOCR-VL\n"
+                "  [3] 继续本地提取\n"
+                "  [0] 取消\n"
+                "请选择 [0-3]: "
+            ).strip()
+            if choice == "1":
+                backend_override = "mineru"
+            elif choice == "2":
+                backend_override = "paddleocr"
+            elif choice == "3":
+                pass
+            else:
+                return 0  # 取消
+
     results = process_batch(
         paths,
         work_root=args.work,
         output_dir=args.output,
-        backend_override=None if args.backend == "auto" else args.backend,
+        backend_override=backend_override,
         retries=args.retries,
         force=args.force,
     )
