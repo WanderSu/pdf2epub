@@ -521,6 +521,8 @@ function SettingsScreen({
   setBackendPref,
   outputDir,
   setOutputDir,
+  cliPath,
+  setCliPath,
 }: {
   darkMode: boolean;
   setDarkMode: (v: boolean) => void;
@@ -528,6 +530,8 @@ function SettingsScreen({
   setBackendPref: (v: BackendPref) => void;
   outputDir: string;
   setOutputDir: (v: string) => void;
+  cliPath: string;
+  setCliPath: (v: string) => void;
 }) {
   const [minerUToken, setMinerUToken] = useState("");
   const [paddleToken, setPaddleToken] = useState("");
@@ -535,7 +539,6 @@ function SettingsScreen({
   const [joinLines, setJoinLines] = useState(true);
   const [boldFonts, setBoldFonts] = useState(false);
   const [embedImages, setEmbedImages] = useState(true);
-  const [cliPath, setCliPath] = useState("(auto-detect)");
 
   const browseDir = async () => {
     const sel = await open({ directory: true });
@@ -545,6 +548,7 @@ function SettingsScreen({
   const save = () => {
     localStorage.setItem("pdf2epub.backend", backendPref);
     localStorage.setItem("pdf2epub.outputDir", outputDir);
+    localStorage.setItem("pdf2epub.cliPath", cliPath);
     // 注意:Token 不落库 — CLI 从项目根 apikey.json 读取(见 README)
   };
 
@@ -674,7 +678,7 @@ function SettingsScreen({
                   type="text"
                   value={cliPath}
                   onChange={e => setCliPath(e.target.value)}
-                  placeholder="ebook-converter (auto-detect from project .venv)"
+                  placeholder="ebook-converter (留空=自动探测项目 .venv)"
                   className="w-full px-3 py-2 border border-[var(--border)] bg-[var(--card)] text-[var(--foreground)] font-mono text-[11px] focus:outline-none focus:border-[#FF4D00] transition-colors placeholder:text-[var(--muted-foreground)]/50"
                 />
               </div>
@@ -776,6 +780,9 @@ export default function App() {
   const [outputDir, setOutputDir] = useState<string>(
     () => localStorage.getItem("pdf2epub.outputDir") || "output",
   );
+  const [cliPath, setCliPath] = useState<string>(
+    () => localStorage.getItem("pdf2epub.cliPath") || "",
+  );
   const canceled = useRef<Set<string>>(new Set());
 
   // 监听 CLI 进度事件
@@ -809,6 +816,7 @@ export default function App() {
         outputDir,
         backend: backendPref === "auto" ? null : backendPref,
         retries: 1,
+        cliPath: cliPath || null,
       });
       if (canceled.current.has(f.id)) return;
       setFiles(prev => prev.map(x => x.path === f.path ? {
@@ -822,7 +830,7 @@ export default function App() {
       if (canceled.current.has(f.id)) return;
       setFiles(prev => prev.map(x => x.path === f.path ? { ...x, status: "failed" as FileStatus, error: String(err) } : x));
     }
-  }, [outputDir, backendPref]);
+  }, [outputDir, backendPref, cliPath]);
 
   const addFiles = useCallback(async (paths: string[]) => {
     const newFiles: QueueFile[] = paths.map((p, i) => ({
@@ -951,6 +959,8 @@ export default function App() {
               setBackendPref={setBackendPref}
               outputDir={outputDir}
               setOutputDir={setOutputDir}
+              cliPath={cliPath}
+              setCliPath={setCliPath}
             />
           )}
         </div>
