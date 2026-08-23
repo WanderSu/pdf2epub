@@ -35,3 +35,8 @@ tests/.pytest_cache/
 # IDE
 .idea/
 .vscode/
+
+# 桌面端构建产物(绿色版 exe)
+/pdf2epub.exe
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
