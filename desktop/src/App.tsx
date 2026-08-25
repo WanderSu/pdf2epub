@@ -240,6 +240,7 @@ function DropZoneScreen({ onPick, recent }: { onPick: () => void; recent: QueueF
 // ── SCREEN 2: CONVERSION QUEUE ───────────────────────────────────────────────
 
 function QueueScreen({ files, onCancel }: { files: QueueFile[]; onCancel: (id: string) => void }) {
+  const [expandedLog, setExpandedLog] = useState<string | null>(null);
   const done = files.filter(f => f.status === "done").length;
   const total = files.length;
   const overallPct = total === 0
@@ -319,13 +320,25 @@ function QueueScreen({ files, onCancel }: { files: QueueFile[]; onCancel: (id: s
                         style={{ width: `${file.progress}%` }}
                       />
                     </div>
-                    {file.status === "converting" && file.log.length > 0 && (
-                      <div className="mt-1 font-mono text-[9px] text-[var(--muted-foreground)] truncate">
-                        {file.log[file.log.length - 1]}
+                    {file.status !== "pending" && file.log.length > 0 && (
+                      <div className="mt-1">
+                        <button
+                          onClick={() => setExpandedLog(expandedLog === file.id ? null : file.id)}
+                          className="w-full text-left font-mono text-[10px] text-[var(--muted-foreground)] truncate hover:text-[var(--foreground)] transition-colors"
+                          title={expandedLog === file.id ? "收起日志" : "展开完整日志"}
+                        >
+                          {expandedLog === file.id ? "▼ " : "▸ "}
+                          {file.log[file.log.length - 1]}
+                        </button>
+                        {expandedLog === file.id && (
+                          <pre className="mt-1 max-h-44 overflow-auto font-mono text-[10px] leading-relaxed text-[var(--muted-foreground)] whitespace-pre-wrap border border-[var(--border)] bg-[var(--muted)] p-2">
+                            {file.log.join("\n")}
+                          </pre>
+                        )}
                       </div>
                     )}
                     {file.error && (
-                      <div className="mt-1 font-mono text-[9px] text-[#CC1A1A] truncate">
+                      <div className="mt-1 font-mono text-[10px] text-[#CC1A1A] truncate">
                         {file.error}
                       </div>
                     )}

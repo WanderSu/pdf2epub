@@ -3,6 +3,9 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 use tauri::{AppHandle, Emitter, Manager, State};
 
 // ---------- 状态 ----------
@@ -89,6 +92,10 @@ async fn convert_file(
         _ => state.cli_path.lock().unwrap().clone(),
     };
     let mut cmd = Command::new(&cli);
+    // 隐藏 CLI 子进程的控制台黑窗口(ebook-converter.exe 是控制台程序,
+    // 从 GUI 进程 spawn 默认会弹出一个空终端;输出经 stdout 管道实时推给前端)
+    #[cfg(windows)]
+    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     cmd.arg(&file_path)
         .arg("-o")
         .arg(&output_dir)
