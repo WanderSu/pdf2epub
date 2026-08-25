@@ -11,6 +11,7 @@ mineru:
   enable_formula: true
   enable_table: true
   language: ch
+  max_pages_per_task: 200   # 官方单任务页数上限;超过自动按 page_ranges 分片提交并合并
 
 # 本地 PyMuPDF4LLM
 pymupdf:

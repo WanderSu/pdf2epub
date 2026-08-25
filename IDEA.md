@@ -439,6 +439,8 @@ API Key 和 Endpoint 不得硬编码。
 
 > 补充：MinerU 解析失败时(如伪文字层 PDF)自动降级为「渲染纯图(JPEG 压缩)后重试」,已固化在后端内。
 
+> 补充：**>200 页自动分片(2026-08 实现)**。MinerU 官方精准解析 API 单任务限制 ≤200 页 / ≤200MB(超限错误码 `-60006`,官方建议"拆分文件或使用 page_ranges")。实现采用 page_ranges 方案:`MinerUAdapter` 提交 PDF 时按 `mineru.max_pages_per_task`(默认 200)切分为多个 files 条目(如 302 页 → `1-200`、`201-302`),同一 batch 并行解析;条目名带 `_partN` 后缀 + `data_id`,轮询按 data_id/file_name 区分;结果下载后按段序合并为统一 `work/book.md` + `work/images/`(跨段图片重名自动加 `p{N}_` 前缀并替换引用),并加 `<!-- page-group N -->` 页标记(与 hybrid 流程一致)。CLI 与桌面端(Tauri 壳为 CLI 子进程)均自动生效。
+
 ---
 
 ## 14. CLI
@@ -703,6 +705,8 @@ hybrid
 - ✅ 凭证支持项目根 `apikey.json`(环境变量优先,已 gitignore)
 - ✅ 伪文字层检测(乱码率)+ 运行时交互询问是否 OCR
 - ✅ MinerU 解析失败自动降级「渲染纯图(JPEG)重试」
+- ✅ MinerU >200 页自动分片(page_ranges 方案,详见 §13 补充;CLI/桌面端均生效)
+- ✅ 桌面端:CLI 子进程隐藏控制台黑窗口(`CREATE_NO_WINDOW`)+ CLI stdout 行缓冲,前端日志实时显示、可点击展开完整日志
 - ✅ 中文清理增强:页码剔除、跨页断行连接(结构感知)、中文空格修正、强调字体粗体标注
 - ✅ 桌面端:Tauri 2 + React,UI 源自 Figma 设计稿(瑞士国际主义风格),桥接 CLI 子进程 + 进度事件
 - ✅ 工具链:Windows MSVC(Visual Studio Build Tools + rustup stable-x86_64-pc-windows-msvc)

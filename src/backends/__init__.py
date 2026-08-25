@@ -35,6 +35,7 @@ def get_backend(name: str, config: dict[str, Any] | None = None) -> Backend:
             enable_formula=config.get("enable_formula", True),
             enable_table=config.get("enable_table", True),
             language=config.get("language", "ch"),
+            max_pages_per_task=config.get("max_pages_per_task", 200),
         )
     if name == "paddleocr":
         return PaddleOCRAdapter(
