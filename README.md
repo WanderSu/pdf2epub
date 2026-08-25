@@ -35,6 +35,8 @@
 | 📇 **元数据** | 文件名符合「标题 - 作者」自动嵌入 `dc:title` / `dc:creator` |
 | 🧹 **智能清理** | 页码剔除、跨页断行连接、中文空格修正、强调字体标注粗体 |
 | 📦 **批处理** | 失败重试(指数退避)、跳过已完成、断点续跑、单文件失败不中断 |
+| 📚 **>200 页自动分片** | MinerU 单任务限 200 页/200MB;超大书自动按 page_ranges 分段提交、并行解析、按序合并 |
+| 🎨 **精装书级排版** | 内置 book.css:中文衬线正文、首行缩进、标题体系、公式/表格/图片保护 |
 
 ### 工作流
 
@@ -51,9 +53,14 @@ MinerU 输出 ──► full.md + images ──┤      (自动:页码/断行/�
 
 ### 方式一:桌面端(推荐)
 
-从 [Releases](https://github.com/WanderSu/pdf2epub/releases) 下载 `pdf2epub.exe`(绿色版,免安装)。
+从 [Releases](https://github.com/WanderSu/pdf2epub/releases) 下载 `pdf2epub-v0.1.1-win-x64.zip` 并解压到任意目录,双击 `pdf2epub.exe`。
 
-> 💡 **放到项目根目录**运行,自动定位转换引擎;放其他位置需在 Settings 中手动填写 CLI 路径。
+> 💡 压缩包内含转换引擎 `cli.exe`(已内置 Python 运行环境,免安装 Python);保持 `pdf2epub.exe`、`cli.exe`、`config/` 三者同级即可运行,无需放在项目根。
+
+**首次使用两步**:
+
+1. 安装 [Pandoc](https://pandoc.org/installing.html)(EPUB 生成引擎,必需):`winget install pandoc`
+2. 在解压目录创建 `apikey.json`(云端 OCR 凭证,模板见下方「准备凭证」)
 
 - **Import** — 拖放 / 选择 PDF、Markdown
 - **Queue** — 转换队列,实时进度、日志、后端徽标
@@ -143,12 +150,14 @@ ebook-converter <文件或目录>... [-o 输出目录] [选项]
 
 ```yaml
 ocr_backend: mineru          # 默认 OCR 后端:mineru / paddleocr
+mineru:
+  max_pages_per_task: 200    # MinerU 单任务页数上限;超过自动分片提交(page_ranges)
 pymupdf:
   write_images: true
   bold_fonts: [...]          # 强调字体列表(楷体/中宋等),其文字标注为 **粗体**
 ```
 
-`config/book.css` — EPUB 全局样式(中文排版优先、图片自适应、公式区保护),可按需修改。
+`config/book.css` — EPUB 全局样式(精装书级中文排版:衬线正文、首行缩进、标题体系、公式/表格/图片保护),可按需修改。
 
 ---
 
@@ -173,6 +182,12 @@ OCR 是云端按页计费服务。确认这本书值得转再跑;`--retries 0` �
 </details>
 
 <details>
+<summary><b>超过 200 页的书能转吗?</b></summary>
+
+可以。MinerU 单任务限 200 页,工具自动按 200 页分段(page_ranges)并行解析后按序合并,日志会显示「自动分片 N 段」。注意云端每日有 1000 页优先额度。
+</details>
+
+<details>
 <summary><b>转换结果有乱码 / 页码 / 断行问题?</b></summary>
 
 `src/markdown/cleaner.py` 负责清理。若你的书出现误删/误拼,调整其中的规则或反馈维护者。
@@ -191,6 +206,7 @@ OCR 是云端按页计费服务。确认这本书值得转再跑;`--retries 0` �
 - PyMuPDF4LLM 提取行间公式为图片(非 LaTeX);云端 OCR 的 LaTeX 公式可正常转为 MathML
 - 双栏 PDF 偶发同行合并(边缘情况)
 - 页码剔除 / 断行拼接为启发式规则,极端排版可能有误伤
+- MinerU 分片后,跨段边界的表格 / 段落可能被截断(清理规则可部分弥补)
 - EPUBCheck 未安装,未做 EPUB 标准合规验证
 
 ---

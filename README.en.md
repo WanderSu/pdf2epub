@@ -28,6 +28,8 @@ Existing Markdown ────────────────────�
 - **Metadata**: filenames matching `Title - Author` are parsed into EPUB `dc:title` / `dc:creator`
 - **Cleaning**: page-number removal, cross-page line joining, CJK spacing fixes, emphasis-font → bold, image-reference validation
 - **Batch mode**: exponential-backoff retries, skip completed, resume support, per-file failure isolation
+- **>200-page auto-sharding**: MinerU caps a single task at 200 pages / 200MB; larger books are submitted in page-range chunks, parsed in parallel, then merged in order
+- **Premium typesetting**: built-in book.css — CJK serif body, first-line indent, heading hierarchy, formula/table/image protection
 
 ## Desktop app (recommended)
 
@@ -40,7 +42,14 @@ Built with **Tauri 2 + React**, UI from a Figma design (Swiss International styl
 
 ### Install & run
 
-Grab `pdf2epub.exe` from [Releases](https://github.com/WanderSu/pdf2epub/releases) (portable, no installer). **Put it in the project root** so it auto-locates the converter engine in `.venv` (else set the CLI path manually in Settings).
+Grab `pdf2epub-v0.1.1-win-x64.zip` from [Releases](https://github.com/WanderSu/pdf2epub/releases) and extract it anywhere, then double-click `pdf2epub.exe`.
+
+> The zip bundles the converter engine (`cli.exe`, self-contained Python — no Python install needed). Keep `pdf2epub.exe`, `cli.exe` and `config/` in the same folder; no need to place it in the project root.
+
+**First run (two steps):**
+
+1. Install [Pandoc](https://pandoc.org/installing.html) (the EPUB engine, required): `winget install pandoc`
+2. Create `apikey.json` in the extracted folder (cloud OCR credentials, template below)
 
 ### Build from source
 
@@ -130,12 +139,14 @@ ebook-converter <files-or-dirs>... [-o outdir] [options]
 
 ```yaml
 ocr_backend: mineru          # default OCR backend: mineru / paddleocr
+mineru:
+  max_pages_per_task: 200    # MinerU per-task page cap; auto-shards above this (page_ranges)
 pymupdf:
   write_images: true
   bold_fonts: [...]          # fonts whose text becomes **bold** in output
 ```
 
-`config/book.css` — EPUB-wide styling (CJK-first, responsive images, formula protection).
+`config/book.css` — EPUB-wide styling (premium CJK typesetting: serif body, first-line indent, heading hierarchy, formula/table/image protection).
 
 ## Verify
 
@@ -150,6 +161,7 @@ Always open the result in a real reader (Apple Books / WeRead / KOReader) for a 
 - **Slow / token-hungry scans?** OCR is a metered cloud service. `--retries 0` avoids wasted retries.
 - **"Corrupted text layer" but want local?** Pick `[3]` at the prompt, or `--backend pymupdf` (result may be unreadable).
 - **MinerU "parsing failed"?** The tool auto-falls-back to rendered-image OCR; try `--backend paddleocr` if it still fails.
+- **Books over 200 pages?** Fine — the tool auto-shards by 200 pages (page_ranges), parses in parallel and merges in order; the log shows "auto-sharded into N chunks". Note the cloud quota is 1000 pages/day at priority.
 - **Wrong title/author?** Name files `Title - Author.pdf`; otherwise the EPUB title falls back to the filename.
 
 ## Known limitations
@@ -157,6 +169,7 @@ Always open the result in a real reader (Apple Books / WeRead / KOReader) for a 
 - PyMuPDF4LLM renders display formulas as images (not LaTeX); cloud OCR formulas convert to MathML correctly
 - Two-column PDFs occasionally merge the last line
 - Cleaning rules are heuristic; extreme layouts may mis-join or mis-remove
+- After sharding, tables/paragraphs spanning a chunk boundary may be cut (cleaning rules partly compensate)
 - EPUBCheck not bundled; standard-compliance validation is on the user side
 
 ## Directory layout
