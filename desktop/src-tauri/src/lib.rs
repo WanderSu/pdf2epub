@@ -24,9 +24,10 @@ impl Default for CliConfig {
 /// 探测 ebook-converter 可执行文件,优先级:
 /// 1. 设置页传入的 cli_path(调用方传参)
 /// 2. 环境变量 PDF2EPUB_CLI / PDF2EPUB_HOME
-/// 3. 基于 exe 位置向上查找项目 .venv(dev 与 release 均有效)
-/// 4. 基于 cwd 的候选路径
-/// 5. 兜底:PATH 中的 ebook-converter
+/// 3. 与 exe 同目录的 cli.exe(发布形态:绿色版 = pdf2epub.exe + cli.exe 同级)
+/// 4. 基于 exe 位置向上查找项目 .venv(dev 与 release 均有效)
+/// 5. 基于 cwd 的候选路径
+/// 6. 兜底:PATH 中的 ebook-converter
 fn resolve_cli_path() -> String {
     if let Ok(p) = std::env::var("PDF2EPUB_CLI") {
         if !p.is_empty() {
@@ -37,6 +38,15 @@ fn resolve_cli_path() -> String {
         let home = PathBuf::from(home);
         for rel in [".venv/Scripts/ebook-converter.exe", ".venv/Scripts/ebook-converter"] {
             let p = home.join(rel);
+            if p.exists() {
+                return p.to_string_lossy().into_owned();
+            }
+        }
+    }
+    // 发布形态:exe 同目录的 cli.exe
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let p = dir.join("cli.exe");
             if p.exists() {
                 return p.to_string_lossy().into_owned();
             }
@@ -96,6 +106,15 @@ async fn convert_file(
     // 从 GUI 进程 spawn 默认会弹出一个空终端;输出经 stdout 管道实时推给前端)
     #[cfg(windows)]
     cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    // 发布形态(cli.exe 与壳同目录):固定子进程 cwd 为该目录,
+    // 保证 CLI 的 config_dir() 能定位到同级的 config/(config.yaml / book.css)
+    let cli_dir = PathBuf::from(&cli).parent().map(|p| p.to_path_buf());
+    let exe_dir = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf()));
+    if cli_dir.is_some() && cli_dir == exe_dir {
+        if let Some(dir) = &cli_dir {
+            cmd.current_dir(dir);
+        }
+    }
     cmd.arg(&file_path)
         .arg("-o")
         .arg(&output_dir)
