@@ -37,6 +37,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # stdout 被桌面端管道捕获时默认块缓冲,进度日志不实时;强制行缓冲
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, OSError):
+        pass
     args = build_parser().parse_args(argv)
 
     if args.no_log:
