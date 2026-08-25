@@ -196,6 +196,120 @@ fn set_cli_path(app: AppHandle, path: String) -> Result<(), String> {
     Ok(())
 }
 
+// ---------- 环境检查(设置页) ----------
+
+#[derive(serde::Serialize)]
+struct EnvItem {
+    name: String,
+    status: String, // "ok" | "missing"
+    version: Option<String>,
+    path: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct EnvCheckResult {
+    pandoc: EnvItem,
+    engine: EnvItem,
+    mineru_configured: bool,
+    paddle_configured: bool,
+}
+
+/// 探测 pandoc(pandoc --version 首行)。
+fn detect_pandoc() -> EnvItem {
+    let mut cmd = Command::new("pandoc");
+    cmd.arg("--version");
+    #[cfg(windows)]
+    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    match cmd.output() {
+        Ok(out) if out.status.success() => {
+            let first = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            EnvItem {
+                name: "Pandoc".into(),
+                status: "ok".into(),
+                version: Some(if first.is_empty() { "installed".into() } else { first }),
+                path: None,
+            }
+        }
+        _ => EnvItem {
+            name: "Pandoc".into(),
+            status: "missing".into(),
+            version: None,
+            path: None,
+        },
+    }
+}
+
+/// 读取 apikey.json 中两个凭证键是否存在且非空(不返回值本身)。
+fn detect_apikey() -> (bool, bool) {
+    let mut bases: Vec<PathBuf> = Vec::new();
+    if let Ok(c) = std::env::current_dir() {
+        bases.push(c);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(d) = exe.parent() {
+            bases.push(d.to_path_buf());
+        }
+    }
+    for base in bases {
+        let f = base.join("apikey.json");
+        let Ok(text) = std::fs::read_to_string(&f) else { continue };
+        let Ok(data) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let has = |k: &str| {
+            data.get(k)
+                .and_then(|v| v.as_str())
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false)
+        };
+        return (has("MinerU"), has("PaddleOCR-VL"));
+    }
+    (false, false)
+}
+
+/// 环境检查: Pandoc / 转换引擎 / 凭证状态(设置页 ENVIRONMENT CHECK)。
+#[tauri::command]
+fn check_env(app: AppHandle) -> EnvCheckResult {
+    let state = app.state::<CliConfig>();
+    let cli = state.cli_path.lock().unwrap().clone();
+    let engine = if PathBuf::from(&cli).exists() {
+        EnvItem {
+            name: "Converter engine".into(),
+            status: "ok".into(),
+            version: None,
+            path: Some(cli.clone()),
+        }
+    } else if !cli.contains(['/', '\\']) {
+        // PATH 兜底:裸命令名,视为可解析
+        EnvItem {
+            name: "Converter engine".into(),
+            status: "ok".into(),
+            version: None,
+            path: Some("PATH".into()),
+        }
+    } else {
+        EnvItem {
+            name: "Converter engine".into(),
+            status: "missing".into(),
+            version: None,
+            path: Some(cli.clone()),
+        }
+    };
+    let pandoc = detect_pandoc();
+    let (mineru_configured, paddle_configured) = detect_apikey();
+    EnvCheckResult {
+        pandoc,
+        engine,
+        mineru_configured,
+        paddle_configured,
+    }
+}
+
 // ---------- 入口 ----------
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -204,7 +318,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(CliConfig::default())
-        .invoke_handler(tauri::generate_handler![convert_file, set_cli_path])
+        .invoke_handler(tauri::generate_handler![convert_file, set_cli_path, check_env])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
