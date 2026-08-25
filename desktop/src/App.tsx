@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 
 // ── I18N ─────────────────────────────────────────────────────────────────────
 
@@ -285,10 +286,17 @@ interface LibraryBook {
   size: string;
   pages: number;
   date: string;
-  type: FileType;
-  backend: Backend;
+  type?: FileType;
+  backend?: Backend;
   epub: string;
+  path?: string;
+}
+
+interface EpubEntry {
   path: string;
+  name: string;
+  size: number;
+  mtime: number;
 }
 
 interface EnvState {
@@ -382,6 +390,12 @@ function parseTitleAuthor(name: string): { title: string; author: string } {
 
 const freshStages = (): StageNode[] => STAGE_KEYS.map(k => ({ key: k, state: "pending" as StageState }));
 
+function formatSize(bytes: number): string {
+  if (!bytes) return "—";
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
 // ── SHARED COMPONENTS ─────────────────────────────────────────────────────────
 
 function CrosshairMark({ size = 12, className = "" }: { size?: number; className?: string }) {
@@ -467,7 +481,14 @@ const BACKEND_STYLES: Record<Backend, string> = {
   Auto: "border-[#FF4D00] text-[#FF4D00] bg-[#FF4D00]/8",
 };
 
-function BackendBadge({ backend }: { backend: Backend }) {
+function BackendBadge({ backend }: { backend?: Backend }) {
+  if (!backend) {
+    return (
+      <span className="font-mono text-[8px] tracking-[0.08em] px-1.5 py-0.5 border border-dashed border-[var(--border)] text-[var(--muted-foreground)] shrink-0">
+        —
+      </span>
+    );
+  }
   const label = backend === "PaddleOCR" ? "PADDLE" : backend.toUpperCase();
   return (
     <span className={`font-mono text-[8px] tracking-[0.08em] px-1.5 py-0.5 border shrink-0 ${BACKEND_STYLES[backend]}`}>
@@ -509,7 +530,7 @@ function StageStepper({ stages, shards }: { stages: StageNode[]; shards?: { curr
       })}
       {shards && (
         <span className="ml-3 font-mono text-[8px] px-1.5 py-0.5 border border-[#FF4D00]/50 text-[#FF4D00] tracking-[0.04em]">
-          {shards.current}/{shards.total} SHARDS
+          {shards.total} SHARDS
         </span>
       )}
     </div>
@@ -648,14 +669,14 @@ function ConsolePanel({ expanded, setExpanded, lang, lines }: {
 
 // ── SCREEN 1: DROP ZONE ───────────────────────────────────────────────────────
 
-function DropZoneScreen({ lang, recent, preview, onPick }: {
+function DropZoneScreen({ lang, recent, preview, onPick, dragging }: {
   lang: Lang;
   recent: QueueFile[];
   preview: QueueFile | null;
   onPick: () => void;
+  dragging: boolean;
 }) {
   const t = T[lang].import;
-  const [dragging, setDragging] = useState(false);
 
   const previewDesc = preview
     ? preview.type === "TXT" ? t.preview.txtDesc
@@ -679,9 +700,6 @@ function DropZoneScreen({ lang, recent, preview, onPick }: {
             className={`relative w-[420px] h-[340px] flex flex-col items-center justify-center gap-5 cursor-pointer transition-colors
               ${dragging ? "border border-[#FF4D00] bg-[#FF4D00]/5" : "border border-dashed border-[var(--border)] hover:border-[var(--foreground)]/40"}`}
             style={{ borderWidth: "1.5px" }}
-            onDragOver={e => { e.preventDefault(); setDragging(true); }}
-            onDragLeave={() => setDragging(false)}
-            onDrop={(e) => { e.preventDefault(); setDragging(false); onPick(); }}
             onClick={onPick}
             role="button"
             tabIndex={0}
@@ -902,7 +920,8 @@ function QueueScreen({ lang, files, consoleLines, consoleExpanded, setConsoleExp
               <button
                 onClick={action}
                 disabled={disabled}
-                className={`font-mono text-[9px] tracking-[0.1em] uppercase transition-colors ${lang === "zh" ? "cjk-label font-medium" : ""} ${disabled ? "text-[var(--muted-foreground)]/40 cursor-default" : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"}`}
+                title={disabled ? (lang === "zh" ? "当前无可操作对象" : "Nothing to act on") : undefined}
+                className={`font-mono text-[9px] tracking-[0.1em] uppercase transition-colors ${lang === "zh" ? "cjk-label font-medium" : ""} ${disabled ? "opacity-40 cursor-not-allowed" : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"}`}
               >
                 {label}
               </button>
@@ -1164,10 +1183,14 @@ function LibraryScreen({ lang, books, outputDir, onRefresh, onOpenFolder, onOpen
                     <button onClick={() => onOpenEpub(book.epub)} className={`text-[9px] text-[var(--foreground)] uppercase hover:text-[#FF4D00] transition-colors ${lang === "zh" ? "cjk-label font-mono" : "font-mono tracking-[0.08em]"}`}>
                       {t.openEpub}
                     </button>
-                    <div className="w-px h-3 bg-[var(--border)]" />
-                    <button onClick={() => onReconvert(book.path)} className={`text-[9px] text-[var(--muted-foreground)] uppercase hover:text-[#FF4D00] transition-colors ${lang === "zh" ? "cjk-label font-mono" : "font-mono tracking-[0.08em]"}`}>
-                      {t.reconvert}
-                    </button>
+                    {book.path && (
+                      <>
+                        <div className="w-px h-3 bg-[var(--border)]" />
+                        <button onClick={() => onReconvert(book.path!)} className={`text-[9px] text-[var(--muted-foreground)] uppercase hover:text-[#FF4D00] transition-colors ${lang === "zh" ? "cjk-label font-mono" : "font-mono tracking-[0.08em]"}`}>
+                          {t.reconvert}
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1483,7 +1506,7 @@ function SettingsScreen({ lang, setLang, darkMode, setDarkMode, backendPref, set
 // ── APP SHELL ─────────────────────────────────────────────────────────────────
 
 const NAV_SCREENS: Screen[] = ["drop", "queue", "library", "settings"];
-const APP_VERSION = "v0.2.0";
+const APP_VERSION = "v0.2.1";
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>("drop");
@@ -1493,6 +1516,8 @@ export default function App() {
   const [files, setFiles] = useState<QueueFile[]>([]);
   const [consoleLines, setConsoleLines] = useState<ConsoleLine[]>([]);
   const [env, setEnv] = useState<EnvState | null>(null);
+  const [diskBooks, setDiskBooks] = useState<EpubEntry[]>([]);
+  const [dragging, setDragging] = useState(false);
   const [backendPref, setBackendPref] = useState<BackendPref>(
     () => (localStorage.getItem("pdf2epub.backend") as BackendPref) || "auto",
   );
@@ -1521,9 +1546,7 @@ export default function App() {
         const type = f.type === "MD" ? f.type : parseTypeFromLine(line, f.name) ?? f.type;
         const backend = parseBackendFromLine(line, f.backend);
         const pages = parsePagesFromLine(line, f.pages);
-        const progress = shards && shards.total > 1
-          ? Math.max(f.progress, 20 + ((shards.current - 1) / shards.total) * 55)
-          : Math.min(95, f.progress + 5);
+        const progress = Math.min(95, f.progress + 5);
         return {
           ...f,
           progress,
@@ -1555,6 +1578,21 @@ export default function App() {
     invoke<EnvState>("check_env").then(setEnv).catch(() => setEnv(null));
   }, [screen]);
 
+  const loadDiskBooks = useCallback(async () => {
+    try {
+      const list = await invoke<EpubEntry[]>("list_epubs", { outputDir });
+      setDiskBooks(list);
+    } catch {
+      setDiskBooks([]);
+    }
+  }, [outputDir]);
+
+  // 书库打开时刷新磁盘扫描
+  useEffect(() => {
+    if (screen !== "library") return;
+    void loadDiskBooks();
+  }, [screen, loadDiskBooks]);
+
   const convertOne = useCallback(async (f: QueueFile, backendOverride?: string) => {
     if (canceled.current.has(f.id)) return;
     canceled.current.delete(f.id);
@@ -1584,6 +1622,7 @@ export default function App() {
         epub: res.epub ?? undefined,
         error: res.error ?? undefined,
         date: res.success ? new Date().toISOString().slice(0, 10) : x.date,
+        shards: res.success ? undefined : x.shards,
         stages: res.success
           ? x.stages.map(s => ({ ...s, state: "done" as StageState }))
           : x.stages.map(s => s.state === "active" ? { ...s, state: "failed" as StageState } : s),
@@ -1623,6 +1662,26 @@ export default function App() {
       await convertOne(f);
     }
   }, [convertOne]);
+
+  // 原生拖放(Tauri 事件,WebView2 下 HTML5 DnD 拿不到文件路径)
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    getCurrentWebview().onDragDropEvent((event) => {
+      const p = event.payload;
+      if (p.type === "enter" || p.type === "over") {
+        setDragging(true);
+      } else if (p.type === "leave") {
+        setDragging(false);
+      } else if (p.type === "drop") {
+        setDragging(false);
+        if (p.paths.length > 0) {
+          void addFiles(p.paths);
+          setScreen("queue");
+        }
+      }
+    }).then(un => { unlisten = un; });
+    return () => { unlisten?.(); };
+  }, [addFiles]);
 
   const pickFiles = useCallback(async () => {
     const sel = await open({
@@ -1697,7 +1756,7 @@ export default function App() {
     } catch { /* 忽略 */ }
   }, [backendPref, outputDir, cliPath]);
 
-  const books: LibraryBook[] = files
+  const sessionBooks: LibraryBook[] = files
     .filter(f => f.status === "done" && f.epub)
     .map(f => {
       const { title, author } = parseTitleAuthor(f.name);
@@ -1708,19 +1767,42 @@ export default function App() {
         size: f.size,
         pages: f.pages,
         date: f.date ?? new Date().toISOString().slice(0, 10),
-        type: f.type ?? "TXT",
+        type: f.type,
         backend: f.backend,
         epub: f.epub!,
         path: f.path,
       };
     });
 
+  // 输出目录持久化扫描(session 内已完成的优先,避免重复)
+  const diskOnlyBooks: LibraryBook[] = diskBooks
+    .filter(d => !sessionBooks.some(s => s.epub === d.path))
+    .map(d => {
+      const { title, author } = parseTitleAuthor(d.name.replace(/\.epub$/i, ""));
+      return {
+        id: `disk-${d.path}`,
+        title,
+        author,
+        size: formatSize(d.size),
+        pages: 0,
+        date: d.mtime ? new Date(d.mtime * 1000).toISOString().slice(0, 10) : "",
+        type: undefined,
+        backend: undefined,
+        epub: d.path,
+      };
+    });
+
+  const books = [...diskOnlyBooks, ...sessionBooks];
+
   const openEpub = useCallback(async (epub: string) => {
     try { await openPath(epub); } catch (e) { console.error("open epub failed", e); }
   }, []);
   const openFolder = useCallback(async (epub: string) => {
-    try { await revealItemInDir(epub); } catch (e) { console.error("reveal failed", e); }
-  }, []);
+    try {
+      if (epub) await revealItemInDir(epub);
+      else await openPath(outputDir);
+    } catch (e) { console.error("reveal failed", e); }
+  }, [outputDir]);
 
   const convertingCount = files.filter(f => f.status === "converting").length;
   const activeFile = files.find(f => f.status === "converting");
@@ -1802,7 +1884,7 @@ export default function App() {
       <main className="flex-1 flex overflow-hidden min-h-0">
         <div className="flex-1 flex flex-col overflow-hidden">
           {screen === "drop" && (
-            <DropZoneScreen lang={lang} recent={files.slice(-5).reverse()} preview={previewFile} onPick={pickFiles} />
+            <DropZoneScreen lang={lang} recent={files.slice(-5).reverse()} preview={previewFile} onPick={pickFiles} dragging={dragging} />
           )}
           {screen === "queue" && (
             <QueueScreen
@@ -1824,7 +1906,7 @@ export default function App() {
               lang={lang}
               books={books}
               outputDir={outputDir}
-              onRefresh={() => setFiles(prev => [...prev])}
+              onRefresh={() => void loadDiskBooks()}
               onOpenFolder={openFolder}
               onOpenEpub={openEpub}
               onReconvert={(p) => {
