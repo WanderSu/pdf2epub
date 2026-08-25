@@ -292,11 +292,13 @@ interface LibraryBook {
   path?: string;
 }
 
-interface EpubEntry {
+interface LibEntry {
   path: string;
-  name: string;
+  title: string;
+  author: string;
   size: number;
   mtime: number;
+  added_at: number;
 }
 
 interface EnvState {
@@ -381,11 +383,8 @@ function parseWarningFromLine(line: string): boolean {
   return /伪文字层|疑似|乱码|garbage/i.test(line);
 }
 
-function parseTitleAuthor(name: string): { title: string; author: string } {
-  const stem = name.replace(/\.(pdf|md|markdown)$/i, "");
-  const m = stem.match(/^(.+?)\s+-\s+(.+)$/);
-  if (m) return { title: m[1].trim(), author: m[2].trim() };
-  return { title: stem, author: "" };
+function normPath(p: string): string {
+  return p.replace(/\\/g, "/").toLowerCase();
 }
 
 const freshStages = (): StageNode[] => STAGE_KEYS.map(k => ({ key: k, state: "pending" as StageState }));
@@ -1516,7 +1515,7 @@ export default function App() {
   const [files, setFiles] = useState<QueueFile[]>([]);
   const [consoleLines, setConsoleLines] = useState<ConsoleLine[]>([]);
   const [env, setEnv] = useState<EnvState | null>(null);
-  const [diskBooks, setDiskBooks] = useState<EpubEntry[]>([]);
+  const [diskBooks, setDiskBooks] = useState<LibEntry[]>([]);
   const [dragging, setDragging] = useState(false);
   const [backendPref, setBackendPref] = useState<BackendPref>(
     () => (localStorage.getItem("pdf2epub.backend") as BackendPref) || "auto",
@@ -1578,20 +1577,20 @@ export default function App() {
     invoke<EnvState>("check_env").then(setEnv).catch(() => setEnv(null));
   }, [screen]);
 
-  const loadDiskBooks = useCallback(async () => {
+  const loadLibrary = useCallback(async () => {
     try {
-      const list = await invoke<EpubEntry[]>("list_epubs", { outputDir });
+      const list = await invoke<LibEntry[]>("library_sync", { outputDir });
       setDiskBooks(list);
     } catch {
       setDiskBooks([]);
     }
   }, [outputDir]);
 
-  // 书库打开时刷新磁盘扫描
+  // 书库打开时刷新
   useEffect(() => {
     if (screen !== "library") return;
-    void loadDiskBooks();
-  }, [screen, loadDiskBooks]);
+    void loadLibrary();
+  }, [screen, loadLibrary]);
 
   const convertOne = useCallback(async (f: QueueFile, backendOverride?: string) => {
     if (canceled.current.has(f.id)) return;
@@ -1756,46 +1755,36 @@ export default function App() {
     } catch { /* 忽略 */ }
   }, [backendPref, outputDir, cliPath]);
 
-  const sessionBooks: LibraryBook[] = files
-    .filter(f => f.status === "done" && f.epub)
-    .map(f => {
-      const { title, author } = parseTitleAuthor(f.name);
-      return {
-        id: f.id,
-        title,
-        author,
-        size: f.size,
-        pages: f.pages,
-        date: f.date ?? new Date().toISOString().slice(0, 10),
-        type: f.type,
-        backend: f.backend,
-        epub: f.epub!,
-        path: f.path,
-      };
-    });
-
-  // 输出目录持久化扫描(session 内已完成的优先,避免重复)
-  const diskOnlyBooks: LibraryBook[] = diskBooks
-    .filter(d => !sessionBooks.some(s => s.epub === d.path))
-    .map(d => {
-      const { title, author } = parseTitleAuthor(d.name.replace(/\.epub$/i, ""));
-      return {
-        id: `disk-${d.path}`,
-        title,
-        author,
-        size: formatSize(d.size),
-        pages: 0,
-        date: d.mtime ? new Date(d.mtime * 1000).toISOString().slice(0, 10) : "",
-        type: undefined,
-        backend: undefined,
-        epub: d.path,
-      };
-    });
-
-  const books = [...diskOnlyBooks, ...sessionBooks];
+  // 书库数据源:library.json 数据库(转换完成自动入库,打开/刷新时同步)
+  const books: LibraryBook[] = diskBooks.map(b => {
+    const s = files.find(f => f.status === "done" && f.epub && normPath(f.epub) === normPath(b.path));
+    return {
+      id: b.path,
+      title: b.title || b.path.split(/[\\/]/).pop() || b.path,
+      author: b.author,
+      size: formatSize(b.size),
+      pages: s?.pages ?? 0,
+      date: b.mtime ? new Date(b.mtime * 1000).toISOString().slice(0, 10) : "",
+      type: s?.type,
+      backend: s?.backend,
+      epub: b.path,
+      path: s?.path,
+    };
+  });
 
   const openEpub = useCallback(async (epub: string) => {
-    try { await openPath(epub); } catch (e) { console.error("open epub failed", e); }
+    try {
+      await invoke("open_epub", { path: epub });
+    } catch (e) {
+      const msg = String(e);
+      console.error("open epub failed", msg);
+      const ts = new Date().toTimeString().slice(0, 8);
+      setConsoleLines(prev => [...prev.slice(-300), {
+        ts,
+        level: "ERROR" as const,
+        text: `[OPEN EPUB] ${epub} — ${msg} (no default app for .epub)`,
+      }]);
+    }
   }, []);
   const openFolder = useCallback(async (epub: string) => {
     try {
@@ -1906,7 +1895,7 @@ export default function App() {
               lang={lang}
               books={books}
               outputDir={outputDir}
-              onRefresh={() => void loadDiskBooks()}
+              onRefresh={() => void loadLibrary()}
               onOpenFolder={openFolder}
               onOpenEpub={openEpub}
               onReconvert={(p) => {
