@@ -37,6 +37,7 @@
 | 📦 **批处理** | 失败重试(指数退避)、跳过已完成、断点续跑、单文件失败不中断 |
 | 📚 **>200 页自动分片** | MinerU 单任务限 200 页/200MB;超大书自动按 page_ranges 分段提交、并行解析、按序合并 |
 | 🎨 **精装书级排版** | 内置 book.css:中文衬线正文、首行缩进、标题体系、公式/表格/图片保护 |
+| 🌐 **双语界面** | 桌面端中/英一键切换;类型徽标、阶段进度、分片指示、实时控制台、环境检查 |
 
 ### 工作流
 
@@ -53,7 +54,7 @@ MinerU 输出 ──► full.md + images ──┤      (自动:页码/断行/�
 
 ### 方式一:桌面端(推荐)
 
-从 [Releases](https://github.com/WanderSu/pdf2epub/releases) 下载 `pdf2epub-v0.1.1-win-x64.zip` 并解压到任意目录,双击 `pdf2epub.exe`。
+从 [Releases](https://github.com/WanderSu/pdf2epub/releases) 下载 `pdf2epub-v0.2.0-win-x64.zip` 并解压到任意目录,双击 `pdf2epub.exe`。
 
 > 💡 压缩包内含转换引擎 `cli.exe`(已内置 Python 运行环境,免安装 Python);保持 `pdf2epub.exe`、`cli.exe`、`config/` 三者同级即可运行,无需放在项目根。
 
@@ -62,10 +63,10 @@ MinerU 输出 ──► full.md + images ──┤      (自动:页码/断行/�
 1. 安装 [Pandoc](https://pandoc.org/installing.html)(EPUB 生成引擎,必需):`winget install pandoc`
 2. 在解压目录创建 `apikey.json`(云端 OCR 凭证,模板见下方「准备凭证」)
 
-- **Import** — 拖放 / 选择 PDF、Markdown
-- **Queue** — 转换队列,实时进度、日志、后端徽标
-- **Library** — 转换结果,一键在资源管理器中定位
-- **Settings** — OCR 后端、输出目录、CLI 路径、清理选项、主题(亮/暗)
+- **Import** — 拖放 / 选择 PDF、Markdown;类型检测预览(TXT / SCN / HYB / MD)与计划后端、分片数一目了然
+- **Queue** — 转换队列,阶段进度(DETECT → EXTRACT → CLEAN → BUILD)、分片指示、伪文字层提醒、失败重试、实时控制台日志
+- **Library** — 转换结果,一键打开 EPUB / 在资源管理器中定位 / 重新转换
+- **Settings** — OCR 后端(Auto / MinerU / PaddleOCR)、输出目录、CLI 路径、环境检查(Pandoc / 引擎 / 凭证)、清理选项、主题(亮/暗)、语言(中/英)
 
 ### 方式二:CLI
 
