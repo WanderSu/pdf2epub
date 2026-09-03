@@ -1,5 +1,5 @@
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
@@ -158,9 +158,13 @@ async fn convert_file(
     .map_err(|e| format!("任务异常: {e}"))??;
 
     let _ = app.emit("conv://done", "ok");
+    let epub = infer_epub_path(&file_path, &output_dir);
+    if let Some(ep) = &epub {
+        upsert_library(ep); // 转换产物自动入库
+    }
     Ok(ConvertResult {
         success: true,
-        epub: infer_epub_path(&file_path, &output_dir),
+        epub,
         summary: Some(result),
         error: None,
     })
@@ -185,50 +189,221 @@ fn infer_epub_path(file_path: &str, output_dir: &str) -> Option<String> {
     ))
 }
 
-// ---------- 书库扫描(输出目录持久化) ----------
+// ---------- 书库持久化(library.json 数据库) ----------
 
-#[derive(serde::Serialize)]
-struct EpubEntry {
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct LibraryEntry {
     path: String,
-    name: String,
+    title: String,
+    author: String,
     size: u64,
     mtime: u64,
+    added_at: u64,
 }
 
-/// 扫描输出目录中的 .epub 文件(书库持久化数据源)。
+fn library_db_path() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("library.json")
+}
+
+fn load_library() -> Vec<LibraryEntry> {
+    let p = library_db_path();
+    let Ok(text) = std::fs::read_to_string(&p) else {
+        return Vec::new();
+    };
+    serde_json::from_str(&text).unwrap_or_default()
+}
+
+fn save_library(entries: &[LibraryEntry]) {
+    let p = library_db_path();
+    if let Ok(json) = serde_json::to_string_pretty(entries) {
+        let _ = std::fs::write(p, json);
+    }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// 文件名 → (标题, 作者):支持「标题 - 作者」与「标题_-_作者」两种分隔。
+fn parse_title_author(name: &str) -> (String, String) {
+    let stem = name
+        .trim_end_matches(".epub")
+        .trim_end_matches(".pdf")
+        .trim_end_matches(".md")
+        .trim_end_matches(".markdown")
+        .to_string();
+    for sep in ["_-_", " - "] {
+        if let Some(idx) = stem.find(sep) {
+            let title = stem[..idx].trim();
+            let author = stem[idx + sep.len()..].trim();
+            if !title.is_empty() && !author.is_empty() {
+                return (title.to_string(), author.to_string());
+            }
+        }
+    }
+    (stem, String::new())
+}
+
+/// 提取 XML 属性值(full-path="..." 等)。
+fn extract_attr(xml: &str, attr: &str) -> Option<String> {
+    let pat = format!("{}=\"", attr);
+    let i = xml.find(&pat)?;
+    let rest = &xml[i + pat.len()..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+/// 提取 XML 标签内文本(<dc:title>...</dc:title> 等)。
+fn extract_tag(xml: &str, tag: &str) -> Option<String> {
+    let open = format!("<{}", tag);
+    let i = xml.find(&open)?;
+    let rest = &xml[i..];
+    let gt = rest.find('>')?;
+    let after = &rest[gt + 1..];
+    let close = format!("</{}>", tag);
+    let end = after.find(&close)?;
+    let s = after[..end].trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+/// 读取 EPUB 元数据(container.xml → content.opf → dc:title / dc:creator)。
+/// 失败返回空串,由调用方回退到文件名解析。
+fn epub_metadata(path: &str) -> (String, String) {
+    use std::io::Read;
+    let Ok(file) = std::fs::File::open(path) else {
+        return (String::new(), String::new());
+    };
+    let Ok(mut zip) = zip::ZipArchive::new(file) else {
+        return (String::new(), String::new());
+    };
+    let Ok(mut container) = zip.by_name("META-INF/container.xml") else {
+        return (String::new(), String::new());
+    };
+    let mut buf = String::new();
+    let _ = container.take(65536).read_to_string(&mut buf);
+    let Some(opf) = extract_attr(&buf, "full-path") else {
+        return (String::new(), String::new());
+    };
+    let opf = opf.trim_start_matches('/').to_string();
+    let Ok(mut opf_file) = zip.by_name(&opf) else {
+        return (String::new(), String::new());
+    };
+    let mut obuf = String::new();
+    let _ = opf_file.take(262144).read_to_string(&mut obuf);
+    (
+        extract_tag(&obuf, "dc:title").unwrap_or_default(),
+        extract_tag(&obuf, "dc:creator").unwrap_or_default(),
+    )
+}
+
+/// 转换完成/文件变动后更新单条记录。
+fn upsert_library(epub_path: &str) {
+    let mut entries = load_library();
+    let name = Path::new(epub_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let (title, author) = parse_title_author(&name);
+    let meta = std::fs::metadata(epub_path).ok();
+    let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+    let mtime = meta
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if let Some(existing) = entries.iter_mut().find(|e| e.path == epub_path) {
+        if existing.title.is_empty() {
+            existing.title = title;
+        }
+        if existing.author.is_empty() {
+            existing.author = author;
+        }
+        existing.size = size;
+        existing.mtime = mtime;
+    } else {
+        entries.push(LibraryEntry {
+            path: epub_path.to_string(),
+            title,
+            author,
+            size,
+            mtime,
+            added_at: now_secs(),
+        });
+    }
+    save_library(&entries);
+}
+
+/// 书库同步:剔除失效记录 + 扫描输出目录新 EPUB(读元数据/文件名)+ 写回数据库。
+/// 刷新按钮与此共用。
 #[tauri::command]
-fn list_epubs(output_dir: String) -> Vec<EpubEntry> {
+fn library_sync(output_dir: String) -> Vec<LibraryEntry> {
+    let mut entries = load_library();
+    // 1. 剔除路径已不存在的记录(手动从 output 删除的)
+    entries.retain(|e| Path::new(&e.path).exists());
+    // 2. 扫描输出目录
     let dir = PathBuf::from(&output_dir);
     let dir = if dir.is_absolute() {
         dir
     } else {
         std::env::current_dir().unwrap_or_default().join(dir)
     };
-    let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return out;
-    };
-    for entry in entries.flatten() {
-        let p = entry.path();
-        if p.extension().and_then(|e| e.to_str()) != Some("epub") {
-            continue;
-        }
-        let meta = entry.metadata().ok();
-        out.push(EpubEntry {
-            path: p.to_string_lossy().into_owned(),
-            name: p
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            size: meta.as_ref().map(|m| m.len()).unwrap_or(0),
-            mtime: meta
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|e| e.to_str()) != Some("epub") {
+                continue;
+            }
+            let path = p.to_string_lossy().into_owned();
+            let meta = entry.metadata().ok();
+            let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+            let mtime = meta
                 .and_then(|m| m.modified().ok())
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs())
-                .unwrap_or(0),
-        });
+                .unwrap_or(0);
+            if let Some(existing) = entries.iter_mut().find(|e| e.path == path) {
+                existing.size = size;
+                existing.mtime = mtime;
+                continue;
+            }
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            // 元数据优先(手动放入的 epub),失败回退文件名解析
+            let (t1, a1) = epub_metadata(&path);
+            let (t2, a2) = parse_title_author(&name);
+            entries.push(LibraryEntry {
+                path: path.clone(),
+                title: if t1.is_empty() { t2 } else { t1 },
+                author: if a1.is_empty() { a2 } else { a1 },
+                size,
+                mtime,
+                added_at: now_secs(),
+            });
+        }
     }
-    out
+    entries.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+    save_library(&entries);
+    entries
+}
+
+/// 用系统默认程序打开 EPUB(Rust 侧调用 opener 插件,绕开前端权限链;
+/// 无关联程序时错误会真实返回到前端)。
+#[tauri::command]
+fn open_epub(path: String) -> Result<(), String> {
+    tauri_plugin_opener::open_path(&path, None::<&str>).map_err(|e| e.to_string())
 }
 
 fn sanitize_name(name: &str) -> String {
@@ -375,7 +550,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(CliConfig::default())
-        .invoke_handler(tauri::generate_handler![convert_file, set_cli_path, check_env, list_epubs])
+        .invoke_handler(tauri::generate_handler![convert_file, set_cli_path, check_env, library_sync, open_epub])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
