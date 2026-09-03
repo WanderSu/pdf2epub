@@ -54,7 +54,7 @@ MinerU 输出 ──► full.md + images ──┤      (自动:页码/断行/�
 
 ### 方式一:桌面端(推荐)
 
-从 [Releases](https://github.com/WanderSu/pdf2epub/releases) 下载 `pdf2epub-v0.2.0-win-x64.zip` 并解压到任意目录,双击 `pdf2epub.exe`。
+从 [Releases](https://github.com/WanderSu/pdf2epub/releases) 下载 `pdf2epub-v0.2.1-win-x64.zip` 并解压到任意目录,双击 `pdf2epub.exe`。
 
 > 💡 压缩包内含转换引擎 `cli.exe`(已内置 Python 运行环境,免安装 Python);保持 `pdf2epub.exe`、`cli.exe`、`config/` 三者同级即可运行,无需放在项目根。
 

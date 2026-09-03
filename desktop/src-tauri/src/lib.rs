@@ -166,12 +166,69 @@ async fn convert_file(
     })
 }
 
-/// 推断 EPUB 输出路径(work 目录名规则与 batch.py 一致:stem 空格→下划线)
+/// 推断 EPUB 输出路径(work 目录名规则与 batch.py 一致:stem 空格→下划线)。
+/// 返回绝对路径:相对 output_dir 基于当前进程 cwd(GUI 与 CLI 子进程 cwd 一致)。
 fn infer_epub_path(file_path: &str, output_dir: &str) -> Option<String> {
     let path = PathBuf::from(file_path);
     let stem = path.file_stem()?.to_string_lossy().into_owned();
     let sanitized = sanitize_name(&stem);
-    Some(format!("{}/{}.epub", output_dir.trim_end_matches(['/', '\\']), sanitized))
+    let out = PathBuf::from(output_dir);
+    let base = if out.is_absolute() {
+        out
+    } else {
+        std::env::current_dir().unwrap_or_default().join(out)
+    };
+    Some(format!(
+        "{}/{}.epub",
+        base.to_string_lossy().trim_end_matches(['/', '\\']),
+        sanitized
+    ))
+}
+
+// ---------- 书库扫描(输出目录持久化) ----------
+
+#[derive(serde::Serialize)]
+struct EpubEntry {
+    path: String,
+    name: String,
+    size: u64,
+    mtime: u64,
+}
+
+/// 扫描输出目录中的 .epub 文件(书库持久化数据源)。
+#[tauri::command]
+fn list_epubs(output_dir: String) -> Vec<EpubEntry> {
+    let dir = PathBuf::from(&output_dir);
+    let dir = if dir.is_absolute() {
+        dir
+    } else {
+        std::env::current_dir().unwrap_or_default().join(dir)
+    };
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.extension().and_then(|e| e.to_str()) != Some("epub") {
+            continue;
+        }
+        let meta = entry.metadata().ok();
+        out.push(EpubEntry {
+            path: p.to_string_lossy().into_owned(),
+            name: p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            size: meta.as_ref().map(|m| m.len()).unwrap_or(0),
+            mtime: meta
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        });
+    }
+    out
 }
 
 fn sanitize_name(name: &str) -> String {
@@ -318,7 +375,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(CliConfig::default())
-        .invoke_handler(tauri::generate_handler![convert_file, set_cli_path, check_env])
+        .invoke_handler(tauri::generate_handler![convert_file, set_cli_path, check_env, list_epubs])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
