@@ -31,13 +31,42 @@ SUPPORTED_SUFFIXES = {".pdf", ".md"}
 
 
 def sanitize_name(name: str) -> str:
-    """规范化工作目录/输出文件名:空白与非法字符 → 下划线。
+    """规范化**工作目录**名:空白与非法字符 → 下划线。
     必要原因:PyMuPDF 的 C 库保存图片时会把路径中的空格替换为下划线,
     含空格的工作目录会导致图片写入失败。
     """
     name = re.sub(r"[\s]+", "_", name.strip())
     name = re.sub(r'[\\/:*?"<>|]+', "_", name)
     return name or "book"
+
+
+def output_stem(name: str) -> str:
+    """输出 EPUB 的**文件名**(保留原文空格)。
+
+    与工作目录不同,EPUB 由 Pandoc 写出、不经过 PyMuPDF,无需把空格换成下划线:
+    保留「标题 - 作者」原貌更易读,也让书库的「 - 」分隔解析与 EPUB 元数据一致。
+    仅替换 Windows 非法字符并去掉结尾空白/点。
+    """
+    name = re.sub(r'[\\/:*?"<>|]+', "_", name.strip()).rstrip(". ").strip()
+    return name or "book"
+
+
+def epub_path(source: Path, output_dir: Path) -> Path:
+    """输出 EPUB 路径(保留原文空格,与 output_stem 一致)。"""
+    return output_dir / f"{output_stem(source.stem)}.epub"
+
+
+def existing_epub(source: Path, output_dir: Path) -> Path | None:
+    """已存在的输出 EPUB:优先新命名,兼容旧版本的下划线命名。
+
+    旧版(≤v0.2.1)输出的文件名把空格 sanitize 成下划线;升级后若只认新名,
+    已完成的输出会被当成未完成而重复转换,所以跳过判断要认两种命名。
+    """
+    for p in (epub_path(source, output_dir),
+              output_dir / f"{sanitize_name(source.stem)}.epub"):
+        if p.exists():
+            return p
+    return None
 
 
 def parse_title_author(stem: str) -> tuple[str, str | None]:
@@ -86,8 +115,8 @@ def is_done(source: Path, output_dir: Path, force: bool = False) -> bool:
     """EPUB 已存在且不早于源文件 → 视为已完成。"""
     if force:
         return False
-    epub = output_dir / f"{sanitize_name(source.stem)}.epub"
-    if not epub.exists() or epub.stat().st_size == 0:
+    epub = existing_epub(source, output_dir)
+    if epub is None or epub.stat().st_size == 0:
         return False
     return epub.stat().st_mtime >= source.stat().st_mtime
 
@@ -105,11 +134,12 @@ def process_one(
     """处理单个文件(PDF 或 Markdown),带重试与跳过。"""
     t0 = time.time()
     result = TaskResult(source=source)
-    safe_stem = sanitize_name(source.stem)
+    safe_stem = sanitize_name(source.stem)   # 工作目录名(PyMuPDF 限制:不能含空格)
+    out_epub = epub_path(source, output_dir)  # 输出 EPUB(保留原文空格)
 
     if is_done(source, output_dir, force):
         result.status = "skipped"
-        result.epub = output_dir / f"{safe_stem}.epub"
+        result.epub = existing_epub(source, output_dir) or out_epub
         result.elapsed = time.time() - t0
         logger.info("跳过(已完成): %s", source.name)
         return result
@@ -121,10 +151,11 @@ def process_one(
         try:
             if source.suffix.lower() == ".md":
                 result.backend, result.pdf_type = "markdown", "markdown"
-                result = _process_markdown(source, work_root, output_dir, t0, result, safe_stem)
+                result = _process_markdown(source, work_root, output_dir, t0, result,
+                                           safe_stem, out_epub.stem)
             else:
                 result = _process_pdf(source, config, work_root, output_dir,
-                                      backend_override, t0, result, safe_stem)
+                                      backend_override, t0, result, safe_stem, out_epub.stem)
             result.status = "done"
             return result
         except Exception as e:  # noqa: BLE001 - 批处理需兜住所有失败
@@ -141,7 +172,8 @@ def process_one(
     return result
 
 
-def _process_pdf(source, config, work_root, output_dir, backend_override, t0, result, safe_stem) -> TaskResult:
+def _process_pdf(source, config, work_root, output_dir, backend_override, t0, result,
+                 safe_stem, out_name) -> TaskResult:
     work = work_root / safe_stem
     if backend_override and backend_override != "auto":
         backend = get_backend(backend_override, config.get(backend_override, {}))
@@ -163,14 +195,14 @@ def _process_pdf(source, config, work_root, output_dir, backend_override, t0, re
     clean_file(conv.book_md)
 
     title, author = parse_title_author(source.stem)
-    epub = build_epub(conv.book_md, work, output_dir, title=title, author=author)
+    epub = build_epub(conv.book_md, work, output_dir, title=title, author=author, out_name=out_name)
     result.epub = epub
     result.elapsed = time.time() - t0
     logger.info("完成(%s/%s): %s → %s", result.pdf_type, result.backend, source.name, epub.name)
     return result
 
 
-def _process_markdown(source, work_root, output_dir, t0, result, safe_stem) -> TaskResult:
+def _process_markdown(source, work_root, output_dir, t0, result, safe_stem, out_name) -> TaskResult:
     work = work_root / safe_stem
     work.mkdir(parents=True, exist_ok=True)
     # 已有 Markdown:复制到统一 work 目录(连同 images/)
@@ -188,7 +220,7 @@ def _process_markdown(source, work_root, output_dir, t0, result, safe_stem) -> T
 
     clean_file(book_md)
     title, author = parse_title_author(source.stem)
-    epub = build_epub(book_md, work, output_dir, title=title, author=author)
+    epub = build_epub(book_md, work, output_dir, title=title, author=author, out_name=out_name)
     result.epub = epub
     result.elapsed = time.time() - t0
     logger.info("完成(markdown): %s → %s", source.name, epub.name)

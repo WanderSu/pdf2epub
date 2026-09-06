@@ -130,6 +130,7 @@ async fn convert_file(
 
     let app2 = app.clone();
     let fp_for_stream = file_path.clone();
+    let started = now_secs();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let mut child = cmd
             .stdout(Stdio::piped())
@@ -158,7 +159,7 @@ async fn convert_file(
     .map_err(|e| format!("任务异常: {e}"))??;
 
     let _ = app.emit("conv://done", "ok");
-    let epub = infer_epub_path(&file_path, &output_dir);
+    let epub = infer_epub_path(&file_path, &output_dir, started);
     if let Some(ep) = &epub {
         upsert_library(ep); // 转换产物自动入库
     }
@@ -170,23 +171,56 @@ async fn convert_file(
     })
 }
 
-/// 推断 EPUB 输出路径(work 目录名规则与 batch.py 一致:stem 空格→下划线)。
-/// 返回绝对路径:相对 output_dir 基于当前进程 cwd(GUI 与 CLI 子进程 cwd 一致)。
-fn infer_epub_path(file_path: &str, output_dir: &str) -> Option<String> {
+/// 推断 EPUB 输出路径(命名规则与 batch.py `output_stem` 一致:保留原文空格,
+/// 仅把 Windows 非法字符替换为下划线)。返回绝对路径。
+fn infer_epub_path(file_path: &str, output_dir: &str, started: u64) -> Option<String> {
     let path = PathBuf::from(file_path);
     let stem = path.file_stem()?.to_string_lossy().into_owned();
-    let sanitized = sanitize_name(&stem);
-    let out = PathBuf::from(output_dir);
-    let base = if out.is_absolute() {
-        out
+    let base = resolve_dir(output_dir);
+    // 1. 新命名 → 2. 旧命名(≤v0.2.1 把空格 sanitize 成下划线)
+    for name in [output_stem(&stem), sanitize_name(&stem)] {
+        let p = base.join(format!("{name}.epub"));
+        if p.exists() {
+            return Some(p.to_string_lossy().into_owned());
+        }
+    }
+    // 3. 兜底:输出目录里本次转换之后写出的 EPUB(命名规则再变也不会丢结果)
+    newest_epub_since(&base, started).map(|p| p.to_string_lossy().into_owned())
+}
+
+/// 输出目录下 mtime ≥ 给定时间的最新 EPUB。
+fn newest_epub_since(dir: &Path, since: u64) -> Option<PathBuf> {
+    let mut best: Option<(u64, PathBuf)> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let p = entry.path();
+        if p.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()) != Some("epub".into()) {
+            continue;
+        }
+        let mtime = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if mtime < since {
+            continue;
+        }
+        if best.as_ref().map(|(m, _)| mtime > *m).unwrap_or(true) {
+            best = Some((mtime, p));
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+/// 相对输出目录 → 绝对路径(GUI 与 CLI 子进程 cwd 一致时等价于 CLI 的解析)。
+fn resolve_dir(dir: &str) -> PathBuf {
+    let p = PathBuf::from(dir);
+    if p.is_absolute() {
+        p
     } else {
-        std::env::current_dir().unwrap_or_default().join(out)
-    };
-    Some(format!(
-        "{}/{}.epub",
-        base.to_string_lossy().trim_end_matches(['/', '\\']),
-        sanitized
-    ))
+        std::env::current_dir().unwrap_or_default().join(p)
+    }
 }
 
 // ---------- 书库持久化(library.json 数据库) ----------
@@ -231,24 +265,66 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// 文件名 → (标题, 作者):支持「标题 - 作者」与「标题_-_作者」两种分隔。
-fn parse_title_author(name: &str) -> (String, String) {
-    let stem = name
-        .trim_end_matches(".epub")
-        .trim_end_matches(".pdf")
-        .trim_end_matches(".md")
-        .trim_end_matches(".markdown")
-        .to_string();
-    for sep in ["_-_", " - "] {
-        if let Some(idx) = stem.find(sep) {
-            let title = stem[..idx].trim();
-            let author = stem[idx + sep.len()..].trim();
-            if !title.is_empty() && !author.is_empty() {
-                return (title.to_string(), author.to_string());
+/// 路径规范化(仅用于比较):统一分隔符 + 小写(Windows 路径大小写不敏感)。
+fn norm_path(p: &str) -> String {
+    p.replace('\\', "/").trim_end_matches('/').to_lowercase()
+}
+
+fn same_path(a: &str, b: &str) -> bool {
+    norm_path(a) == norm_path(b)
+}
+
+/// 书库去重:同一个文件曾被记成 "…\\output/x.epub" 与 "…\\output\\x.epub" 两条记录,
+/// 书库就会显示两本一模一样的书。按规范化路径合并,并保留更完整的元数据。
+fn dedupe_library(entries: Vec<LibraryEntry>) -> Vec<LibraryEntry> {
+    let mut out: Vec<LibraryEntry> = Vec::with_capacity(entries.len());
+    for e in entries {
+        match out.iter_mut().find(|p| same_path(&p.path, &e.path)) {
+            Some(prev) => {
+                // 旧记录里的下划线标题/作者来自被 sanitize 的文件名,用真值覆盖
+                if !e.author.is_empty() && (prev.author.is_empty() || prev.author.contains('_')) {
+                    prev.author = e.author.clone();
+                }
+                if !e.title.is_empty() && (prev.title.is_empty() || prev.title.contains('_')) {
+                    prev.title = e.title.clone();
+                }
+                if e.size > 0 {
+                    prev.size = e.size;
+                }
+                prev.mtime = prev.mtime.max(e.mtime);
+                prev.added_at = prev.added_at.min(e.added_at);
+                if !e.path.contains('/') {
+                    prev.path = e.path.clone(); // 统一成原生分隔符写法
+                }
             }
+            None => out.push(e),
         }
     }
-    (stem, String::new())
+    out
+}
+
+/// 文件名 → (标题, 作者):支持「标题 - 作者」,
+/// 并兼容旧版输出被 sanitize 过的「标题_-_作者」(下划线还原为空格)。
+fn parse_title_author(name: &str) -> (String, String) {
+    let stem = Path::new(name)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| name.to_string());
+    let flat = desanitize(&stem); // 等长替换,索引可直接用于切分
+    if let Some(idx) = flat.find(" - ") {
+        let title = flat[..idx].trim();
+        let author = flat[idx + 3..].trim();
+        if !title.is_empty() && !author.is_empty() {
+            return (title.to_string(), author.to_string());
+        }
+    }
+    (flat.trim().to_string(), String::new())
+}
+
+/// 还原旧版文件名的 sanitize(空白曾→下划线,「 - 」→「_-_」)。
+/// 两处替换都等长(1→1、3→3),所以替换后字符串的索引与原文一一对应。
+fn desanitize(s: &str) -> String {
+    s.replace("_-_", " - ").replace('_', " ")
 }
 
 /// 提取 XML 属性值(full-path="..." 等)。
@@ -307,14 +383,17 @@ fn epub_metadata(path: &str) -> (String, String) {
     )
 }
 
-/// 转换完成/文件变动后更新单条记录。
+/// 转换完成/文件变动后更新单条记录(EPUB 元数据优先,失败回退文件名解析)。
 fn upsert_library(epub_path: &str) {
     let mut entries = load_library();
     let name = Path::new(epub_path)
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let (title, author) = parse_title_author(&name);
+    let (t1, a1) = epub_metadata(epub_path);
+    let (t2, a2) = parse_title_author(&name);
+    let title = if t1.is_empty() { t2 } else { t1 };
+    let author = if a1.is_empty() { a2 } else { a1 };
     let meta = std::fs::metadata(epub_path).ok();
     let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
     let mtime = meta
@@ -322,11 +401,12 @@ fn upsert_library(epub_path: &str) {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    if let Some(existing) = entries.iter_mut().find(|e| e.path == epub_path) {
-        if existing.title.is_empty() {
+    if let Some(existing) = entries.iter_mut().find(|e| same_path(&e.path, epub_path)) {
+        existing.path = epub_path.to_string();
+        if !title.is_empty() {
             existing.title = title;
         }
-        if existing.author.is_empty() {
+        if !author.is_empty() {
             existing.author = author;
         }
         existing.size = size;
@@ -341,7 +421,7 @@ fn upsert_library(epub_path: &str) {
             added_at: now_secs(),
         });
     }
-    save_library(&entries);
+    save_library(&dedupe_library(entries));
 }
 
 /// 书库同步:剔除失效记录 + 扫描输出目录新 EPUB(读元数据/文件名)+ 写回数据库。
@@ -352,16 +432,15 @@ fn library_sync(output_dir: String) -> Vec<LibraryEntry> {
     // 1. 剔除路径已不存在的记录(手动从 output 删除的)
     entries.retain(|e| Path::new(&e.path).exists());
     // 2. 扫描输出目录
-    let dir = PathBuf::from(&output_dir);
-    let dir = if dir.is_absolute() {
-        dir
-    } else {
-        std::env::current_dir().unwrap_or_default().join(dir)
-    };
+    let dir = resolve_dir(&output_dir);
     if let Ok(rd) = std::fs::read_dir(&dir) {
         for entry in rd.flatten() {
             let p = entry.path();
-            if p.extension().and_then(|e| e.to_str()) != Some("epub") {
+            if p.extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_lowercase())
+                != Some("epub".into())
+            {
                 continue;
             }
             let path = p.to_string_lossy().into_owned();
@@ -372,28 +451,40 @@ fn library_sync(output_dir: String) -> Vec<LibraryEntry> {
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            if let Some(existing) = entries.iter_mut().find(|e| e.path == path) {
-                existing.size = size;
-                existing.mtime = mtime;
-                continue;
-            }
             let name = p
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            // 元数据优先(手动放入的 epub),失败回退文件名解析
+            // 元数据优先(手动放入的 epub 以书内真名为准),失败回退文件名解析
             let (t1, a1) = epub_metadata(&path);
             let (t2, a2) = parse_title_author(&name);
+            let title = if t1.is_empty() { t2 } else { t1 };
+            let author = if a1.is_empty() { a2 } else { a1 };
+            if let Some(existing) = entries.iter_mut().find(|e| same_path(&e.path, &path)) {
+                // 顺手用元数据纠正旧记录里被 sanitize 过的标题/作者
+                existing.path = path;
+                if !title.is_empty() {
+                    existing.title = title;
+                }
+                if !author.is_empty() {
+                    existing.author = author;
+                }
+                existing.size = size;
+                existing.mtime = mtime;
+                continue;
+            }
             entries.push(LibraryEntry {
-                path: path.clone(),
-                title: if t1.is_empty() { t2 } else { t1 },
-                author: if a1.is_empty() { a2 } else { a1 },
+                path,
+                title,
+                author,
                 size,
                 mtime,
                 added_at: now_secs(),
             });
         }
     }
+    // 3. 合并历史遗留的「/」「\」重复记录,再按修改时间倒序
+    let mut entries = dedupe_library(entries);
     entries.sort_by(|a, b| b.mtime.cmp(&a.mtime));
     save_library(&entries);
     entries
@@ -418,6 +509,21 @@ fn sanitize_name(name: &str) -> String {
         s = "book".into();
     }
     s
+}
+
+/// 输出 EPUB 文件名(与 batch.py `output_stem` 一致:保留原文空格,
+/// 只把 Windows 非法字符换成下划线并去掉结尾空白/点)。
+fn output_stem(name: &str) -> String {
+    let trimmed = name.trim().trim_end_matches(['.', ' ']).trim();
+    let s: String = trimmed
+        .chars()
+        .map(|c| if "\\/:*?\"<>|".contains(c) { '_' } else { c })
+        .collect();
+    if s.is_empty() {
+        "book".into()
+    } else {
+        s
+    }
 }
 
 /// 更新 CLI 路径(设置页)
@@ -553,4 +659,56 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![convert_file, set_cli_path, check_env, library_sync, open_epub])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_name_keeps_spaces() {
+        assert_eq!(
+            output_stem("万延元年的Football - [日] 大江健三郎"),
+            "万延元年的Football - [日] 大江健三郎"
+        );
+        assert_eq!(output_stem("a/b:c*"), "a_b_c_");
+        assert_eq!(output_stem("   "), "book");
+    }
+
+    #[test]
+    fn title_author_from_both_namings() {
+        let spaced = parse_title_author("万延元年的Football - [日] 大江健三郎.epub");
+        assert_eq!(spaced.0, "万延元年的Football");
+        assert_eq!(spaced.1, "[日] 大江健三郎");
+        let legacy = parse_title_author("万延元年的Football_-_[日]_大江健三郎.epub");
+        assert_eq!(legacy.0, "万延元年的Football");
+        assert_eq!(legacy.1, "[日] 大江健三郎");
+        assert_eq!(parse_title_author("单行本.epub"), ("单行本".to_string(), String::new()));
+    }
+
+    #[test]
+    fn same_path_ignores_separator_and_case() {
+        assert!(same_path("E:\\out\\A.epub", "e:/out/a.epub"));
+        assert!(!same_path("E:\\out\\a.epub", "E:\\out\\b.epub"));
+    }
+
+    #[test]
+    fn dedupe_merges_separator_variants() {
+        let mk = |path: &str, author: &str| LibraryEntry {
+            path: path.into(),
+            title: "万延元年的Football".into(),
+            author: author.into(),
+            size: 10,
+            mtime: 5,
+            added_at: 7,
+        };
+        let entries = vec![
+            mk("E:\\out\\a.epub", "[日]_大江健三郎"),
+            mk("E:/out/a.epub", "[日] 大江健三郎"),
+        ];
+        let out = dedupe_library(entries);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].path, "E:\\out\\a.epub");
+        assert_eq!(out[0].author, "[日] 大江健三郎");
+    }
 }

@@ -1505,7 +1505,7 @@ function SettingsScreen({ lang, setLang, darkMode, setDarkMode, backendPref, set
 // ── APP SHELL ─────────────────────────────────────────────────────────────────
 
 const NAV_SCREENS: Screen[] = ["drop", "queue", "library", "settings"];
-const APP_VERSION = "v0.2.1";
+const APP_VERSION = "v0.2.2";
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>("drop");

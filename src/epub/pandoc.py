@@ -36,8 +36,12 @@ def build_epub(
     title: str | None = None,
     author: str | None = None,
     css: str | Path = DEFAULT_CSS,
+    out_name: str | None = None,
 ) -> Path:
     """用 Pandoc 将 work/book.md 转为 EPUB,返回 epub 路径。
+
+    out_name: 输出文件名(不含 .epub)。默认取 work 目录名(被 sanitize 过),
+    调用方应传原始「标题 - 作者」名,避免空格被写成下划线。
 
     Raises:
         RuntimeError: Pandoc 执行失败
@@ -47,7 +51,7 @@ def build_epub(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    epub = output_dir / f"{book_md.parent.name}.epub"
+    epub = output_dir / f"{out_name or book_md.parent.name}.epub"
     title = title or infer_title(book_md)
 
     cmd = [
