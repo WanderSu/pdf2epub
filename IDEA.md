@@ -231,6 +231,10 @@ EPUB
 - 中文排版空格 ✅ 已实现(汉字-汉字/数字、中文标点两侧、标签与括号两侧)
 - 强调字体粗体标注 ✅ 已实现(`src/markdown/bold.py`,KaiTi/中宋等 → `**`)
 
+清理项开关 ✅ 已实现(`CleanOptions`,配置 `clean:` 段 + CLI `--clean-disable` +
+桌面端「清理选项」同源):`page_numbers` / `join_lines` / `cjk_spaces` / `bold` / `images`
+(`bold` 默认关,关闭等价于 `pymupdf.bold_fonts` 为空;hybrid 流程的文字页不走 bold 标注)。
+
 原则：
 
 > 修复结构，而不是改写正文。
@@ -443,6 +447,16 @@ API Key 和 Endpoint 不得硬编码。
 
 ---
 
+> 补充：**云端任务续跑(2026-09 实现)**。OCR 任务提交成功后把 `batch_id`(MinerU)/
+> `job_id`(PaddleOCR-VL)连同文件内容指纹写入 `work/<书名>/.ocr_task.json`,结果解包成功后清除。
+> 重跑同一文件时先探测该任务是否仍可用(有记录/未失败)→ 直接继续轮询并解包,**不重新上传**;
+> 缓存失效、指纹不符(文件被换掉)、或降级渲染变体不匹配时才重新提交。这样超时、Ctrl+C、
+> 关掉桌面端都不会白扣云端配额。`--no-resume`(CLI)可强制重新提交。
+
+> 补充：**取消要杀进程树(2026-09 实现)**。桌面端的取消此前只改前端状态,CLI 子进程会继续跑完
+> 并写出 EPUB、云端 OCR 继续计费。现在 Rust 侧保存 `task_id → pid` 映射,取消时用
+> `taskkill /PID <pid> /T /F` 结束**整棵进程树**(实测:只杀父进程时 PyInstaller 引导进程的子进程会存活)。
+
 ## 14. CLI
 
 最终希望支持：
@@ -461,6 +475,8 @@ ebook-converter book.pdf --backend mineru
 ebook-converter book.pdf --backend paddleocr
 ebook-converter book.md
 ebook-converter ./books/
+ebook-converter book.pdf --clean-disable join_lines,cjk_spaces   # 关闭部分清理项
+ebook-converter book.pdf --no-resume                             # 不复用云端已提交任务
 ```
 
 批量处理不能因为单个文件失败而全部停止。
@@ -709,6 +725,10 @@ hybrid
 - ✅ 桌面端:CLI 子进程隐藏控制台黑窗口(`CREATE_NO_WINDOW`)+ CLI stdout 行缓冲,前端日志实时显示、可点击展开完整日志
 - ✅ 中文清理增强:页码剔除、跨页断行连接(结构感知)、中文空格修正、强调字体粗体标注
 - ✅ 桌面端:Tauri 2 + React,UI 源自 Figma 设计稿(瑞士国际主义风格),桥接 CLI 子进程 + 进度事件
+- ✅ 清理项开关:`CleanOptions`(config `clean:` 段 / CLI `--clean-disable` / 桌面端「清理选项」三处同源,设置随 localStorage 持久化)
+- ✅ 云端任务续跑:`work/<书名>/.ocr_task.json` 记录 batch/job id + 内容指纹,中断后重跑不重新上传
+- ✅ 桌面端「取消」真的结束 CLI 进程树(`taskkill /T /F`),不再白跑完并写产物
+- ✅ 桌面端凭证可保存:设置页填入 Token → 写入 `apikey.json`(值不回显),CLEAR 删除,环境检查显示文件位置
 - ✅ 工具链:Windows MSVC(Visual Studio Build Tools + rustup stable-x86_64-pc-windows-msvc)
 - ✅ 发布:GitHub Release v0.1.0(绿色版 exe),MIT License,仓库公开
 

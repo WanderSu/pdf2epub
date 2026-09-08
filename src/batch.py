@@ -21,7 +21,7 @@ from pathlib import Path
 from backends import get_backend
 from convert import convert_auto, load_config
 from epub.pandoc import build_epub
-from markdown.cleaner import clean_file
+from markdown.cleaner import CleanOptions, clean_file, resolve_options
 from detector.pdf_detector import PDFType
 from paths import config_file
 
@@ -130,6 +130,7 @@ def process_one(
     backend_override: str | None = None,
     retries: int = 2,
     force: bool = False,
+    clean_options: CleanOptions | None = None,
 ) -> TaskResult:
     """处理单个文件(PDF 或 Markdown),带重试与跳过。"""
     t0 = time.time()
@@ -152,10 +153,11 @@ def process_one(
             if source.suffix.lower() == ".md":
                 result.backend, result.pdf_type = "markdown", "markdown"
                 result = _process_markdown(source, work_root, output_dir, t0, result,
-                                           safe_stem, out_epub.stem)
+                                           safe_stem, out_epub.stem, clean_options)
             else:
                 result = _process_pdf(source, config, work_root, output_dir,
-                                      backend_override, t0, result, safe_stem, out_epub.stem)
+                                      backend_override, t0, result, safe_stem, out_epub.stem,
+                                      clean_options)
             result.status = "done"
             return result
         except Exception as e:  # noqa: BLE001 - 批处理需兜住所有失败
@@ -173,7 +175,7 @@ def process_one(
 
 
 def _process_pdf(source, config, work_root, output_dir, backend_override, t0, result,
-                 safe_stem, out_name) -> TaskResult:
+                 safe_stem, out_name, clean_options=None) -> TaskResult:
     work = work_root / safe_stem
     if backend_override and backend_override != "auto":
         backend = get_backend(backend_override, config.get(backend_override, {}))
@@ -191,8 +193,8 @@ def _process_pdf(source, config, work_root, output_dir, backend_override, t0, re
                 source.name, detection.suspicious_pages, detection.total_pages,
             )
 
-    # Markdown 清理(最小版)
-    clean_file(conv.book_md)
+    # Markdown 清理(按 clean_options 开关)
+    clean_file(conv.book_md, options=clean_options)
 
     title, author = parse_title_author(source.stem)
     epub = build_epub(conv.book_md, work, output_dir, title=title, author=author, out_name=out_name)
@@ -202,7 +204,8 @@ def _process_pdf(source, config, work_root, output_dir, backend_override, t0, re
     return result
 
 
-def _process_markdown(source, work_root, output_dir, t0, result, safe_stem, out_name) -> TaskResult:
+def _process_markdown(source, work_root, output_dir, t0, result, safe_stem, out_name,
+                      clean_options=None) -> TaskResult:
     work = work_root / safe_stem
     work.mkdir(parents=True, exist_ok=True)
     # 已有 Markdown:复制到统一 work 目录(连同 images/)
@@ -218,7 +221,7 @@ def _process_markdown(source, work_root, output_dir, t0, result, safe_stem, out_
             if img.is_file():
                 shutil.copy2(img, dst_images / img.name)
 
-    clean_file(book_md)
+    clean_file(book_md, options=clean_options)
     title, author = parse_title_author(source.stem)
     epub = build_epub(book_md, work, output_dir, title=title, author=author, out_name=out_name)
     result.epub = epub
@@ -237,10 +240,19 @@ def process_batch(
     backend_override: str | None = None,
     retries: int = 2,
     force: bool = False,
+    clean_options: CleanOptions | None = None,
 ) -> list[TaskResult]:
-    """批量处理,返回全部任务结果。单个失败不中断。"""
+    """批量处理,返回全部任务结果。单个失败不中断。
+
+    clean_options=None → 按 config 的 `clean:` 段(CleanOptions 默认值)。
+    传入的开关会先落到 config(如关闭 bold 等价于 pymupdf.bold_fonts 为空),
+    再逐文件生效。
+    """
     if config is None:
         config = load_config(config_path or config_file())
+    if clean_options is None:
+        clean_options = resolve_options(config)
+    clean_options.apply(config)
 
     work_root = Path(work_root)
     output_dir = Path(output_dir)
@@ -253,6 +265,7 @@ def process_batch(
         return []
 
     logger.info("共 %d 个文件待处理", len(sources))
+    logger.debug("清理项: %s", clean_options)
     results: list[TaskResult] = []
     for src in sources:
         results.append(process_one(
@@ -263,6 +276,7 @@ def process_batch(
             backend_override=backend_override,
             retries=retries,
             force=force,
+            clean_options=clean_options,
         ))
 
     # 汇总

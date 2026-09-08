@@ -33,7 +33,8 @@
 | 🧠 **伪文字层识别** | 提取乱码的 PDF 会提示你,由你决定是否改用 OCR |
 | ☁️ **云端 OCR** | MinerU / PaddleOCR-VL 可切换;MinerU 失败自动降级为渲染纯图重试 |
 | 📇 **元数据** | 文件名符合「标题 - 作者」自动嵌入 `dc:title` / `dc:creator` |
-| 🧹 **智能清理** | 页码剔除、跨页断行连接、中文空格修正、强调字体标注粗体 |
+| 🧹 **智能清理** | 页码剔除、跨页断行连接、中文空格修正、强调字体标注粗体;各项可单独开关 |
+| ♻️ **中断续跑** | 云端 OCR 已提交的任务(batch/job id)落盘;超时、关窗口后重跑直接继续轮询,不重新上传、不重复扣配额 |
 | 📦 **批处理** | 失败重试(指数退避)、跳过已完成、断点续跑、单文件失败不中断 |
 | 📚 **>200 页自动分片** | MinerU 单任务限 200 页/200MB;超大书自动按 page_ranges 分段提交、并行解析、按序合并 |
 | 🎨 **精装书级排版** | 内置 book.css:中文衬线正文、首行缩进、标题体系、公式/表格/图片保护 |
@@ -54,7 +55,7 @@ MinerU 输出 ──► full.md + images ──┤      (自动:页码/断行/�
 
 ### 方式一:桌面端(推荐)
 
-从 [Releases](https://github.com/WanderSu/pdf2epub/releases) 下载 `pdf2epub-v0.2.1-win-x64.zip` 并解压到任意目录,双击 `pdf2epub.exe`。
+从 [Releases](https://github.com/WanderSu/pdf2epub/releases) 下载 `pdf2epub-v0.2.3-win-x64.zip` 并解压到任意目录,双击 `pdf2epub.exe`。
 
 > 💡 压缩包内含转换引擎 `cli.exe`(已内置 Python 运行环境,免安装 Python);保持 `pdf2epub.exe`、`cli.exe`、`config/` 三者同级即可运行,无需放在项目根。
 
@@ -64,9 +65,9 @@ MinerU 输出 ──► full.md + images ──┤      (自动:页码/断行/�
 2. 在解压目录创建 `apikey.json`(云端 OCR 凭证,模板见下方「准备凭证」)
 
 - **Import** — 拖放 / 选择 PDF、Markdown;类型检测预览(TXT / SCN / HYB / MD)与计划后端、分片数一目了然
-- **Queue** — 转换队列,阶段进度(DETECT → EXTRACT → CLEAN → BUILD)、分片指示、伪文字层提醒、失败重试、实时控制台日志
+- **Queue** — 转换队列,阶段进度(DETECT → EXTRACT → CLEAN → BUILD)、分片指示、伪文字层提醒、失败重试、实时控制台日志;取消按钮会真的结束 CLI 子进程树(不会白跑完)
 - **Library** — 转换结果,一键打开 EPUB / 在资源管理器中定位 / 重新转换
-- **Settings** — OCR 后端(Auto / MinerU / PaddleOCR)、输出目录、CLI 路径、环境检查(Pandoc / 引擎 / 凭证)、清理选项、主题(亮/暗)、语言(中/英)
+- **Settings** — OCR 后端(Auto / MinerU / PaddleOCR)、输出目录、CLI 路径、API 凭证(填好后写入 `apikey.json`,CLEAR 删除)、环境检查(Pandoc / 引擎 / 凭证)、清理选项(生效并随设置保存)、主题(亮/暗)、语言(中/英)
 
 ### 方式二:CLI
 
@@ -103,6 +104,12 @@ uv sync    # 创建 .venv 并安装 ebook-converter 命令
 
 # 强制指定 OCR 后端
 .venv/Scripts/ebook-converter.exe "扫描书.pdf" -o output --backend mineru
+
+# 关闭部分清理项(逗号分隔;默认全部开启,bold 默认关)
+.venv/Scripts/ebook-converter.exe "我的书.pdf" -o output --clean-disable join_lines,cjk_spaces
+
+# 不复用云端已提交的任务(默认中断后可续跑)
+.venv/Scripts/ebook-converter.exe "扫描书.pdf" -o output --no-resume
 ```
 
 **输出**:每本书生成 `output/<书名>.epub`;中间产物在 `work/<书名>/book.md + images/`(可手工修订后重新生成)。
@@ -140,6 +147,8 @@ ebook-converter <文件或目录>... [-o 输出目录] [选项]
 | `-o, --output DIR` | EPUB 输出目录(默认 `output/`) |
 | `--retries N` | 单文件失败重试次数,指数退避(默认 2) |
 | `--force` | 忽略「已完成」状态,强制重新转换 |
+| `--clean-disable LIST` | 关闭指定清理项(逗号分隔):`page_numbers,join_lines,cjk_spaces,bold,images` |
+| `--no-resume` | 不复用云端已提交的 OCR 任务(默认中断后续跑,不重新上传) |
 | `--no-log` | 不写日志文件 |
 | `--verbose` | 控制台输出 DEBUG 日志 |
 
@@ -153,6 +162,13 @@ ebook-converter <文件或目录>... [-o 输出目录] [选项]
 ocr_backend: mineru          # 默认 OCR 后端:mineru / paddleocr
 mineru:
   max_pages_per_task: 200    # MinerU 单任务页数上限;超过自动分片提交(page_ranges)
+  resume: true               # 中断后复用已提交的云端任务(续跑)
+clean:                       # 清理项开关(桌面端「清理选项」/ CLI --clean-disable 同源)
+  page_numbers: true         # 剔除独立页码行
+  join_lines: true           # 跨页断行连接
+  cjk_spaces: true           # 中文排版空格修正
+  bold: false                # 强调字体 → ** 粗体
+  images: true               # 图片引用存在性校验
 pymupdf:
   write_images: true
   bold_fonts: [...]          # 强调字体列表(楷体/中宋等),其文字标注为 **粗体**
@@ -191,7 +207,13 @@ OCR 是云端按页计费服务。确认这本书值得转再跑;`--retries 0` �
 <details>
 <summary><b>转换结果有乱码 / 页码 / 断行问题?</b></summary>
 
-`src/markdown/cleaner.py` 负责清理。若你的书出现误删/误拼,调整其中的规则或反馈维护者。
+`src/markdown/cleaner.py` 负责清理,各项可单独关闭:桌面端 **Settings → 清理选项**,或 CLI `--clean-disable join_lines`。若你的书出现误删/误拼,先关掉对应那一项再看。
+</details>
+
+<details>
+<summary><b>OCR 跑到一半超时 / 关了窗口,配额白扣?</b></summary>
+
+不会。任务提交后 batch/job id 会落盘(`work/<书名>/.ocr_task.json`),重跑同一文件时直接继续轮询原任务,不重新上传、不重复扣配额;日志会显示「发现未取回的云端任务」。要强制重新提交用 `--no-resume`。
 </details>
 
 <details>

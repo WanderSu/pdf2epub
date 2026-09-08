@@ -15,7 +15,10 @@ from datetime import datetime
 from pathlib import Path
 
 from batch import process_batch, setup_logging
+from convert import load_config
 from detector.pdf_detector import PDFDetector
+from markdown.cleaner import CLEAN_KEYS, resolve_options
+from paths import config_file
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -30,6 +33,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--work", default="work", help="中间工作目录(默认 work/)")
     p.add_argument("--retries", type=int, default=2, help="单文件失败重试次数(默认 2)")
     p.add_argument("--force", action="store_true", help="强制重新处理(忽略已完成)")
+    p.add_argument("--clean-disable", default=None,
+                   help="关闭指定清理项(逗号分隔,可重复): "
+                        "page_numbers,join_lines,cjk_spaces,bold,images")
+    p.add_argument("--no-resume", action="store_true",
+                   help="不复用云端 OCR 已提交的任务(默认中断后可续跑,不重新上传)")
     p.add_argument("--log", default=None, help="日志文件(默认 logs/batch-<时间>.log)")
     p.add_argument("--no-log", action="store_true", help="不写日志文件(仅控制台)")
     p.add_argument("--verbose", "-v", action="store_true", help="详细日志")
@@ -52,6 +60,24 @@ def main(argv: list[str] | None = None) -> int:
 
     paths = [Path(p) for p in args.paths]
     backend_override = None if args.backend == "auto" else args.backend
+
+    # 清理开关:config 的 clean: 段为默认值,--clean-disable 叠加关闭
+    try:
+        config = load_config(config_file())
+        clean_options = resolve_options(config, args.clean_disable)
+    except ValueError as e:
+        print(f"参数错误: {e}", file=sys.stderr)
+        return 2
+    except FileNotFoundError as e:
+        print(f"配置缺失: {e}", file=sys.stderr)
+        return 2
+    if args.no_resume:
+        for name in ("mineru", "paddleocr"):
+            config.setdefault(name, {})["resume"] = False
+
+    disabled = [k for k in CLEAN_KEYS if not getattr(clean_options, k)]
+    if args.clean_disable and disabled:
+        print(f"[clean] 已关闭清理项: {', '.join(disabled)}")
 
     # 交互询问:单文件 + auto + 交互终端 + 检测到疑似伪文字层(乱码)时,
     # 由用户手动决定是否改用云端 OCR。批处理/非交互模式不询问。
@@ -87,11 +113,13 @@ def main(argv: list[str] | None = None) -> int:
 
     results = process_batch(
         paths,
+        config=config,
         work_root=args.work,
         output_dir=args.output,
         backend_override=backend_override,
         retries=args.retries,
         force=args.force,
+        clean_options=clean_options,
     )
     if not results:
         return 2

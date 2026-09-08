@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -19,6 +20,14 @@ impl Default for CliConfig {
     fn default() -> Self {
         Self { cli_path: Mutex::new(resolve_cli_path()) }
     }
+}
+
+/// 正在运行的转换任务:前端任务 id → 子进程 pid。
+/// 有了它「取消」才能真的杀掉进程树(否则只是前端标记,CLI 仍跑完并写出 EPUB、
+/// 云端 OCR 继续扣配额)。
+#[derive(Default)]
+pub struct RunningTasks {
+    pub procs: Mutex<HashMap<String, u32>>,
 }
 
 /// 探测 ebook-converter 可执行文件,优先级:
@@ -95,6 +104,8 @@ async fn convert_file(
     backend: Option<String>,
     retries: Option<u32>,
     cli_path: Option<String>,
+    task_id: Option<String>,
+    clean_disable: Option<Vec<String>>,
 ) -> Result<ConvertResult, String> {
     let state: State<CliConfig> = app.state();
     let cli = match cli_path {
@@ -127,16 +138,27 @@ async fn convert_file(
     if let Some(r) = retries {
         cmd.arg("--retries").arg(r.to_string());
     }
+    // 桌面端「清理选项」:关闭的项透传给 CLI(--clean-disable)
+    if let Some(list) = clean_disable.filter(|l| !l.is_empty()) {
+        cmd.arg("--clean-disable").arg(list.join(","));
+    }
 
     let app2 = app.clone();
     let fp_for_stream = file_path.clone();
     let started = now_secs();
+    // 任务键:前端任务 id(同一文件可重复入队,用 id 才不会互相覆盖)
+    let task_key = task_id.clone().unwrap_or_else(|| file_path.clone());
+    let task_key_outer = task_key.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
+        let tasks: State<RunningTasks> = app2.state();
         let mut child = cmd
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("无法启动 CLI({cli}): {e}"))?;
+        // 登记 pid:前端取消时据此杀进程树
+        let pid = child.id();
+        tasks.procs.lock().unwrap().insert(task_key.clone(), pid);
 
         // stdout:逐行推送进度事件(携带文件名,前端区分多任务)
         let stdout = child.stdout.take().unwrap();
@@ -148,7 +170,14 @@ async fn convert_file(
             );
             last_line = line;
         }
-        let status = child.wait().map_err(|e| format!("CLI 退出失败: {e}"))?;
+        let status = match child.wait() {
+            Ok(s) => s,
+            Err(e) => {
+                tasks.procs.lock().unwrap().remove(&task_key);
+                return Err(format!("CLI 退出失败: {e}"));
+            }
+        };
+        tasks.procs.lock().unwrap().remove(&task_key);
         if status.success() {
             Ok(last_line)
         } else {
@@ -157,6 +186,8 @@ async fn convert_file(
     })
     .await
     .map_err(|e| format!("任务异常: {e}"))??;
+    // 兜底清理(异常路径也不会留下悬挂的 pid)
+    app.state::<RunningTasks>().procs.lock().unwrap().remove(&task_key_outer);
 
     let _ = app.emit("conv://done", "ok");
     let epub = infer_epub_path(&file_path, &output_dir, started);
@@ -169,6 +200,42 @@ async fn convert_file(
         summary: Some(result),
         error: None,
     })
+}
+
+/// 取消转换:杀掉对应任务 **整棵进程树**(Windows 用 taskkill /T)。
+/// 不 kill 树的话 PyInstaller 引导进程被杀,真正的子进程会继续跑完。
+/// 返回是否找到了在跑的任务。
+#[tauri::command]
+fn cancel_convert(app: AppHandle, task_id: String) -> Result<bool, String> {
+    let state = app.state::<RunningTasks>();
+    let pid = match state.procs.lock().unwrap().get(&task_id).copied() {
+        Some(p) => p,
+        None => return Ok(false),
+    };
+    #[cfg(windows)]
+    {
+        let mut cmd = Command::new("taskkill");
+        cmd.args(["/PID", &pid.to_string(), "/T", "/F"]);
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        let out = cmd.output().map_err(|e| format!("taskkill 启动失败: {e}"))?;
+        let ok = out.status.success();
+        if !ok {
+            // 进程可能已自行退出,不算错误
+            let msg = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            println!("cancel_convert: taskkill 未成功 pid={pid} {msg}");
+        }
+        state.procs.lock().unwrap().remove(&task_id);
+        Ok(ok)
+    }
+    #[cfg(not(windows))]
+    {
+        let out = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .output()
+            .map_err(|e| format!("kill 启动失败: {e}"))?;
+        state.procs.lock().unwrap().remove(&task_id);
+        Ok(out.status.success())
+    }
 }
 
 /// 推断 EPUB 输出路径(命名规则与 batch.py `output_stem` 一致:保留原文空格,
@@ -534,6 +601,103 @@ fn set_cli_path(app: AppHandle, path: String) -> Result<(), String> {
     Ok(())
 }
 
+// ---------- 凭证写入(设置页) ----------
+
+/// 允许写入 apikey.json 的服务名(与 Python 侧 load_api_key 的键一致)。
+const APIKEY_SERVICES: [&str; 2] = ["MinerU", "PaddleOCR-VL"];
+
+/// apikey.json 的候选目录:运行时 cwd → 壳 exe 目录 → CLI 目录及其上级
+/// (dev 形态 CLI 在 <root>/.venv/Scripts/,其上两级是项目根)。
+fn apikey_candidate_dirs(cli_path: Option<&str>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let push = |d: PathBuf, dirs: &mut Vec<PathBuf>| {
+        if !dirs.iter().any(|x| x == &d) {
+            dirs.push(d);
+        }
+    };
+    if let Ok(c) = std::env::current_dir() {
+        push(c, &mut dirs);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(d) = exe.parent() {
+            push(d.to_path_buf(), &mut dirs);
+        }
+    }
+    if let Some(cli) = cli_path.filter(|c| !c.trim().is_empty()) {
+        if let Some(d) = PathBuf::from(cli).parent() {
+            push(d.to_path_buf(), &mut dirs);
+            if let Some(p) = d.parent() {
+                push(p.to_path_buf(), &mut dirs);
+                if let Some(g) = p.parent() {
+                    push(g.to_path_buf(), &mut dirs);
+                }
+            }
+        }
+    }
+    dirs
+}
+
+/// 解析 apikey.json 的目标路径:
+/// 1. 已有的 apikey.json(优先更新用户现有文件,与 Python 侧查找顺序一致)
+/// 2. 含 config/ 的目录(= 项目根或发布目录)新建
+/// 3. 兜底:cwd
+fn apikey_target(cli_path: Option<&str>) -> PathBuf {
+    let dirs = apikey_candidate_dirs(cli_path);
+    for d in &dirs {
+        let f = d.join("apikey.json");
+        if f.is_file() {
+            return f;
+        }
+    }
+    for d in &dirs {
+        if d.join("config").is_dir() {
+            return d.join("apikey.json");
+        }
+    }
+    dirs.into_iter()
+        .next()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("apikey.json")
+}
+
+/// 合并凭证到 apikey.json 文本:token 为空 → 删除该键(留给调用方决定写盘)。
+fn merge_apikey(existing: &str, service: &str, token: &str) -> Result<String, String> {
+    let mut obj: serde_json::Map<String, serde_json::Value> = if existing.trim().is_empty() {
+        serde_json::Map::new()
+    } else {
+        match serde_json::from_str::<serde_json::Value>(existing) {
+            Ok(serde_json::Value::Object(m)) => m,
+            Ok(_) => return Err("apikey.json 顶层不是 JSON 对象".into()),
+            Err(e) => return Err(format!("apikey.json 解析失败: {e}")),
+        }
+    };
+    let t = token.trim();
+    if t.is_empty() {
+        obj.remove(service);
+    } else {
+        obj.insert(service.to_string(), serde_json::Value::String(t.to_string()));
+    }
+    serde_json::to_string_pretty(&serde_json::Value::Object(obj)).map_err(|e| e.to_string())
+}
+
+/// 保存/清除凭证(设置页):写入 apikey.json 并返回实际写入路径。
+/// 空 token = 删除该键;凭证值不回显、不写日志。
+#[tauri::command]
+fn save_apikey(app: AppHandle, service: String, token: String) -> Result<String, String> {
+    if !APIKEY_SERVICES.contains(&service.as_str()) {
+        return Err(format!("未知凭证项: {service}(可选: {})", APIKEY_SERVICES.join(", ")));
+    }
+    let cli_path = app.state::<CliConfig>().cli_path.lock().unwrap().clone();
+    let target = apikey_target(Some(&cli_path));
+    let existing = std::fs::read_to_string(&target).unwrap_or_default();
+    let merged = merge_apikey(&existing, &service, &token)?;
+    if let Some(parent) = target.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&target, merged).map_err(|e| format!("写入失败 {}: {e}", target.display()))?;
+    Ok(target.to_string_lossy().into_owned())
+}
+
 // ---------- 环境检查(设置页) ----------
 
 #[derive(serde::Serialize)]
@@ -550,6 +714,8 @@ struct EnvCheckResult {
     engine: EnvItem,
     mineru_configured: bool,
     paddle_configured: bool,
+    /// apikey.json 的实际位置(用户可在设置页看到凭证写到哪)
+    apikey_path: Option<String>,
 }
 
 /// 探测 pandoc(pandoc --version 首行)。
@@ -640,11 +806,18 @@ fn check_env(app: AppHandle) -> EnvCheckResult {
     };
     let pandoc = detect_pandoc();
     let (mineru_configured, paddle_configured) = detect_apikey();
+    let apikey = apikey_target(Some(&cli));
+    let apikey_path = if apikey.is_file() {
+        Some(apikey.to_string_lossy().into_owned())
+    } else {
+        None
+    };
     EnvCheckResult {
         pandoc,
         engine,
         mineru_configured,
         paddle_configured,
+        apikey_path,
     }
 }
 
@@ -656,7 +829,16 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(CliConfig::default())
-        .invoke_handler(tauri::generate_handler![convert_file, set_cli_path, check_env, library_sync, open_epub])
+        .manage(RunningTasks::default())
+        .invoke_handler(tauri::generate_handler![
+            convert_file,
+            cancel_convert,
+            set_cli_path,
+            check_env,
+            save_apikey,
+            library_sync,
+            open_epub
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -710,5 +892,56 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].path, "E:\\out\\a.epub");
         assert_eq!(out[0].author, "[日] 大江健三郎");
+    }
+
+    #[test]
+    fn apikey_merge_sets_and_clears() {
+        // 新建
+        let created = merge_apikey("", "MinerU", "  tok-1  ").unwrap();
+        assert!(created.contains("\"MinerU\": \"tok-1\""), "{created}");
+        // 合并保留其它键
+        let merged = merge_apikey(&created, "PaddleOCR-VL", "tok-2").unwrap();
+        assert!(merged.contains("tok-1") && merged.contains("tok-2"));
+        // 空值 = 删除该键
+        let cleared = merge_apikey(&merged, "MinerU", "   ").unwrap();
+        assert!(!cleared.contains("tok-1"), "{cleared}");
+        assert!(cleared.contains("tok-2"));
+    }
+
+    #[test]
+    fn apikey_merge_rejects_broken_json() {
+        assert!(merge_apikey("not json", "MinerU", "x").is_err());
+        assert!(merge_apikey("[1,2]", "MinerU", "x").is_err());
+    }
+
+    #[test]
+    fn apikey_target_falls_back_to_project_root() {
+        // 无 apikey.json 时选「含 config/ 的目录」(= 项目根/发布目录)。
+        // 若本机 cwd 或 exe 目录已存在 apikey.json(开发机可能如此),
+        // 「已有文件优先」会先命中,该断言不适用 → 跳过。
+        let cwd_has = std::env::current_dir()
+            .map(|d| d.join("apikey.json").is_file())
+            .unwrap_or(false);
+        let exe_has = std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(|d| d.join("apikey.json").is_file()))
+            .unwrap_or(false);
+        if cwd_has || exe_has {
+            return;
+        }
+        let base = std::env::temp_dir().join(format!("pdf2epub-ak-{}", std::process::id()));
+        let proj = base.join("proj");
+        std::fs::create_dir_all(proj.join("config")).unwrap();
+        let cli = proj.join(".venv/Scripts/ebook-converter.exe");
+        assert_eq!(
+            apikey_target(Some(&cli.to_string_lossy())),
+            proj.join("apikey.json")
+        );
+        // 已存在的 apikey.json 优先于新建(与 Python 侧查找顺序一致)
+        let existing = proj.join(".venv/Scripts/apikey.json");
+        std::fs::create_dir_all(existing.parent().unwrap()).unwrap();
+        std::fs::write(&existing, "{}").unwrap();
+        assert_eq!(apikey_target(Some(&cli.to_string_lossy())), existing);
+        std::fs::remove_dir_all(&base).ok();
     }
 }

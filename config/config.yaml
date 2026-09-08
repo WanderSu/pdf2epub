@@ -12,6 +12,16 @@ mineru:
   enable_table: true
   language: ch
   max_pages_per_task: 200   # 官方单任务页数上限;超过自动按 page_ranges 分片提交并合并
+  resume: true              # 中断(超时/关窗口)后复用已提交的云端任务,不重新上传
+
+# Markdown 清理项开关(CLI --clean-disable 可在单次运行中关闭某项;
+# 桌面端「清理选项」对应 page_numbers / join_lines / bold / images)
+clean:
+  page_numbers: true        # 剔除独立页码行
+  join_lines: true          # 跨页断行连接
+  cjk_spaces: true          # 中文排版空格修正(汉字/中文标点/数字之间的空格)
+  bold: false               # 强调字体(楷体/中宋等)→ ** 粗体,标注较密集,默认关
+  images: true              # 图片引用存在性校验(缺失会在清理报告中提示)
 
 # 本地 PyMuPDF4LLM
 pymupdf:
@@ -25,3 +35,4 @@ paddleocr:
   use_chart_recognition: false
   use_doc_orientation_classify: false
   use_doc_unwarping: false
+  resume: true              # 中断后复用已提交的云端任务,不重新上传

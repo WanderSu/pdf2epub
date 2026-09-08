@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -91,6 +91,11 @@ const T = {
       credentials: "API CREDENTIALS",
       mineruLabel: "MinerU API Token",
       paddleLabel: "PaddleOCR Token",
+      credentialsNote: "Saved to apikey.json (local, git-ignored); CLEAR removes it.",
+      clear: "CLEAR",
+      tokenPlaceholder: "Not set · paste to save",
+      tokenSaved: (path: string) => `Saved · ${path}`,
+      tokenCleared: "Removed from apikey.json",
       autoDesc: "Local for text PDFs · OCR for scanned",
       mineruDesc: "Cloud-based, best for complex layouts",
       paddleDesc: "Cloud vision model, alternative backend",
@@ -101,7 +106,7 @@ const T = {
         ["Remove page numbers", "Strip standalone page-number lines"],
         ["Join broken lines", "Re-flow paragraphs split across pages"],
         ["Normalize bold fonts", "KaiTi / STZhongsong → semantic strong"],
-        ["Embed inline images", "Keep images referenced from work/ output"],
+        ["Verify image refs", "Report image links missing from work/images"],
       ] as [string, string][],
       appearance: "APPEARANCE",
       light: "Light",
@@ -204,6 +209,11 @@ const T = {
       credentials: "API 凭证",
       mineruLabel: "MinerU API 密钥",
       paddleLabel: "PaddleOCR 密钥",
+      credentialsNote: "保存到 apikey.json(本地文件,已 gitignore);CLEAR 删除该项。",
+      clear: "清除",
+      tokenPlaceholder: "未设置 · 粘贴后保存",
+      tokenSaved: (path: string) => `已保存 · ${path}`,
+      tokenCleared: "已从 apikey.json 删除",
       autoDesc: "文字 PDF 走本地 · 扫描件走 OCR",
       mineruDesc: "云端，适合复杂排版",
       paddleDesc: "云端视觉模型，备用后端",
@@ -214,7 +224,7 @@ const T = {
         ["删除页码", "去除独立页码行"],
         ["合并断行", "重排跨页断行段落"],
         ["规范粗体", "楷体 / 中宋 → 语义 strong"],
-        ["嵌入图片", "保留 work/ 输出中的图片"],
+        ["校验图片引用", "报告 work/images 中缺失的图片引用"],
       ] as [string, string][],
       appearance: "外观",
       light: "浅色",
@@ -306,6 +316,7 @@ interface EnvState {
   engine: { status: string; version: string | null; path: string | null };
   mineru_configured: boolean;
   paddle_configured: boolean;
+  apikey_path: string | null;
 }
 
 const STAGE_KEYS = ["DETECT", "EXTRACT", "CLEAN", "BUILD"];
@@ -1214,7 +1225,7 @@ function LibraryScreen({ lang, books, outputDir, onRefresh, onOpenFolder, onOpen
 
 // ── SCREEN 4: SETTINGS ────────────────────────────────────────────────────────
 
-function SettingsScreen({ lang, setLang, darkMode, setDarkMode, backendPref, setBackendPref, outputDir, setOutputDir, cliPath, setCliPath, env, onSave }: {
+function SettingsScreen({ lang, setLang, darkMode, setDarkMode, backendPref, setBackendPref, outputDir, setOutputDir, cliPath, setCliPath, env, onSave, cleanOpts, setCleanOpts }: {
   lang: Lang;
   setLang: (l: Lang) => void;
   darkMode: boolean;
@@ -1227,12 +1238,53 @@ function SettingsScreen({ lang, setLang, darkMode, setDarkMode, backendPref, set
   setCliPath: (v: string) => void;
   env: EnvState | null;
   onSave: () => void;
+  cleanOpts: boolean[];
+  setCleanOpts: (v: boolean[]) => void;
 }) {
   const t = T[lang].settings;
   const [mineruToken, setMinerUToken] = useState("");
   const [paddleToken, setPaddleToken] = useState("");
-  const [cleanOpts, setCleanOpts] = useState([true, true, false, true]);
   const [showMineruToken, setShowMineruToken] = useState(false);
+  const [tokenNote, setTokenNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  // 输入框有值才写盘(空 = 不改动;删除请用 CLEAR 按钮)
+  const saveCredentials = async () => {
+    const jobs: { service: string; token: string }[] = [];
+    if (mineruToken.trim()) jobs.push({ service: "MinerU", token: mineruToken });
+    if (paddleToken.trim()) jobs.push({ service: "PaddleOCR-VL", token: paddleToken });
+    if (jobs.length === 0) return;
+    for (const j of jobs) {
+      const path = await invoke<string>("save_apikey", { service: j.service, token: j.token });
+      setTokenNote({ ok: true, text: t.tokenSaved(path) });
+    }
+    // 凭证写入后立刻清空输入框(不把密钥留在界面里)并刷新环境检查
+    setMinerUToken("");
+    setPaddleToken("");
+    onSave();
+  };
+
+  const clearCredential = async (service: string) => {
+    try {
+      await invoke<string>("save_apikey", { service, token: "" });
+      setTokenNote({ ok: true, text: t.tokenCleared });
+      onSave();
+    } catch (e) {
+      setTokenNote({ ok: false, text: String(e) });
+    }
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await saveCredentials();
+    } catch (e) {
+      setTokenNote({ ok: false, text: String(e) });
+    } finally {
+      setSaving(false);
+      onSave();
+    }
+  };
 
   const envItems = [
     { name: "Pandoc", status: env?.pandoc.status ?? "missing", version: env?.pandoc.version ?? null, path: env?.pandoc.path ?? null },
@@ -1323,7 +1375,7 @@ function SettingsScreen({ lang, setLang, darkMode, setDarkMode, backendPref, set
                       type={showMineruToken ? "text" : "password"}
                       value={mineruToken}
                       onChange={e => setMinerUToken(e.target.value)}
-                      placeholder="Read from apikey.json · optional"
+                      placeholder={t.tokenPlaceholder}
                       className="flex-1 px-3 py-2 border border-[var(--border)] bg-[var(--card)] text-[var(--foreground)] font-mono text-[11px] focus:outline-none focus:border-[#FF4D00] transition-colors placeholder:text-[var(--muted-foreground)]/50"
                     />
                     <button
@@ -1331,6 +1383,12 @@ function SettingsScreen({ lang, setLang, darkMode, setDarkMode, backendPref, set
                       className="px-2.5 border border-l-0 border-[var(--border)] font-mono text-[9px] text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:border-[var(--foreground)] transition-colors uppercase"
                     >
                       {t.show}
+                    </button>
+                    <button
+                      onClick={() => void clearCredential("MinerU")}
+                      className={`px-2.5 border border-l-0 border-[var(--border)] text-[9px] text-[var(--muted-foreground)] hover:text-[#CC1A1A] hover:border-[#CC1A1A] transition-colors ${lang === "zh" ? "cjk-label" : "font-mono tracking-[0.08em] uppercase"}`}
+                    >
+                      {t.clear}
                     </button>
                   </div>
                 </div>
@@ -1341,19 +1399,30 @@ function SettingsScreen({ lang, setLang, darkMode, setDarkMode, backendPref, set
                     </label>
                     <ConfiguredChip ok={env?.paddle_configured ?? false} />
                   </div>
-                  <input
-                    type="password"
-                    value={paddleToken}
-                    onChange={e => setPaddleToken(e.target.value)}
-                    placeholder="Read from apikey.json · optional"
-                    className="w-full px-3 py-2 border border-[var(--border)] bg-[var(--card)] text-[var(--foreground)] font-mono text-[11px] focus:outline-none focus:border-[#FF4D00] transition-colors placeholder:text-[var(--muted-foreground)]/50"
-                  />
+                  <div className="flex">
+                    <input
+                      type="password"
+                      value={paddleToken}
+                      onChange={e => setPaddleToken(e.target.value)}
+                      placeholder={t.tokenPlaceholder}
+                      className="flex-1 px-3 py-2 border border-[var(--border)] bg-[var(--card)] text-[var(--foreground)] font-mono text-[11px] focus:outline-none focus:border-[#FF4D00] transition-colors placeholder:text-[var(--muted-foreground)]/50"
+                    />
+                    <button
+                      onClick={() => void clearCredential("PaddleOCR-VL")}
+                      className={`px-2.5 border border-l-0 border-[var(--border)] text-[9px] text-[var(--muted-foreground)] hover:text-[#CC1A1A] hover:border-[#CC1A1A] transition-colors ${lang === "zh" ? "cjk-label" : "font-mono tracking-[0.08em] uppercase"}`}
+                    >
+                      {t.clear}
+                    </button>
+                  </div>
                 </div>
                 <p className="font-mono text-[9px] leading-relaxed text-[var(--muted-foreground)]">
-                  {lang === "zh"
-                    ? "凭证从项目根 apikey.json 读取,应用不保存。"
-                    : "Tokens are read from apikey.json and never stored by the app."}
+                  {t.credentialsNote}
                 </p>
+                {(tokenNote || env?.apikey_path) && (
+                  <p className={`text-[9px] leading-relaxed break-all ${tokenNote && !tokenNote.ok ? "text-[#CC1A1A]" : "text-[var(--muted-foreground)]"} ${lang === "zh" ? "cjk-label" : "font-mono"}`}>
+                    {tokenNote ? tokenNote.text : env?.apikey_path}
+                  </p>
+                )}
               </div>
             </section>
 
@@ -1429,7 +1498,7 @@ function SettingsScreen({ lang, setLang, darkMode, setDarkMode, backendPref, set
                   <Toggle
                     key={i}
                     checked={cleanOpts[i]}
-                    onChange={v => setCleanOpts(prev => prev.map((c, j) => j === i ? v : c))}
+                    onChange={v => setCleanOpts(cleanOpts.map((c, j) => j === i ? v : c))}
                     label={label}
                     description={desc}
                     lang={lang}
@@ -1493,7 +1562,7 @@ function SettingsScreen({ lang, setLang, darkMode, setDarkMode, backendPref, set
         {/* Save */}
         <div className="mt-8 flex items-center gap-6 max-w-[880px]">
           <ThinRule className="flex-1" />
-          <button onClick={onSave} className={`px-8 py-2.5 bg-[#FF4D00] text-white text-[10px] hover:bg-[#E04400] transition-colors focus:outline-none focus:ring-2 focus:ring-[#FF4D00] focus:ring-offset-2 focus:ring-offset-[var(--background)] ${lang === "zh" ? "cjk-label font-medium" : "font-mono tracking-[0.14em] uppercase"}`}>
+          <button onClick={() => void handleSave()} disabled={saving} className={`px-8 py-2.5 bg-[#FF4D00] text-white text-[10px] hover:bg-[#E04400] transition-colors focus:outline-none focus:ring-2 focus:ring-[#FF4D00] focus:ring-offset-2 focus:ring-offset-[var(--background)] disabled:opacity-60 ${lang === "zh" ? "cjk-label font-medium" : "font-mono tracking-[0.14em] uppercase"}`}>
             {t.save}
           </button>
         </div>
@@ -1505,7 +1574,18 @@ function SettingsScreen({ lang, setLang, darkMode, setDarkMode, backendPref, set
 // ── APP SHELL ─────────────────────────────────────────────────────────────────
 
 const NAV_SCREENS: Screen[] = ["drop", "queue", "library", "settings"];
-const APP_VERSION = "v0.2.2";
+const APP_VERSION = "v0.2.3";
+//: 清理项开关顺序与 T[*].settings.cleanOpts 一致(传给 CLI 的键名与 cleaner.CLEAN_KEYS 一致)
+const CLEAN_KEYS = ["page_numbers", "join_lines", "bold", "images"] as const;
+const CLEAN_DEFAULTS = [true, true, false, true];
+
+function loadCleanOpts(): boolean[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem("pdf2epub.clean") || "null");
+    if (Array.isArray(raw) && raw.length === CLEAN_KEYS.length) return raw.map(Boolean);
+  } catch { /* 忽略坏数据 */ }
+  return [...CLEAN_DEFAULTS];
+}
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>("drop");
@@ -1526,7 +1606,14 @@ export default function App() {
   const [cliPath, setCliPath] = useState<string>(
     () => localStorage.getItem("pdf2epub.cliPath") || "",
   );
+  const [cleanOpts, setCleanOpts] = useState<boolean[]>(loadCleanOpts);
   const canceled = useRef<Set<string>>(new Set());
+  // 当前生效的「关闭清理项」列表(传给 CLI --clean-disable)
+  // useMemo:保持引用稳定,避免拖放监听等依赖它的回调反复重注册
+  const cleanDisable = useMemo(
+    () => CLEAN_KEYS.filter((_, i) => !cleanOpts[i]),
+    [cleanOpts],
+  );
 
   // 监听 CLI 进度事件
   useEffect(() => {
@@ -1612,6 +1699,8 @@ export default function App() {
         backend: backendOverride ?? (backendPref === "auto" ? null : backendPref),
         retries: 1,
         cliPath: cliPath || null,
+        taskId: f.id,
+        cleanDisable,
       });
       if (canceled.current.has(f.id)) return;
       setFiles(prev => prev.map(x => x.id === f.id ? {
@@ -1636,7 +1725,7 @@ export default function App() {
         error: String(err),
       } : x));
     }
-  }, [outputDir, backendPref, cliPath]);
+  }, [outputDir, backendPref, cliPath, cleanDisable]);
 
   const addFiles = useCallback(async (paths: string[]) => {
     const newFiles: QueueFile[] = paths.map((p, i) => {
@@ -1694,8 +1783,11 @@ export default function App() {
     }
   }, [addFiles]);
 
+  // 取消:前端标记 + 真的杀掉 CLI 子进程树(Rust 侧 taskkill /T),
+  // 否则进程会继续跑完、写出 EPUB 并继续消耗云端 OCR 配额
   const cancelFile = useCallback((id: string) => {
     canceled.current.add(id);
+    void invoke("cancel_convert", { taskId: id }).catch(() => { /* 已退出 */ });
     setFiles(prev => prev.map(f => f.id === id ? {
       ...f,
       status: "cancelled" as FileStatus,
@@ -1723,7 +1815,13 @@ export default function App() {
       (f.status === "pending" || f.status === "converting") ? { ...f, status: "cancelled" as FileStatus } : f,
     ));
     for (const f of files) {
-      if (f.status === "pending" || f.status === "converting") canceled.current.add(f.id);
+      if (f.status === "pending" || f.status === "converting") {
+        canceled.current.add(f.id);
+        // 只对正在跑的任务需要杀进程;pending 的还没起来
+        if (f.status === "converting") {
+          void invoke("cancel_convert", { taskId: f.id }).catch(() => { /* 已退出 */ });
+        }
+      }
     }
   }, [files]);
 
@@ -1746,6 +1844,7 @@ export default function App() {
     localStorage.setItem("pdf2epub.backend", backendPref);
     localStorage.setItem("pdf2epub.outputDir", outputDir);
     localStorage.setItem("pdf2epub.cliPath", cliPath);
+    localStorage.setItem("pdf2epub.clean", JSON.stringify(cleanOpts));
     try {
       await invoke("set_cli_path", { path: cliPath || null });
     } catch { /* 忽略 */ }
@@ -1753,7 +1852,7 @@ export default function App() {
       const e = await invoke<EnvState>("check_env");
       setEnv(e);
     } catch { /* 忽略 */ }
-  }, [backendPref, outputDir, cliPath]);
+  }, [backendPref, outputDir, cliPath, cleanOpts]);
 
   // 书库数据源:library.json 数据库(转换完成自动入库,打开/刷新时同步)
   const books: LibraryBook[] = diskBooks.map(b => {
@@ -1918,6 +2017,8 @@ export default function App() {
               setCliPath={setCliPath}
               env={env}
               onSave={() => void saveSettings()}
+              cleanOpts={cleanOpts}
+              setCleanOpts={setCleanOpts}
             />
           )}
         </div>

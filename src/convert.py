@@ -41,6 +41,8 @@ def convert_auto(
     """自动检测并转换,返回 (ConversionResult, DetectionResult)。"""
     if config is None:
         config = load_config(config_path or config_file())
+        # 清理开关落到后端配置(如 bold 关闭 → pymupdf.bold_fonts 为空)
+        resolve_options(config).apply(config)
 
     pdf_path = Path(pdf_path)
     work_dir = Path(work_dir)
