@@ -38,6 +38,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "page_numbers,join_lines,cjk_spaces,bold,images")
     p.add_argument("--no-resume", action="store_true",
                    help="不复用云端 OCR 已提交的任务(默认中断后可续跑,不重新上传)")
+    p.add_argument("--strict", action="store_true",
+                   help="EPUB 生成后做结构校验,有失败项即判该文件失败(默认只告警)")
     p.add_argument("--log", default=None, help="日志文件(默认 logs/batch-<时间>.log)")
     p.add_argument("--no-log", action="store_true", help="不写日志文件(仅控制台)")
     p.add_argument("--verbose", "-v", action="store_true", help="详细日志")
@@ -120,6 +122,7 @@ def main(argv: list[str] | None = None) -> int:
         retries=args.retries,
         force=args.force,
         clean_options=clean_options,
+        strict=args.strict,
     )
     if not results:
         return 2
