@@ -302,7 +302,7 @@ wheels = [
 
 [[package]]
 name = "pdf2epub"
-version = "0.1.0"
+version = "0.2.4"
 source = { editable = "." }
 dependencies = [
     { name = "pymupdf4llm" },

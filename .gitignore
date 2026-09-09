@@ -45,7 +45,9 @@ desktop/src-tauri/gen/
 # 书库数据库(exe 同级运行时生成,含本机绝对路径)
 /library.json
 
-# PyInstaller CLI 打包产物(发布用,不入库)
+# PyInstaller CLI 打包产物(发布用,不入库;cli.spec 是构建输入,需要入库)
 dist_cli/
 build_cli/
-cli.spec
+
+# 发布包输出(打好的 zip 与 staging 目录,不入库)
+dist_release/
