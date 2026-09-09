@@ -8,7 +8,6 @@
 """
 from __future__ import annotations
 
-import base64
 import shutil
 import subprocess
 import sys
@@ -23,25 +22,24 @@ if str(SRC) not in sys.path:
 
 BOOK_CSS = PROJECT_ROOT / "config" / "book.css"
 
-# 8x8 纯色 PNG(手工拼字节,避免依赖 Pillow)
-_PNG_1PX = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAIAQMAAAD+wSzIAAAABlBMVEX///+/v7+jQ3Y5AAAADklEQVQI12P4AIX8"
-    "EBlbAN9WDeYAAAAASUVORK5CYII="
-)
+
+def write_png(path: Path, size: int = 16) -> Path:
+    """写一张合法的小 PNG(PyMuPDF 渲染),供 PDF/EPUB 图片引用测试使用。"""
+    import pymupdf
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, size, size))
+    pix.set_rect(pix.irect, (200, 60, 0))
+    pix.save(path)
+    return path
 
 
 def _pandoc() -> str:
+    """pandoc 可执行文件;缺失则 skip(避免环境差异造成假红)。"""
     exe = shutil.which("pandoc")
     if exe is None:
         pytest.skip("未安装 pandoc(EPUB 生成依赖),跳过需要它的测试")
     return exe
-
-
-def write_png(path: Path) -> Path:
-    """写一张可用的最小 PNG(8x8),供图片引用测试使用。"""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(_PNG_1PX)
-    return path
 
 
 def build_epub(
@@ -105,3 +103,29 @@ def sample_epub(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """一份结构完整的 EPUB(含图片 + MathML 公式)。"""
     base = tmp_path_factory.mktemp("epub_sample")
     return build_epub(base / "src", base / "ok.epub", title="样本书")
+
+
+def make_pdf(path: Path, *, pages: int = 2, with_image: bool = True) -> Path:
+    """现场生成一个小 PDF(中文正文 + 可选图片),不依赖仓库里的样本文件。
+
+    用 PyMuPDF 直接排版,因此转换链路(text 检测 → PyMuPDF4LLM 提取)可离线跑通。
+    """
+    import pymupdf
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    img = write_png(path.parent / "fig.png") if with_image else None
+    doc = pymupdf.open()
+    for i in range(pages):
+        page = doc.new_page(width=595, height=842)
+        page.insert_textbox(pymupdf.Rect(60, 60, 535, 100),
+                            f"第 {i + 1} 章 测试标题", fontname="china-s", fontsize=18)
+        page.insert_textbox(
+            pymupdf.Rect(60, 110, 535, 200),
+            "这是用于管线测试的正文段落,内容长度足以被判定为文字页,并以句号结尾。",
+            fontname="china-s", fontsize=11, lineheight=1.6,
+        )
+        if img is not None and i == 0:
+            page.insert_image(pymupdf.Rect(60, 220, 260, 370), filename=str(img))
+    doc.save(path)
+    doc.close()
+    return path

@@ -104,7 +104,12 @@ const T = {
       cleaning: "CLEANING OPTIONS",
       cleanOpts: [
         ["Remove page numbers", "Strip standalone page-number lines"],
+        ["Strip running heads", "Drop short lines repeated across pages"],
         ["Join broken lines", "Re-flow paragraphs split across pages"],
+        ["Fix OCR spaces", "\"Py Mu PDF\" → \"PyMuPDF\" (Chinese lines only)"],
+        ["Normalize CJK spaces", "Remove stray spaces between CJK characters"],
+        ["Dedupe headings", "Keep one of adjacent duplicate headings"],
+        ["Fix heading levels", "Drop empty headings, flatten level jumps"],
         ["Normalize bold fonts", "KaiTi / STZhongsong → semantic strong"],
         ["Verify image refs", "Report image links missing from work/images"],
       ] as [string, string][],
@@ -222,7 +227,12 @@ const T = {
       cleaning: "清理选项",
       cleanOpts: [
         ["删除页码", "去除独立页码行"],
+        ["剔除页眉页脚", "删除跨页重复出现的短行（书名/章节名）"],
         ["合并断行", "重排跨页断行段落"],
+        ["合并 OCR 空格", "「Py Mu PDF」→「PyMuPDF」（仅中文行）"],
+        ["修正中文空格", "去除汉字/数字之间的多余空格"],
+        ["重复标题去重", "相邻同名标题只保留一条"],
+        ["标题层级修正", "删除空标题，收敛层级跳跃"],
         ["规范粗体", "楷体 / 中宋 → 语义 strong"],
         ["校验图片引用", "报告 work/images 中缺失的图片引用"],
       ] as [string, string][],
@@ -1576,8 +1586,11 @@ function SettingsScreen({ lang, setLang, darkMode, setDarkMode, backendPref, set
 const NAV_SCREENS: Screen[] = ["drop", "queue", "library", "settings"];
 const APP_VERSION = "v0.2.3";
 //: 清理项开关顺序与 T[*].settings.cleanOpts 一致(传给 CLI 的键名与 cleaner.CLEAN_KEYS 一致)
-const CLEAN_KEYS = ["page_numbers", "join_lines", "bold", "images"] as const;
-const CLEAN_DEFAULTS = [true, true, false, true];
+const CLEAN_KEYS = [
+  "page_numbers", "running_heads", "join_lines", "ocr_spaces", "cjk_spaces",
+  "dup_headings", "headings", "bold", "images",
+] as const;
+const CLEAN_DEFAULTS = [true, true, true, true, true, true, true, false, true];
 
 function loadCleanOpts(): boolean[] {
   try {

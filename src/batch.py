@@ -223,7 +223,9 @@ def _process_pdf(source, config, work_root, output_dir, backend_override, t0, re
             )
 
     # Markdown 清理(按 clean_options 开关)
-    clean_file(conv.book_md, options=clean_options)
+    report = clean_file(conv.book_md, options=clean_options)
+    for issue in report.issues:
+        logger.info("[clean] %s", issue)
 
     title, author = parse_title_author(source.stem)
     epub = build_epub(conv.book_md, work, output_dir, title=title, author=author, out_name=out_name)
@@ -251,7 +253,9 @@ def _process_markdown(source, work_root, output_dir, t0, result, safe_stem, out_
             if img.is_file():
                 shutil.copy2(img, dst_images / img.name)
 
-    clean_file(book_md, options=clean_options)
+    report = clean_file(book_md, options=clean_options)
+    for issue in report.issues:
+        logger.info("[clean] %s", issue)
     title, author = parse_title_author(source.stem)
     epub = build_epub(book_md, work, output_dir, title=title, author=author, out_name=out_name)
     result.epub = epub

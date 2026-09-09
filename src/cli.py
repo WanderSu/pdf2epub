@@ -34,8 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--retries", type=int, default=2, help="单文件失败重试次数(默认 2)")
     p.add_argument("--force", action="store_true", help="强制重新处理(忽略已完成)")
     p.add_argument("--clean-disable", default=None,
-                   help="关闭指定清理项(逗号分隔,可重复): "
-                        "page_numbers,join_lines,cjk_spaces,bold,images")
+                   help="关闭指定清理项(逗号分隔,可重复): " + ",".join(CLEAN_KEYS))
     p.add_argument("--no-resume", action="store_true",
                    help="不复用云端 OCR 已提交的任务(默认中断后可续跑,不重新上传)")
     p.add_argument("--strict", action="store_true",
