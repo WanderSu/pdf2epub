@@ -67,7 +67,7 @@ MinerU 输出 ──► full.md + images ──┤      (自动:页码/断行/�
 - **Import** — 拖放 / 选择 PDF、Markdown;类型检测预览(TXT / SCN / HYB / MD)与计划后端、分片数一目了然
 - **Queue** — 转换队列,阶段进度(DETECT → EXTRACT → CLEAN → BUILD)、分片指示、伪文字层提醒、失败重试、实时控制台日志;取消按钮会真的结束 CLI 子进程树(不会白跑完)
 - **Library** — 转换结果,一键打开 EPUB / 在资源管理器中定位 / 重新转换
-- **Settings** — OCR 后端(Auto / MinerU / PaddleOCR)、输出目录、CLI 路径、API 凭证(填好后写入 `apikey.json`,CLEAR 删除)、环境检查(Pandoc / 引擎 / 凭证)、清理选项(生效并随设置保存)、主题(亮/暗)、语言(中/英)
+- **Settings** — OCR 后端(Auto / MinerU / PaddleOCR)、输出目录、CLI 路径、API 凭证(填好后写入 `apikey.json`,CLEAR 删除)、环境检查(Pandoc / 引擎 / 凭证)、清理选项(生效并随设置保存)、质量校验(严格校验 EPUB,默认关)、主题(亮/暗)、语言(中/英)
 
 ### 方式二:CLI
 
@@ -220,6 +220,12 @@ OCR 是云端按页计费服务。确认这本书值得转再跑;`--retries 0` �
 <summary><b>OCR 跑到一半超时 / 关了窗口,配额白扣?</b></summary>
 
 不会。任务提交后 batch/job id 会落盘(`work/<书名>/.ocr_task.json`),重跑同一文件时直接继续轮询原任务,不重新上传、不重复扣配额;日志会显示「发现未取回的云端任务」。要强制重新提交用 `--no-resume`。
+</details>
+
+<details>
+<summary><b>怎么确认图片 / 公式真的进 EPUB 了?</b></summary>
+
+每次转换都会自动做一次结构校验(包结构、图片引用、MathML、脚注、TOC、内部链接、CSS),日志里打出 `[verify] N 失败 N 警告`。默认只告警;**要让「有失败项」直接算转换失败**,桌面端打开 **Settings → 质量校验 → 严格校验 EPUB**(默认关闭),或 CLI 加 `--strict`。也可单独复核:`python scripts/verify_epub.py output/某书.epub --expect-images 2`。
 </details>
 
 <details>

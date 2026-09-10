@@ -39,7 +39,7 @@ Built with **Tauri 2 + React**, UI from a Figma design (Swiss International styl
 - **Import**: drag & drop / pick PDF, Markdown
 - **Queue**: live progress, per-file logs, backend badges (LOCAL / MINERU / PADDLE); Cancel really terminates the CLI process tree
 - **Library**: conversion results, reveal in Explorer with one click
-- **Settings**: OCR backend (auto / MinerU / PaddleOCR-VL), output directory, CLI path, API credentials (written to `apikey.json`, CLEAR to remove), cleaning options (persisted and applied), theme
+- **Settings**: OCR backend (auto / MinerU / PaddleOCR-VL), output directory, CLI path, API credentials (written to `apikey.json`, CLEAR to remove), cleaning options (persisted and applied), strict EPUB validation (off by default), theme
 
 ### Install & run
 
@@ -169,6 +169,8 @@ pymupdf:
 ```bash
 .venv/Scripts/python.exe scripts/verify_epub.py output/my_book.epub --expect-images 2
 ```
+
+Every conversion already runs this structure check (package/manifest, image refs, MathML, footnotes, TOC, internal links, CSS) and logs `[verify] N failed N warnings` — warnings only by default. To make any failure fail the conversion, pass `--strict`, or flip **Settings → quality check → strict EPUB validation** in the desktop app (off by default).
 
 Always open the result in a real reader (Apple Books / WeRead / KOReader) for a final check.
 

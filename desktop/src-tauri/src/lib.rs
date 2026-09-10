@@ -106,6 +106,7 @@ async fn convert_file(
     cli_path: Option<String>,
     task_id: Option<String>,
     clean_disable: Option<Vec<String>>,
+    strict: Option<bool>,
 ) -> Result<ConvertResult, String> {
     let state: State<CliConfig> = app.state();
     let cli = match cli_path {
@@ -141,6 +142,10 @@ async fn convert_file(
     // 桌面端「清理选项」:关闭的项透传给 CLI(--clean-disable)
     if let Some(list) = clean_disable.filter(|l| !l.is_empty()) {
         cmd.arg("--clean-disable").arg(list.join(","));
+    }
+    // 「严格校验」开关(默认关):开启后 CLI 生成 EPUB 后做结构校验,有失败项即判该文件失败
+    if strict.unwrap_or(false) {
+        cmd.arg("--strict");
     }
 
     let app2 = app.clone();
