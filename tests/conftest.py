@@ -109,6 +109,10 @@ def make_pdf(path: Path, *, pages: int = 2, with_image: bool = True) -> Path:
     """现场生成一个小 PDF(中文正文 + 可选图片),不依赖仓库里的样本文件。
 
     用 PyMuPDF 直接排版,因此转换链路(text 检测 → PyMuPDF4LLM 提取)可离线跑通。
+
+    **每页正文必须远超检测阈值(有效字符 ≥50)**:低于阈值会被判成扫描版,于是
+    本地链路的测试会去调云端 OCR(慢 + 消耗额度)。每页文字带页码,既加长长度,
+    也避免同一段落在多页重复而被清理器当成页眉页脚剔除。
     """
     import pymupdf
 
@@ -120,12 +124,52 @@ def make_pdf(path: Path, *, pages: int = 2, with_image: bool = True) -> Path:
         page.insert_textbox(pymupdf.Rect(60, 60, 535, 100),
                             f"第 {i + 1} 章 测试标题", fontname="china-s", fontsize=18)
         page.insert_textbox(
-            pymupdf.Rect(60, 110, 535, 200),
-            "这是用于管线测试的正文段落,内容长度足以被判定为文字页,并以句号结尾。",
+            pymupdf.Rect(60, 110, 535, 300),
+            f"这是第 {i + 1} 页用于管线测试的正文段落,内容长度足以被判定为文字页,"
+            f"并以句号结尾;再补一句保证有效字符数稳定超过检测阈值。\n"
+            f"第二段同样保持足够长度,避免样本被判成扫描版 —— 一旦被判扫描版,"
+            f"本地链路的测试就会去调云端 OCR,既慢又消耗额度。",
             fontname="china-s", fontsize=11, lineheight=1.6,
         )
         if img is not None and i == 0:
-            page.insert_image(pymupdf.Rect(60, 220, 260, 370), filename=str(img))
+            page.insert_image(pymupdf.Rect(60, 320, 260, 470), filename=str(img))
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def make_fake_text_layer_pdf(path: Path, *, text_pages: int = 2,
+                             junk_pages: int = 1) -> Path:
+    """生成「部分页文字层损坏(伪文字层)」的 PDF,供检测器 golden 样本使用。
+
+    真实伪文字层是嵌入字体没有正确 ToUnicode → 提取出私有区乱码;但 PyMuPDF
+    **写不出未映射码位**(会退化成 `?` 或被丢弃),所以这里用 CJK 扩展 A 字符模拟:
+    它落在检测器的 SUSPICIOUS_RE 里、正常正文几乎不出现,走的是同一条判定路径
+    (页内可疑字符占比 > 阈值 → 视为伪文字层页,不算文字页)。
+    前 text_pages 页是正常文字页,其余 junk_pages 页是乱码页。
+    """
+    import pymupdf
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    junk = "".join(chr(0x3400 + i) for i in range(10))     # 㐀㐁㐂… 每行 10 字
+
+    doc = pymupdf.open()
+    for i in range(text_pages + junk_pages):
+        page = doc.new_page(width=595, height=842)
+        if i < text_pages:
+            page.insert_textbox(
+                pymupdf.Rect(60, 60, 535, 260),
+                f"第 {i + 1} 页正常文字层,内容长度足以被判定为文字页,并以句号结尾。"
+                f"再补一句保证有效字符数稳定超过检测阈值(每页 50 字),"
+                f"避免这个样本被判成扫描版而跑去调云端 OCR。",
+                fontname="china-s", fontsize=12, lineheight=1.6,
+            )
+            continue
+        for line in range(8):
+            page.insert_textbox(
+                pymupdf.Rect(60, 60 + line * 40, 535, 100 + line * 40),
+                junk, fontname="china-s", fontsize=14,
+            )
     doc.save(path)
     doc.close()
     return path
@@ -152,9 +196,10 @@ def make_mixed_pdf(path: Path, layout: str = "TTTSSTTT") -> Path:
         page.insert_textbox(pymupdf.Rect(60, 60, 535, 120),
                             f"第 {i} 章 测试标题", fontname="china-s", fontsize=18)
         page.insert_textbox(
-            pymupdf.Rect(60, 130, 535, 260),
+            pymupdf.Rect(60, 130, 535, 300),
             f"这是原始 PDF 第 {i} 页的正文段落,内容长度足以被判定为文字页,"
-            f"并以句号结尾;再补一句话确保字符数稳定超过阈值。",
+            f"并以句号结尾;再补一句话确保字符数稳定超过检测阈值(每页 50 字),"
+            f"以免这个样本被判成扫描版而跑去调云端 OCR。",
             fontname="china-s", fontsize=11, lineheight=1.6,
         )
     doc.save(path)
