@@ -1584,7 +1584,7 @@ function SettingsScreen({ lang, setLang, darkMode, setDarkMode, backendPref, set
 // ── APP SHELL ─────────────────────────────────────────────────────────────────
 
 const NAV_SCREENS: Screen[] = ["drop", "queue", "library", "settings"];
-const APP_VERSION = "v0.2.3";
+const APP_VERSION = "v0.2.4";
 //: 清理项开关顺序与 T[*].settings.cleanOpts 一致(传给 CLI 的键名与 cleaner.CLEAN_KEYS 一致)
 const CLEAN_KEYS = [
   "page_numbers", "running_heads", "join_lines", "ocr_spaces", "cjk_spaces",

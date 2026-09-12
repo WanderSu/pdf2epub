@@ -33,7 +33,7 @@
 | 🧠 **伪文字层识别** | 提取乱码的 PDF 会提示你,由你决定是否改用 OCR |
 | ☁️ **云端 OCR** | MinerU / PaddleOCR-VL 可切换;MinerU 失败自动降级为渲染纯图重试 |
 | 📇 **元数据** | 文件名符合「标题 - 作者」自动嵌入 `dc:title` / `dc:creator` |
-| 🧹 **智能清理** | 页码剔除、跨页断行连接、中文空格修正、强调字体标注粗体;各项可单独开关 |
+| 🧹 **智能清理** | 页码剔除、页眉页脚重复行剔除、跨页断行连接、OCR 空格合并、中文空格修正、重复/空标题与层级修正、强调字体标注粗体;各项可单独开关 |
 | ♻️ **中断续跑** | 云端 OCR 已提交的任务(batch/job id)落盘;超时、关窗口后重跑直接继续轮询,不重新上传、不重复扣配额 |
 | 📦 **批处理** | 失败重试(指数退避)、跳过已完成、断点续跑、单文件失败不中断 |
 | 📚 **>200 页自动分片** | MinerU 单任务限 200 页/200MB;超大书自动按 page_ranges 分段提交、并行解析、按序合并 |
@@ -55,7 +55,7 @@ MinerU 输出 ──► full.md + images ──┤      (自动:页码/断行/�
 
 ### 方式一:桌面端(推荐)
 
-从 [Releases](https://github.com/WanderSu/pdf2epub/releases) 下载 `pdf2epub-v0.2.3-win-x64.zip` 并解压到任意目录,双击 `pdf2epub.exe`。
+从 [Releases](https://github.com/WanderSu/pdf2epub/releases) 下载 `pdf2epub-v0.2.4-win-x64.zip` 并解压到任意目录,双击 `pdf2epub.exe`。
 
 > 💡 压缩包内含转换引擎 `cli.exe`(已内置 Python 运行环境,免安装 Python);保持 `pdf2epub.exe`、`cli.exe`、`config/` 三者同级即可运行,无需放在项目根。
 
@@ -147,7 +147,9 @@ ebook-converter <文件或目录>... [-o 输出目录] [选项]
 | `-o, --output DIR` | EPUB 输出目录(默认 `output/`) |
 | `--retries N` | 单文件失败重试次数,指数退避(默认 2) |
 | `--force` | 忽略「已完成」状态,强制重新转换 |
-| `--clean-disable LIST` | 关闭指定清理项(逗号分隔):`page_numbers,join_lines,cjk_spaces,bold,images` |
+| `--clean-disable LIST` | 关闭指定清理项(逗号分隔):`page_numbers,running_heads,join_lines,ocr_spaces,cjk_spaces,dup_headings,headings,bold,images` |
+| `--strict` | EPUB 生成后做结构校验(图片/公式/脚注/TOC/内部链接/CSS),有失败项即判该文件失败(默认只告警) |
+| `--dry-run` | 预检:只输出类型/页数/计划后端/分片数与当日 OCR 额度,不产出任何文件 |
 | `--no-resume` | 不复用云端已提交的 OCR 任务(默认中断后续跑,不重新上传) |
 | `--no-log` | 不写日志文件 |
 | `--verbose` | 控制台输出 DEBUG 日志 |
@@ -165,8 +167,12 @@ mineru:
   resume: true               # 中断后复用已提交的云端任务(续跑)
 clean:                       # 清理项开关(桌面端「清理选项」/ CLI --clean-disable 同源)
   page_numbers: true         # 剔除独立页码行
+  running_heads: true        # 剔除页眉页脚重复行(跨页反复出现的短行)
   join_lines: true           # 跨页断行连接
+  ocr_spaces: true           # OCR 异常空格合并(中文行内被拆开的拉丁词)
   cjk_spaces: true           # 中文排版空格修正
+  dup_headings: true         # 相邻同名标题去重
+  headings: true             # 空标题删除 + 标题层级跳跃修正
   bold: false                # 强调字体 → ** 粗体
   images: true               # 图片引用存在性校验
 pymupdf:

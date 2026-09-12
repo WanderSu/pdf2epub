@@ -1,6 +1,6 @@
 [project]
 name = "pdf2epub"
-version = "0.1.0"
+version = "0.2.4"
 description = "PDF → EPUB 电子书转换工具(统一输出高质量 EPUB)"
 requires-python = ">=3.12"
 dependencies = [

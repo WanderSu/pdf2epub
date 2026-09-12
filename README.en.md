@@ -26,7 +26,7 @@ Existing Markdown ────────────────────�
 - **Fake-text-layer detection**: PDFs whose text layer is corrupted (renders fine but extracts garbage) trigger a prompt — you decide whether to use OCR
 - **Cloud OCR**: MinerU or PaddleOCR-VL (switchable); MinerU failures automatically fall back to "render-to-image and retry"
 - **Metadata**: filenames matching `Title - Author` are parsed into EPUB `dc:title` / `dc:creator`
-- **Cleaning**: page-number removal, cross-page line joining, CJK spacing fixes, emphasis-font → bold, image-reference validation — each toggleable
+- **Cleaning**: page-number removal, running-head stripping, cross-page line joining, OCR space merging, CJK spacing fixes, heading dedupe/level fixes, emphasis-font → bold, image-reference validation — each toggleable
 - **Resumable cloud OCR**: submitted batch/job ids are persisted; after a timeout or closed window, re-running polls the same task instead of re-uploading (no wasted quota)
 - **Batch mode**: exponential-backoff retries, skip completed, resume support, per-file failure isolation
 - **>200-page auto-sharding**: MinerU caps a single task at 200 pages / 200MB; larger books are submitted in page-range chunks, parsed in parallel, then merged in order
@@ -43,7 +43,7 @@ Built with **Tauri 2 + React**, UI from a Figma design (Swiss International styl
 
 ### Install & run
 
-Grab `pdf2epub-v0.2.3-win-x64.zip` from [Releases](https://github.com/WanderSu/pdf2epub/releases) and extract it anywhere, then double-click `pdf2epub.exe`.
+Grab `pdf2epub-v0.2.4-win-x64.zip` from [Releases](https://github.com/WanderSu/pdf2epub/releases) and extract it anywhere, then double-click `pdf2epub.exe`.
 
 > The zip bundles the converter engine (`cli.exe`, self-contained Python — no Python install needed). Keep `pdf2epub.exe`, `cli.exe` and `config/` in the same folder; no need to place it in the project root.
 
@@ -130,7 +130,9 @@ ebook-converter <files-or-dirs>... [-o outdir] [options]
   --backend {auto,mineru,paddleocr,pymupdf}  force backend (default auto)
   --retries N      retries per file (exponential backoff, default 2)
   --force          ignore "already done" and reconvert
-  --clean-disable LIST  turn off cleaning steps (page_numbers,join_lines,cjk_spaces,bold,images)
+  --clean-disable LIST  turn off cleaning steps (page_numbers,running_heads,join_lines,ocr_spaces,cjk_spaces,dup_headings,headings,bold,images)
+  --strict         validate the produced EPUB (images/math/footnotes/TOC/links/CSS); any failure fails the file
+  --dry-run        report type/pages/backend/shard count and daily OCR quota only; writes nothing
   --no-resume      do not reuse a submitted cloud OCR task (default: resume, no re-upload)
   --no-log         skip log file
   --verbose        DEBUG logs to console
@@ -147,8 +149,12 @@ mineru:
   resume: true               # reuse a submitted cloud task after an interruption
 clean:                       # cleaning switches (shared with the desktop "cleaning options" + --clean-disable)
   page_numbers: true
+  running_heads: true        # strip short lines repeated across pages (running heads/footers)
   join_lines: true
+  ocr_spaces: true           # merge letters split by OCR inside Chinese lines
   cjk_spaces: true
+  dup_headings: true         # drop adjacent duplicate headings
+  headings: true             # drop empty headings, flatten level jumps
   bold: false                # emphasis fonts → **bold**
   images: true               # validate image references
 pymupdf:
