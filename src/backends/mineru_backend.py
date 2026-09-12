@@ -45,7 +45,21 @@ STATE_LABELS = {
 
 
 class MinerUError(RuntimeError):
-    """MinerU API 错误。"""
+    """MinerU API 错误。
+
+    err_msg 是**云端返回的原始错误信息**:降级判定只看它,不看我们自己拼的中文前缀 ——
+    否则 `MinerU 解析失败: xxx` 这类消息会让任何失败都被误判成「解析失败」而触发
+    渲染纯图重试(白跑一轮、重复消耗额度)。
+    """
+
+    def __init__(self, message: str, *, err_msg: str | None = None) -> None:
+        super().__init__(message)
+        self.err_msg = message if err_msg is None else err_msg
+
+
+def _is_parse_failure(err_msg: str) -> bool:
+    """判断是否属于「MinerU 解析不动这个文件」,只有这种才值得降级重试。"""
+    return "parsing failed" in err_msg or "解析失败" in err_msg
 
 
 class MinerUAdapter(Backend):
@@ -121,8 +135,9 @@ class MinerUAdapter(Backend):
         try:
             result = self._convert_inner(pdf_path, work_dir, variant="original")
         except MinerUError as e:
-            # 伪文字层等结构异常的文件 MinerU 会解析失败,降级为渲染纯图后重试
-            if "parsing failed" not in str(e) and "解析失败" not in str(e):
+            # 伪文字层等结构异常的文件 MinerU 会解析失败,降级为渲染纯图后重试;
+            # 其他错误(网络、额度、格式不支持)直接抛 —— 重试只是白跑一轮
+            if not _is_parse_failure(e.err_msg):
                 raise
             print("[mineru] 原文件解析失败(可能为伪文字层),降级为渲染纯图后重试 ...")
             self._cache(work_dir).clear()   # 原文件任务已判死,缓存作废
@@ -341,7 +356,8 @@ class MinerUAdapter(Backend):
                     collected[key] = item
                     remaining.discard(key)
                 elif state == "failed":
-                    raise MinerUError(f"MinerU 解析失败: {item.get('err_msg', '未知错误')}")
+                    detail = str(item.get("err_msg", "未知错误"))
+                    raise MinerUError(f"MinerU 解析失败: {detail}", err_msg=detail)
                 else:
                     progress = item.get("extract_progress", {})
                     detail = ""
