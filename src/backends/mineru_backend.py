@@ -27,6 +27,7 @@ import pymupdf
 from .base import Backend, ConversionResult, TaskCache, normalize_image_refs
 from page_result import page_marker_from_range
 from paths import load_api_key
+import events
 
 DEFAULT_BASE_URL = "https://mineru.net/api/v4"
 DEFAULT_TIMEOUT = 600      # 轮询总超时(秒)
@@ -214,6 +215,8 @@ class MinerUAdapter(Backend):
             batch_id=task_id, targets=targets, total_pages=total_pages,
             page_ranges=ranges, model_version=self.model_version,
         )
+        if len(targets) > 1:
+            events.emit("shards", total=len(targets), ranges=list(ranges))
         items = self._poll_batch(task_id, targets)
         result = self._unpack(items, work_dir, task_id, page_ranges=ranges)
         cache.clear()
@@ -355,6 +358,8 @@ class MinerUAdapter(Backend):
                 if state == "done":
                     collected[key] = item
                     remaining.discard(key)
+                    # 结构化进度:每收集到一个条目就报一次(前端据此显示真实百分比)
+                    events.progress("extract", len(collected), len(targets), detail="mineru")
                 elif state == "failed":
                     detail = str(item.get("err_msg", "未知错误"))
                     raise MinerUError(f"MinerU 解析失败: {detail}", err_msg=detail)

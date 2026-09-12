@@ -11,6 +11,18 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+// 引擎事件流(--json-events):状态与进度的唯一可信来源(见 src/events.ts)
+import {
+  initialEventState,
+  freshStages,
+  parseEventLine,
+  progressOf,
+  reduceEvent,
+  type EventState,
+  type Signatures,
+  type StageNode,
+  type StageState,
+} from "./events";
 
 // ── I18N ─────────────────────────────────────────────────────────────────────
 //  技术 token(TXT/SCN/HYB/MD、AUTO/LOCAL/MINERU/PADDLE、工序名、状态 chip)
@@ -361,11 +373,7 @@ type Screen = "convert" | "library" | "settings";
 type FileStatus = "pending" | "converting" | "done" | "failed" | "cancelled";
 type Backend = "Local" | "MinerU" | "PaddleOCR" | "Auto";
 type FileType = "TXT" | "SCN" | "HYB" | "MD";
-type StageState = "pending" | "active" | "done" | "failed";
 type BackendPref = "auto" | "mineru" | "paddleocr";
-
-interface StageNode { key: string; state: StageState; isOcr?: boolean; }
-interface Signatures { current: number; total: number; }
 
 interface QueueFile {
   id: string;
@@ -386,12 +394,18 @@ interface QueueFile {
   error?: string;
   epub?: string;
   date?: string;
+  /** 引擎事件流状态(--json-events);进度与阶段由它驱动 */
+  engine?: EventState;
+  /** 该文件出现过「非事件」日志 → 退化为旧正则解析(老版 CLI 兜底) */
+  legacy?: boolean;
 }
 
 interface ConsoleLine {
   ts: string;
   level: "INFO" | "WARN" | "ERROR";
   text: string;
+  /** 该行来自「老版 CLI + 正则兜底」路径(事件流缺失) */
+  legacy?: boolean;
 }
 
 interface LibraryBook {
@@ -456,7 +470,6 @@ interface RecentEntry {
   at: number;
 }
 
-const STAGE_KEYS = ["DETECT", "EXTRACT", "CLEAN", "BUILD"];
 const APP_VERSION = "v0.3.0";
 const RECENT_KEY = "pdf2epub.recent";
 const MAX_RECENT = 8;
@@ -468,7 +481,9 @@ const CLEAN_KEYS = [
 ] as const;
 const CLEAN_DEFAULTS = [true, true, true, true, true, true, true, false, true];
 
-// ── LOG PARSERS(对齐 CLI 真实输出)────────────────────────────────────────────
+// ── LOG PARSERS(legacy 兜底:仅在事件流缺失时使用)────────────────────────────
+//  正常路径下状态全部来自引擎事件流(src/events.ts)。下面这些正则只服务于
+//  「新版前端 + 老版 CLI」的组合,命中即标记 legacy(控制台会显示徽标)。
 
 function parseTypeFromLine(line: string, name: string): FileType | undefined {
   if (/\.md$/i.test(name)) return "MD";
@@ -516,27 +531,6 @@ function updateStagesFromLine(line: string, current: StageNode[]): StageNode[] {
   return s;
 }
 
-function parseShardsFromLine(line: string): { current: number; total: number } | undefined {
-  const m = line.match(/自动分片\s*(\d+)\s*段/);
-  if (m) return { current: 1, total: parseInt(m[1], 10) };
-  const s = line.match(/shard\s*(\d+)\s*\/\s*(\d+)/i);
-  if (s) return { current: parseInt(s[1], 10), total: parseInt(s[2], 10) };
-  return undefined;
-}
-
-function parseBackendFromLine(line: string, fallback: Backend): Backend {
-  if (/text\/pymupdf|manual\/pymupdf|\(pymupdf\)|pymupdf/.test(line)) return "Local";
-  if (/mineru/.test(line)) return "MinerU";
-  if (/paddleocr|paddle/.test(line)) return "PaddleOCR";
-  return fallback;
-}
-
-function parsePagesFromLine(line: string, fallback: number): number {
-  const m = line.match(/(\d+)\/(\d+)\s*页/);
-  if (m) return parseInt(m[2], 10);
-  return fallback;
-}
-
 function parseWarningFromLine(line: string): boolean {
   return /伪文字层|疑似|乱码|garbage/i.test(line);
 }
@@ -544,8 +538,6 @@ function parseWarningFromLine(line: string): boolean {
 function normPath(p: string): string {
   return p.replace(/\\/g, "/").toLowerCase();
 }
-
-const freshStages = (): StageNode[] => STAGE_KEYS.map(k => ({ key: k, state: "pending" as StageState }));
 
 function formatSize(bytes: number): string {
   if (!bytes) return "—";
@@ -655,7 +647,9 @@ function BackendBadge({ backend }: { backend?: Backend }) {
 
 /** 工序:制版 → 检字 → 校勘 → 付印(云端 OCR 时标 OCR) */
 function StageStepper({ stages, signatures, lang }: { stages: StageNode[]; signatures?: Signatures; lang: Lang }) {
-  const CRAFT_ZH: Record<string, string> = { DETECT: "制版", EXTRACT: "检字", CLEAN: "校勘", BUILD: "付印" };
+  const CRAFT_ZH: Record<string, string> = {
+    DETECT: "制版", EXTRACT: "检字", CLEAN: "校勘", BUILD: "付印", VERIFY: "核验",
+  };
   return (
     <div className="flex items-center gap-0 flex-wrap">
       {stages.map((s, i) => {
@@ -840,6 +834,11 @@ function ComposingRoom({ expanded, setExpanded, lang, lines }: {
               <span className={`font-mono text-[10px] ${line.level === "ERROR" ? "text-[var(--danger)]" : "text-[var(--foreground)]"}`}>
                 {line.text}
               </span>
+              {line.legacy && (
+                <span className="font-mono text-[9px] px-1 border border-[var(--warn)] text-[var(--warn)] shrink-0 self-center" title="状态由旧正则从日志文本猜测(新版 CLI 会发 JSON 事件)">
+                  LEGACY
+                </span>
+              )}
             </div>
           ))}
         </div>
@@ -1885,26 +1884,56 @@ export default function App() {
   const cleanDisable = useMemo(() => CLEAN_KEYS.filter((_, i) => !cleanOpts[i]), [cleanOpts]);
 
   // ── CLI 进度事件 ──
+  //  stdout 的 JSON 事件(--json-events)是状态/进度的唯一来源;stderr 的人类日志
+  //  进控制台。只有拿不到事件(老版 CLI)时才退回正则解析,并给该文件打 legacy 标记。
   useEffect(() => {
     let unlisten: (() => void) | undefined;
-    listen<{ file: string; line: string }>("conv://progress", e => {
+    // 事件流是否见过该文件(未见事件却收到日志 = 老版 CLI,退化正则并标注)
+    const seenEvent = new Set<string>();
+    const logLines = new Map<string, number>();
+    listen<{ file: string; line: string; channel?: string }>("conv://progress", e => {
       const { file, line } = e.payload;
-      const ts = new Date().toTimeString().slice(0, 8);
-      setConsoleLines(prev => [...prev.slice(-300), {
-        ts,
-        level: /error|失败/i.test(line) ? "ERROR" : /warn|伪文字层|疑似/i.test(line) ? "WARN" : "INFO",
-        text: line,
-      }]);
+      const ev = parseEventLine(line);
+      if (ev) {
+        seenEvent.add(file);
+      } else {
+        const count = (logLines.get(file) ?? 0) + 1;
+        logLines.set(file, count);
+        const legacy = !seenEvent.has(file) && count >= 3;
+        const ts = new Date().toTimeString().slice(0, 8);
+        setConsoleLines(prev => [...prev.slice(-300), {
+          ts,
+          level: /error|失败/i.test(line) ? "ERROR" : /warn|伪文字层|疑似/i.test(line) ? "WARN" : "INFO",
+          text: line,
+          legacy,
+        }]);
+      }
       setFiles(prev => prev.map(f => {
         if (f.path !== file || f.status !== "converting") return f;
+        if (ev) {
+          const engine = reduceEvent(f.engine ?? initialEventState(), ev);
+          return {
+            ...f,
+            engine,
+            progress: progressOf(engine),
+            pages: engine.pages ?? f.pages,
+            backend: (engine.backend as Backend | undefined) ?? f.backend,
+            type: f.type === "MD" ? f.type : (engine.kind ?? f.type),
+            stages: engine.stages,
+            signatures: engine.signatures ?? f.signatures,
+            warning: f.warning || engine.warning,
+            error: engine.error ?? f.error,
+            legacy: false,
+            lastLog: line,
+          };
+        }
+        // legacy:老版 CLI 的中文日志(仅兜底,progress 只能估)
         return {
           ...f,
+          legacy: !seenEvent.has(file),
           progress: Math.min(95, f.progress + 5),
-          pages: parsePagesFromLine(line, f.pages),
-          backend: parseBackendFromLine(line, f.backend),
           type: f.type === "MD" ? f.type : (parseTypeFromLine(line, f.name) ?? f.type),
           stages: updateStagesFromLine(line, f.stages),
-          signatures: parseShardsFromLine(line) ?? f.signatures,
           warning: f.warning || parseWarningFromLine(line),
           log: [...f.log.slice(-100), line],
           lastLog: line,
@@ -2002,9 +2031,11 @@ export default function App() {
       progress: 5,
       error: undefined,
       warning: false,
+      legacy: false,
       log: [],
       lastLog: undefined,
       stages: freshStages(),
+      engine: initialEventState(),
     } : x));
     try {
       const res = await invoke<{ success: boolean; epub: string | null; error: string | null }>("convert_file", {

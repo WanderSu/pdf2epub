@@ -29,7 +29,7 @@ from page_result import (
     resolve_ocr_run_limit,
 )
 from paths import config_file
-
+import events
 IMAGES_DIR = "images"
 
 
@@ -58,25 +58,59 @@ def convert_auto(
     work_dir.mkdir(parents=True, exist_ok=True)
 
     detector = PDFDetector()
+    events.stage("detect", "start")
     detection = detector.detect(pdf_path)
     print(f"[detect] {detection.summary()}")
+    events.emit(
+        "detect",
+        type=detection.pdf_type.value,
+        pages=detection.total_pages,
+        text_pages=detection.text_pages,
+        text_ratio=round(detection.text_ratio, 4),
+        suspicious_pages=detection.suspicious_pages,
+    )
+    events.stage("detect", "done", type=detection.pdf_type.value,
+                 pages=detection.total_pages)
 
     ocr_name = str(config.get("ocr_backend", "mineru")).lower()
     ocr_cfg = config.get(ocr_name, {})
 
     if detection.pdf_type == PDFType.TEXT:
+        events.emit("plan", backend="pymupdf", pages=detection.total_pages,
+                    ocr_pages=0, ocr_runs=0, shards=0)
+        events.stage("extract", "start", backend="pymupdf")
         result = get_backend("pymupdf", config.get("pymupdf", {})).convert(pdf_path, work_dir)
     elif detection.pdf_type == PDFType.SCANNED:
+        events.emit("plan", backend=ocr_name, pages=detection.total_pages,
+                    ocr_pages=detection.total_pages, ocr_runs=1,
+                    shards=_planned_shards(detection.total_pages, ocr_cfg))
+        events.stage("extract", "start", backend=ocr_name)
         result = get_backend(ocr_name, ocr_cfg).convert(pdf_path, work_dir)
     else:
         hybrid_cfg = config.get("hybrid") or {}
+        limit = resolve_ocr_run_limit(hybrid_cfg.get("max_ocr_runs"))
+        scanned = [i for i in range(detection.total_pages)
+                   if i not in set(detection.text_page_idxs)]
+        runs = plan_ocr_runs(scanned, limit)
+        events.emit("plan", backend=f"hybrid({ocr_name})", pages=detection.total_pages,
+                    ocr_pages=len(scanned), ocr_runs=len(runs),
+                    shards=sum(_planned_shards(len(r), ocr_cfg) for r in runs))
+        events.stage("extract", "start", backend=f"hybrid({ocr_name})")
         result = _convert_hybrid(
             pdf_path, work_dir, ocr_name, ocr_cfg, detection,
             pymupdf_cfg=config.get("pymupdf", {}),
             max_ocr_runs=hybrid_cfg.get("max_ocr_runs"),
         )
+    events.stage("extract", "done", backend=result.backend)
 
     return result, detection
+
+
+def _planned_shards(pages: int, ocr_cfg: dict) -> int:
+    """按后端单任务页数上限估算云端任务数(与实际提交口径一致,见 dryrun)。"""
+    from dryrun import estimate_shards, max_pages_per_task
+
+    return estimate_shards(pages, max_pages_per_task({"mineru": ocr_cfg}, "mineru"))
 
 
 def _convert_hybrid(
@@ -121,7 +155,9 @@ def _convert_hybrid(
     runs = planned
     if runs:
         ocr = get_backend(ocr_name, ocr_cfg)
-        for run in runs:
+        for i, run in enumerate(runs, start=1):
+            events.progress("extract", i, len(runs), detail="hybrid_ocr",
+                            page=run[0] + 1)
             results.append(_ocr_run(ocr, pdf_path, work_dir, images_abs, run))
 
     print(

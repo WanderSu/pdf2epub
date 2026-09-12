@@ -19,6 +19,7 @@ from convert import load_config
 from detector.pdf_detector import PDFDetector
 from markdown.cleaner import CLEAN_KEYS, resolve_options
 from paths import config_file
+import events
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -41,6 +42,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="EPUB 生成后做结构 + 内容校验,有失败项即判该文件失败(默认只告警)")
     p.add_argument("--lang", default=None,
                    help="EPUB 语言(如 zh-CN/en/ja/ko);默认按正文脚本自动检测")
+    p.add_argument("--jsonevents", "--json-events", dest="json_events", action="store_true",
+                   help="把阶段事件以 JSON Lines 写到 stdout(人类日志改走 stderr),供桌面端消费")
     p.add_argument("--dry-run", action="store_true",
                    help="预检:只检测类型/页数/计划后端/分片与额度,不产出任何文件")
     p.add_argument("--json", action="store_true",
@@ -58,6 +61,12 @@ def main(argv: list[str] | None = None) -> int:
     except (AttributeError, OSError):
         pass
     args = build_parser().parse_args(argv)
+
+    # --json-events:stdout 只留给 JSON 事件,人类可读输出(print)改走 stderr。
+    # 与 --dry-run 同用时忽略:预检自带结构化 JSON 输出,不该被事件流挤到 stderr。
+    if args.json_events and not args.dry_run:
+        events.configure(stream=sys.stdout)
+        sys.stdout = sys.stderr
 
     if args.no_log or args.dry_run:
         log_file = None

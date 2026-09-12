@@ -130,7 +130,9 @@ async fn convert_file(
     cmd.arg(&file_path)
         .arg("-o")
         .arg(&output_dir)
-        .arg("--no-log");
+        .arg("--no-log")
+        // 结构化事件流:stdout 只走 JSON 事件,人类日志走 stderr(前端据此算真实进度)
+        .arg("--json-events");
     if let Some(b) = backend {
         if !b.is_empty() && b != "auto" {
             cmd.arg("--backend").arg(b);
@@ -150,6 +152,7 @@ async fn convert_file(
 
     let app2 = app.clone();
     let fp_for_stream = file_path.clone();
+    let fp_for_log = file_path.clone();
     let started = now_secs();
     // 任务键:前端任务 id(同一文件可重复入队,用 id 才不会互相覆盖)
     let task_key = task_id.clone().unwrap_or_else(|| file_path.clone());
@@ -165,16 +168,31 @@ async fn convert_file(
         let pid = child.id();
         tasks.procs.lock().unwrap().insert(task_key.clone(), pid);
 
-        // stdout:逐行推送进度事件(携带文件名,前端区分多任务)
+        // stdout:JSON 事件(--json-events);未开事件流时这里是人类日志
         let stdout = child.stdout.take().unwrap();
+        // stderr:人类可读日志。**必须持续读掉**:管道缓冲区(约 64KB)写满后
+        // 子进程会阻塞,转换会莫名卡死 —— 长书的日志足以写满。
+        let stderr = child.stderr.take().unwrap();
+        let app_log = app2.clone();
+        let log_thread = std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(|l| l.ok()) {
+                let _ = app_log.emit(
+                    "conv://progress",
+                    serde_json::json!({ "file": fp_for_log, "line": line, "channel": "log" }),
+                );
+            }
+        });
+
         let mut last_line = String::new();
         for line in BufReader::new(stdout).lines().map_while(|l| l.ok()) {
+            let channel = if line.trim_start().starts_with('{') { "event" } else { "log" };
             let _ = app2.emit(
                 "conv://progress",
-                serde_json::json!({ "file": fp_for_stream, "line": line }),
+                serde_json::json!({ "file": fp_for_stream, "line": line, "channel": channel }),
             );
             last_line = line;
         }
+        let _ = log_thread.join();
         let status = match child.wait() {
             Ok(s) => s,
             Err(e) => {

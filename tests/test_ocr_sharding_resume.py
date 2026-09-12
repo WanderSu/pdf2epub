@@ -158,6 +158,17 @@ class _RequestsShim:
         return self.cloud.get(url, **kw)
 
 
+def install_fake_cloud(monkeypatch: pytest.MonkeyPatch) -> FakeMinerUCloud:
+    """把 `requests` / `time.sleep` 换成假 MinerU:夹具与别处复用同一个安装函数。
+
+    (直接调用夹具函数已被 pytest 判为错误用法,所以安装逻辑放在普通函数里。)
+    """
+    monkeypatch.setattr(mineru_backend.time, "sleep", lambda *_: None)
+    fake = FakeMinerUCloud()
+    monkeypatch.setattr(mineru_backend, "requests", _RequestsShim(fake))
+    return fake
+
+
 @pytest.fixture
 def cloud(monkeypatch: pytest.MonkeyPatch) -> FakeMinerUCloud:
     """假云端(**单个实例**跨多次 convert 复用 —— 续跑用例要看到上一次的提交记录)。
@@ -165,10 +176,7 @@ def cloud(monkeypatch: pytest.MonkeyPatch) -> FakeMinerUCloud:
     需要「排队中 / 解析失败 / 缓存失效」等脚本时,直接改实例属性:
     `cloud.pending_polls = 2`、`cloud.fail_batches = 1`、`cloud.stale = True`。
     """
-    monkeypatch.setattr(mineru_backend.time, "sleep", lambda *_: None)
-    fake = FakeMinerUCloud()
-    monkeypatch.setattr(mineru_backend, "requests", _RequestsShim(fake))
-    return fake
+    return install_fake_cloud(monkeypatch)
 
 
 def _adapter(**kwargs) -> MinerUAdapter:
