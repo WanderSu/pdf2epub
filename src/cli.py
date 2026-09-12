@@ -39,6 +39,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="不复用云端 OCR 已提交的任务(默认中断后可续跑,不重新上传)")
     p.add_argument("--strict", action="store_true",
                    help="EPUB 生成后做结构校验,有失败项即判该文件失败(默认只告警)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="预检:只检测类型/页数/计划后端/分片与额度,不产出任何文件")
     p.add_argument("--log", default=None, help="日志文件(默认 logs/batch-<时间>.log)")
     p.add_argument("--no-log", action="store_true", help="不写日志文件(仅控制台)")
     p.add_argument("--verbose", "-v", action="store_true", help="详细日志")
@@ -53,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
         pass
     args = build_parser().parse_args(argv)
 
-    if args.no_log:
+    if args.no_log or args.dry_run:
         log_file = None
     else:
         log_file = args.log or (Path.cwd() / "logs" / f"batch-{datetime.now().strftime('%Y%m%d-%H%M%S')}.log")
@@ -79,6 +81,14 @@ def main(argv: list[str] | None = None) -> int:
     disabled = [k for k in CLEAN_KEYS if not getattr(clean_options, k)]
     if args.clean_disable and disabled:
         print(f"[clean] 已关闭清理项: {', '.join(disabled)}")
+
+    # 预检(--dry-run):只检测与规划,不建目录、不调后端、不产出文件
+    if args.dry_run:
+        from dryrun import plan, render
+
+        items = plan(paths, config, backend_override)
+        print(render(items, config, backend_override))
+        return 0
 
     # 交互询问:单文件 + auto + 交互终端 + 检测到疑似伪文字层(乱码)时,
     # 由用户手动决定是否改用云端 OCR。批处理/非交互模式不询问。
