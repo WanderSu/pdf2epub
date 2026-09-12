@@ -51,3 +51,6 @@ build_cli/
 
 # 发布包输出(打好的 zip 与 staging 目录,不入库)
 dist_release/
+
+# 本地计划/路线图(Agent 工作文件,只留本地,不进远程仓库)
+.hermes/
