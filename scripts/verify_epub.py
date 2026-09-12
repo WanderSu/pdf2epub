@@ -42,8 +42,18 @@ SECTIONS = (
     ("[7] CSS", ("css_missing",), "CSS 已嵌入"),
 )
 
+# 内容完整性(v0.3.2 P0-3):对照源 Markdown 找内容丢失
+CONTENT_SECTIONS = (
+    ("[9] 内容对照(与源 Markdown 比)",
+     ("content_images_lost", "content_images_extra", "content_math_lost",
+      "content_math_shrunk", "content_text_shrunk", "content_text_less",
+      "content_headings_lost", "content_page_coverage"),
+     "图片 / 公式 / 正文 / 标题数量与源 Markdown 一致"),
+)
 
-def print_report(epub_path: Path, result: VerifyResult, extract_dir: Path | None = None) -> None:
+
+def print_report(epub_path: Path, result: VerifyResult, extract_dir: Path | None = None,
+                 content_result: VerifyResult | None = None) -> None:
     print(f"验证: {epub_path}")
     print(f"包内文件总数: {result.stats.get('entries', 0)}")
     if extract_dir is not None:
@@ -67,9 +77,28 @@ def print_report(epub_path: Path, result: VerifyResult, extract_dir: Path | None
             tag = "FAIL" if issue.level == "error" else "WARN"
             print(f"  [ {tag} ] {issue.message}")
 
+    # 注意:未归类的 issue 先不打印,等内容对照段之后再兜底 —— 否则内容侧的告警会
+    # 被顶到 [7] 里显示,看起来像「CSS 出问题了」。
+    shown.update(c for _, codes, _ in CONTENT_SECTIONS for c in codes)
+
+    if content_result is not None:
+        stats = content_result.stats
+        print("\n[9] 内容对照(与源 Markdown 比)")
+        print(f"  图片 {stats.get('content_md_images', 0)} → {stats.get('content_epub_images', 0)} 张, "
+              f"公式 {stats.get('content_md_math', 0)} → {stats.get('content_epub_math', 0)} 处, "
+              f"正文 {stats.get('content_md_chars', 0)} → {stats.get('content_epub_chars', 0)} 字, "
+              f"标题 {stats.get('content_md_headings', 0)} → {stats.get('content_epub_headings', 0)} 个")
+        if not content_result.issues:
+            print(f"  [ OK ] {CONTENT_SECTIONS[0][2]}")
+        for issue in content_result.issues:
+            tag = "FAIL" if issue.level == "error" else "WARN"
+            print(f"  [ {tag} ] {issue.message}")
+
     # 兜底:未归类的新 issue 也要看得见
-    for issue in result.issues:
-        if issue.code not in shown:
+    unclassified = [i for i in result.issues if i.code not in shown]
+    if unclassified:
+        print("\n[其他]")
+        for issue in unclassified:
             tag = "FAIL" if issue.level == "error" else "WARN"
             print(f"  [ {tag} ] {issue.message}")
 
@@ -88,13 +117,27 @@ def main() -> int:
     parser.add_argument("--expect-math", action="store_true", help="要求包含 MathML 公式")
     parser.add_argument("--expect-footnotes", action="store_true", help="要求包含脚注区块")
     parser.add_argument("--expect-images", type=int, default=0, help="要求图片引用数量")
+    parser.add_argument("--content", type=Path, default=None,
+                        help="对照源 Markdown(work/<书>/book.md)做内容完整性检查")
+    parser.add_argument("--expect-pages", type=int, default=0,
+                        help="原始 PDF 页数:检查 Markdown 页码注释的页覆盖率")
     args = parser.parse_args()
 
     result = verify_epub(args.epub,
                          expect_math=args.expect_math,
                          expect_footnotes=args.expect_footnotes,
                          expect_images=args.expect_images)
-    print_report(args.epub, result, args.extract_dir)
+
+    content_result = None
+    if args.content is not None:
+        from epub.content import verify_content
+
+        content_result = verify_content(args.content, args.epub,
+                                        expected_pages=args.expect_pages or None)
+        result.issues.extend(content_result.issues)
+        result.stats.update(content_result.stats)
+
+    print_report(args.epub, result, args.extract_dir, content_result)
     return 0 if result.ok else 1
 
 

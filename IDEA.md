@@ -418,6 +418,15 @@ CSS 应该独立于 Markdown 清理和 PDF 解析模块。
 5. CSS 正常
 6. 脚注正常
 
+> 补充：**内容完整性对照(2026-09 实现)**。结构校验(`src/epub/verify.py`)只能证明
+> 「包合法」;空章节、图片被吞、公式全消失的产物在结构上完全合法。因此新增
+> `src/epub/content.py::verify_content()`:**拿产物和源 Markdown 对照**(图片数、
+> 公式数、正文字符数、标题数),断崖式差异(文本 <40%、图片/公式变少)判 error,
+> 其余(EPUB 多出封面图、正文略少于标记剥离差异)只告警 —— 阈值刻意宽松,
+> **正常产物必须零提示**,否则用户会学会忽略提示。
+> 接入点:`batch._process_pdf/_process_markdown` 生成 EPUB 后自动跑(带源 book.md
+> 与原始页数),`scripts/verify_epub.py --content <book.md> [--expect-pages N]` 可手工核验。
+
 ---
 
 ## 13. OCR Adapter
@@ -529,7 +538,9 @@ ebook-converter/
 │   │   ├── cleaner.py           # 清理(页码/断行/空格/图片校验)
 │   │   └── bold.py              # 强调字体 → 粗体标注
 │   ├── epub/
-│   │   └── pandoc.py            # Pandoc → EPUB 封装
+│   │   ├── pandoc.py            # Pandoc → EPUB 封装
+│   │   ├── verify.py            # 结构校验(容器/manifest/链接/图片/公式/CSS)
+│   │   └── content.py           # 内容完整性(对照源 Markdown 查内容丢失)
 │   ├── batch.py                 # 批处理(重试/跳过/断点续跑)
 │   ├── convert.py               # 自动路由(text/scanned/hybrid)
 │   ├── page_result.py           # 页单元(页码/排序/页码注释)+ 扫描区段规划
