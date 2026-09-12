@@ -385,6 +385,14 @@ CSS 应该独立于 Markdown 清理和 PDF 解析模块。
 - 表格
 - 代码块
 
+> 补充：**封面、元数据与语言(2026-09 实现)**。封面取 **PDF 首页**渲染成 JPEG
+> (1200px 宽 / q88 / 不裁切)经 `--epub-cover-image` 注入,渲染失败不阻断转换。
+> `dc:identifier` 用**源文件内容指纹派生的 uuid5** —— 同一本书重转必须是同一个 id
+> (否则阅读器当新书:书架重复、阅读进度丢失),内容变了才换;`dc:date` 优先取 PDF
+> 内嵌创建日期;`dc:language` 由 `src/lang_detect.py` 按 Unicode 脚本区间检测
+> (zh-CN/en/ja/ko),优先级 CLI `--lang` > 配置 `language:` > 检测 > zh-CN 回退,
+> **不再写死 zh-CN**。
+
 ---
 
 ## 12. EPUB 验证
