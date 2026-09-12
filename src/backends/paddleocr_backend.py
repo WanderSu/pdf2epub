@@ -19,7 +19,7 @@ from pathlib import Path
 
 import requests
 
-from .base import Backend, ConversionResult, normalize_image_refs
+from .base import Backend, ConversionResult, TaskCache, normalize_image_refs
 from paths import load_api_key
 
 JOBS_URL = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
@@ -51,6 +51,7 @@ class PaddleOCRAdapter(Backend):
         use_doc_unwarping: bool = False,
         timeout: int = DEFAULT_TIMEOUT,
         poll_interval: int = POLL_INTERVAL,
+        resume: bool = True,
     ) -> None:
         self.token = (
             token
@@ -67,6 +68,7 @@ class PaddleOCRAdapter(Backend):
         self.use_doc_unwarping = use_doc_unwarping
         self.timeout = timeout
         self.poll_interval = poll_interval
+        self.resume = resume
 
     @property
     def _headers(self) -> dict:
@@ -79,11 +81,43 @@ class PaddleOCRAdapter(Backend):
         if not pdf_path.exists():
             raise PaddleOCRError(f"文件不存在: {pdf_path}")
 
-        job_id = self._submit(pdf_path)
-        print(f"[paddleocr] 任务已提交: jobId={job_id}")
+        cache = TaskCache(work_dir, PaddleOCRAdapter.name)
+
+        # 续跑:上次已提交但未取回结果的 jobId,继续轮询(不重新上传)
+        cached = cache.load(pdf_path) if self.resume else None
+        job_id = cached.get("job_id") if cached else None
+        if job_id:
+            print(f"[paddleocr] 发现未取回的云端任务: jobId={job_id},继续轮询(不重新上传)")
+            if self._probe(job_id) is None:
+                cache.clear()
+                job_id = None
+
+        if not job_id:
+            job_id = self._submit(pdf_path)
+            print(f"[paddleocr] 任务已提交: jobId={job_id}")
+            cache.save(pdf_path, "original", job_id=job_id, model=MODEL)
+
         result = self._poll(job_id)
         print("[paddleocr] 解析完成, 下载结果...")
-        return self._download_result(result, work_dir, job_id)
+        conv = self._download_result(result, work_dir, job_id)
+        cache.clear()
+        return conv
+
+    def _probe(self, job_id: str) -> dict | None:
+        """探测缓存的 job 是否还能继续轮询(续跑用)。失效返回 None。"""
+        try:
+            resp = requests.get(f"{JOBS_URL}/{job_id}", headers=self._headers, timeout=60)
+        except requests.RequestException as e:
+            print(f"[paddleocr] 续跑探测失败({e}),将重新提交任务")
+            return None
+        if resp.status_code != 200:
+            print(f"[paddleocr] 缓存的 job 已失效(HTTP {resp.status_code}),重新提交任务")
+            return None
+        data = resp.json().get("data", {}) or {}
+        if data.get("state") == "failed":
+            print("[paddleocr] 缓存的 job 已失败,重新提交任务")
+            return None
+        return data
 
     def _submit(self, pdf_path: Path) -> str:
         """multipart 上传文件,返回 jobId。"""

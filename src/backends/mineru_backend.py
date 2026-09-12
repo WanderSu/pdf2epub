@@ -24,7 +24,7 @@ from pathlib import Path
 import requests
 import pymupdf
 
-from .base import Backend, ConversionResult, normalize_image_refs
+from .base import Backend, ConversionResult, TaskCache, normalize_image_refs
 from paths import load_api_key
 
 DEFAULT_BASE_URL = "https://mineru.net/api/v4"
@@ -62,6 +62,7 @@ class MinerUAdapter(Backend):
         timeout: int = DEFAULT_TIMEOUT,
         poll_interval: int = POLL_INTERVAL,
         max_pages_per_task: int = MAX_PAGES_PER_TASK,
+        resume: bool = True,
     ) -> None:
         self.token = (
             token
@@ -82,6 +83,7 @@ class MinerUAdapter(Backend):
         self.timeout = timeout
         self.poll_interval = poll_interval
         self.max_pages_per_task = max(max_pages_per_task, 1)
+        self.resume = resume
 
     # ---------- HTTP 基础 ----------
     @property
@@ -116,23 +118,61 @@ class MinerUAdapter(Backend):
             raise MinerUError(f"文件不存在: {pdf_path}")
 
         try:
-            result = self._convert_inner(pdf_path, work_dir)
+            result = self._convert_inner(pdf_path, work_dir, variant="original")
         except MinerUError as e:
             # 伪文字层等结构异常的文件 MinerU 会解析失败,降级为渲染纯图后重试
             if "parsing failed" not in str(e) and "解析失败" not in str(e):
                 raise
             print("[mineru] 原文件解析失败(可能为伪文字层),降级为渲染纯图后重试 ...")
+            self._cache(work_dir).clear()   # 原文件任务已判死,缓存作废
             rendered = self._render_to_image_pdf(pdf_path, work_dir)
             try:
-                result = self._convert_inner(rendered, work_dir)
+                result = self._convert_inner(
+                    rendered, work_dir, variant="rendered", source_pdf=pdf_path
+                )
                 print("[mineru] 降级 OCR 成功(渲染纯图版)")
             finally:
                 rendered.unlink(missing_ok=True)
         print("[mineru] 解析完成, 下载结果...")
         return result
 
-    def _convert_inner(self, pdf_path: Path, work_dir: Path) -> ConversionResult:
-        """核心转换:页数 ≤ max_pages_per_task 单任务;超过则按 page_ranges 分片提交。"""
+    @staticmethod
+    def _cache(work_dir: Path) -> TaskCache:
+        return TaskCache(work_dir, MinerUAdapter.name)
+
+    def _convert_inner(
+        self,
+        pdf_path: Path,
+        work_dir: Path,
+        variant: str = "original",
+        source_pdf: Path | None = None,
+    ) -> ConversionResult:
+        """核心转换:页数 ≤ max_pages_per_task 单任务;超过则按 page_ranges 分片提交。
+
+        variant/source_pdf:降级重试时 pdf_path 是本地渲染的纯图临时文件,
+        而缓存指纹要跟着**原始 PDF**(临时文件每次重渲染字节可能不同),
+        variant 则区分「原文件」与「渲染纯图」两条任务线。
+        """
+        source = source_pdf or pdf_path
+        cache = self._cache(work_dir)
+
+        # 0. 续跑:上次已提交但未取回结果的云端任务,直接继续轮询(不重新上传)
+        cached = cache.load(source, variant) if self.resume else None
+        if cached and cached.get("batch_id"):
+            print(
+                f"[mineru] 发现未取回的云端任务: batch_id={cached['batch_id']},"
+                "继续轮询(不重新上传)"
+            )
+            items = self._probe_batch(cached["batch_id"], list(cached.get("targets") or []))
+            if items is not None:
+                items = self._poll_batch(
+                    cached["batch_id"], list(cached.get("targets") or []), initial_items=items
+                )
+                result = self._unpack(items, work_dir, cached["batch_id"])
+                cache.clear()
+                return result
+            cache.clear()
+
         total_pages = self._count_pages(pdf_path)
         ranges = self._build_page_ranges(total_pages)
 
@@ -140,7 +180,7 @@ class MinerUAdapter(Backend):
             # 单任务(≤ 200 页),保持原有行为
             task_id = self._upload(pdf_path)
             print(f"[mineru] 任务已提交: batch_id={task_id} (file={pdf_path.name})")
-            items = self._poll_batch(task_id, [pdf_path.name])
+            targets = [pdf_path.name]
         else:
             # 分片:同一 PDF 提交多个条目,各自指定页码范围(1-indexed)
             task_id = self._upload(pdf_path, ranges)
@@ -150,8 +190,17 @@ class MinerUAdapter(Backend):
                 f"自动分片 {len(ranges)} 段: {', '.join(ranges)})"
             )
             targets = [f"part-{i + 1}" for i in range(len(ranges))]
-            items = self._poll_batch(task_id, targets)
-        return self._unpack(items, work_dir, task_id)
+
+        # 提交成功立即落盘:此后不论被中断/超时,重跑都能续跑同一个任务
+        cache.save(
+            source, variant,
+            batch_id=task_id, targets=targets, total_pages=total_pages,
+            page_ranges=ranges, model_version=self.model_version,
+        )
+        items = self._poll_batch(task_id, targets)
+        result = self._unpack(items, work_dir, task_id)
+        cache.clear()
+        return result
 
     def _count_pages(self, pdf_path: Path) -> int:
         try:
@@ -239,18 +288,49 @@ class MinerUAdapter(Backend):
         print(f"[mineru] 上传成功: {pdf_path.name} (×{len(file_urls)})")
         return batch_id
 
-    def _poll_batch(self, batch_id: str, targets: list[str]) -> list[dict]:
+    def _probe_batch(self, batch_id: str, targets: list[str]) -> list[dict] | None:
+        """探测缓存的 batch 是否还能继续轮询(续跑用,不发上传请求)。
+
+        返回该 batch 当前的 items(可能仍在解析中);batch 已失效/无权访问/
+        内容与本次不符时返回 None,由调用方回退到重新提交。
+        """
+        try:
+            data = self._get_json(f"/extract-results/batch/{batch_id}")["data"]
+        except (MinerUError, requests.RequestException, KeyError, TypeError) as e:
+            print(f"[mineru] 续跑探测失败({e}),将重新提交任务")
+            return None
+        items = data.get("extract_result") or []
+        if not items:
+            print(f"[mineru] 缓存的 batch 已失效(batch_id={batch_id} 无记录),重新提交任务")
+            return None
+        keys = {i.get("data_id") or i.get("file_name") for i in items}
+        if targets and not (set(targets) & keys):
+            print("[mineru] 缓存的 batch 内容与本次任务不符,重新提交任务")
+            return None
+        return items
+
+    def _poll_batch(
+        self,
+        batch_id: str,
+        targets: list[str],
+        initial_items: list[dict] | None = None,
+    ) -> list[dict]:
         """轮询批量结果直至 targets 全部 done/failed,按 targets 顺序返回 items。
 
         targets: 分片时传 data_id(part-1/part-2/...);单任务传 [file_name]。
         匹配优先 data_id,回退 file_name(分片条目名唯一,双保险)。
+        initial_items: 续跑时由 _probe_batch 已取到的首轮结果,避免重复请求。
         """
         remaining = set(targets)
         collected: dict[str, dict] = {}
         start = time.time()
+        items = initial_items
         while time.time() - start < self.timeout:
-            data = self._get_json(f"/extract-results/batch/{batch_id}")["data"]
-            for item in data.get("extract_result", []):
+            if items is None:
+                items = self._get_json(f"/extract-results/batch/{batch_id}")["data"].get(
+                    "extract_result", []
+                )
+            for item in items:
                 key = item.get("data_id") or item.get("file_name")
                 if key not in remaining:
                     continue
@@ -268,6 +348,7 @@ class MinerUAdapter(Backend):
                     print(f"[mineru] {STATE_LABELS.get(state, state)}{detail} ...")
             if not remaining:
                 return [collected[t] for t in targets]
+            items = None
             time.sleep(self.poll_interval)
         raise MinerUError(f"轮询超时({self.timeout}s), batch_id={batch_id}, 未完成: {remaining}")
 

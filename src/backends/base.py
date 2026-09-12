@@ -6,6 +6,9 @@
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,6 +34,73 @@ class Backend(ABC):
     @abstractmethod
     def convert(self, pdf_path: str | Path, work_dir: str | Path) -> ConversionResult:
         """将 PDF 转换为 work_dir/book.md + work_dir/images/。"""
+
+
+# ---------- 云端任务续跑 ----------
+
+TASK_CACHE_FILE = ".ocr_task.json"
+
+
+def file_fingerprint(path: str | Path) -> str:
+    """文件内容指纹(blake2b 8 字节)。
+
+    用内容而非 mtime:文件复制/重新渲染后仍能命中已提交的云任务。
+    """
+    h = hashlib.blake2b(digest_size=8)
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+class TaskCache:
+    """work/<书名>/ 内的云端任务缓存。
+
+    云端 OCR 提交后把 batch/job id 落盘:进程被中断(超时、Ctrl+C、关闭桌面端)
+    后重跑时可直接继续轮询同一个任务,**不重新上传、不重复扣配额**。
+
+    命中条件:同后端 + 文件内容指纹一致 + 变体一致(原文件 / 渲染纯图)。
+    提交成功后写入,结果解包成功后清除。
+    """
+
+    def __init__(self, work_dir: str | Path, backend: str) -> None:
+        self.path = Path(work_dir) / TASK_CACHE_FILE
+        self.backend = backend
+
+    def load(self, source: str | Path, variant: str = "original") -> dict | None:
+        """返回可复用的任务信息(不匹配则 None)。"""
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if (
+            data.get("backend") == self.backend
+            and data.get("variant") == variant
+            and data.get("fingerprint") == file_fingerprint(source)
+        ):
+            return data
+        return None
+
+    def save(self, source: str | Path, variant: str, **payload) -> None:
+        data = {
+            "backend": self.backend,
+            "variant": variant,
+            "fingerprint": file_fingerprint(source),
+            "source": str(source),
+            "created_at": int(time.time()),
+            **payload,
+        }
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+
+    def clear(self) -> None:
+        try:
+            self.path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def normalize_image_refs(md: str, images_abs: Path, images_dir: str = "images") -> str:

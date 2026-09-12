@@ -36,11 +36,13 @@ def get_backend(name: str, config: dict[str, Any] | None = None) -> Backend:
             enable_table=config.get("enable_table", True),
             language=config.get("language", "ch"),
             max_pages_per_task=config.get("max_pages_per_task", 200),
+            resume=config.get("resume", True),
         )
     if name == "paddleocr":
         return PaddleOCRAdapter(
             use_chart_recognition=config.get("use_chart_recognition", False),
             use_doc_orientation_classify=config.get("use_doc_orientation_classify", False),
             use_doc_unwarping=config.get("use_doc_unwarping", False),
+            resume=config.get("resume", True),
         )
     raise ValueError(f"未知后端: {name!r}(可选: {list(_BACKENDS)})")
