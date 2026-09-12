@@ -15,6 +15,7 @@ import pymupdf4llm
 
 from .base import Backend, ConversionResult, normalize_image_refs
 from markdown.bold import annotate_bold
+from page_result import PageResult
 
 IMAGES_DIR = "images"
 
@@ -53,6 +54,46 @@ class PyMuPDFBackend(Backend):
             backend=self.name,
             stats={"chars": len(md), "images": img_count},
         )
+
+    def page_results(
+        self,
+        pdf_path: str | Path,
+        images_dir: str | Path,
+        page_idxs: list[int],
+    ) -> list[PageResult]:
+        """只提取指定页(0-indexed)并**逐页**返回页单元(hybrid 流程用)。
+
+        与 convert() 的差别:``page_chunks=True`` 让 PyMuPDF4LLM 按页返回,
+        于是每页都能带着自己的页码进入 PageResult,交错页序不会错位。
+        页码取自 chunk 元数据(1-indexed)而非入参顺序,再按页号排序 ——
+        即使底层返回顺序变化,合并结果也不受影响。
+        """
+        pdf_path = Path(pdf_path)
+        images_dir = Path(images_dir)
+        images_dir.mkdir(parents=True, exist_ok=True)
+        if not page_idxs:
+            return []
+
+        chunks = pymupdf4llm.to_markdown(
+            str(pdf_path),
+            pages=list(page_idxs),
+            write_images=self.write_images,
+            image_path=str(images_dir),
+            page_chunks=True,
+        )
+        results: list[PageResult] = []
+        for i, chunk in enumerate(chunks):
+            meta = chunk.get("metadata") or {}
+            page_no = int(meta.get("page_number") or i + 1)
+            text = chunk.get("text") or ""
+            results.append(PageResult(
+                pages=(page_no,),
+                source="text",
+                markdown=normalize_image_refs(text, images_dir),
+                backend=self.name,
+            ))
+        results.sort(key=lambda r: r.page_no)
+        return results
 
 
 # 兼容旧调用:convert_pdf_to_markdown(pdf, work) -> Path

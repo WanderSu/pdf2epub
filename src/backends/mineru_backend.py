@@ -25,6 +25,7 @@ import requests
 import pymupdf
 
 from .base import Backend, ConversionResult, TaskCache, normalize_image_refs
+from page_result import page_marker_from_range
 from paths import load_api_key
 
 DEFAULT_BASE_URL = "https://mineru.net/api/v4"
@@ -168,7 +169,8 @@ class MinerUAdapter(Backend):
                 items = self._poll_batch(
                     cached["batch_id"], list(cached.get("targets") or []), initial_items=items
                 )
-                result = self._unpack(items, work_dir, cached["batch_id"])
+                result = self._unpack(items, work_dir, cached["batch_id"],
+                                      page_ranges=cached.get("page_ranges"))
                 cache.clear()
                 return result
             cache.clear()
@@ -198,7 +200,7 @@ class MinerUAdapter(Backend):
             page_ranges=ranges, model_version=self.model_version,
         )
         items = self._poll_batch(task_id, targets)
-        result = self._unpack(items, work_dir, task_id)
+        result = self._unpack(items, work_dir, task_id, page_ranges=ranges)
         cache.clear()
         return result
 
@@ -352,11 +354,18 @@ class MinerUAdapter(Backend):
             time.sleep(self.poll_interval)
         raise MinerUError(f"轮询超时({self.timeout}s), batch_id={batch_id}, 未完成: {remaining}")
 
-    def _unpack(self, items: list[dict], work_dir: Path, task_id: str) -> ConversionResult:
+    def _unpack(
+        self,
+        items: list[dict],
+        work_dir: Path,
+        task_id: str,
+        page_ranges: list[str] | None = None,
+    ) -> ConversionResult:
         """下载结果 zip(单任务或分片多个),按段序合并为 work/book.md + work/images/。
 
         分片时每段独立解包,图片并入统一 images/(重名加 p{idx}_ 前缀并替换引用),
-        Markdown 按段序拼接并加 <!-- page-group N --> 页标记(与 hybrid 流程一致)。
+        Markdown 按段序拼接并加**真实页码**注释(``<!-- page 201-302 -->``,
+        页码来自提交时的 page_ranges;缺失时退化为 ``<!-- page-group N -->``)。
         """
         work_dir.mkdir(parents=True, exist_ok=True)
         images_abs = work_dir / "images"
@@ -400,7 +409,7 @@ class MinerUAdapter(Backend):
                     img_count += 1
 
             parts_md.append(md_text.strip() if len(items) == 1
-                           else f"<!-- page-group {idx} -->\n{md_text.strip()}")
+                           else f"{_part_marker(page_ranges, idx)}\n{md_text.strip()}")
             tmp_zip.unlink(missing_ok=True)
             shutil.rmtree(extract_tmp, ignore_errors=True)
 
@@ -422,3 +431,10 @@ class MinerUAdapter(Backend):
                 "parts": len(items),
             },
         )
+
+
+def _part_marker(page_ranges: list[str] | None, idx: int) -> str:
+    """分片段落的页码注释:优先用提交时的真实 page_ranges,缺失时退化为段序标记。"""
+    if page_ranges and 1 <= idx <= len(page_ranges):
+        return page_marker_from_range(page_ranges[idx - 1])
+    return f"<!-- page-group {idx} -->"
