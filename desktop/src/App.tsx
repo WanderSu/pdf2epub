@@ -116,6 +116,9 @@ const T = {
       appearance: "APPEARANCE",
       light: "Light",
       dark: "Dark",
+      quality: "QUALITY CHECK",
+      strictOpt: ["Strict EPUB validation",
+        "Check the produced EPUB (images/math/footnotes/links) and fail the file on any error; off by default"] as [string, string],
       language: "LANGUAGE",
       langEn: "English",
       langZh: "简体中文",
@@ -239,6 +242,9 @@ const T = {
       appearance: "外观",
       light: "浅色",
       dark: "深色",
+      quality: "质量校验",
+      strictOpt: ["严格校验 EPUB",
+        "转换后校验结构（图片/公式/脚注/链接），有失败即标记该文件失败；默认关闭"] as [string, string],
       language: "语言",
       langEn: "English",
       langZh: "简体中文",
@@ -1235,7 +1241,7 @@ function LibraryScreen({ lang, books, outputDir, onRefresh, onOpenFolder, onOpen
 
 // ── SCREEN 4: SETTINGS ────────────────────────────────────────────────────────
 
-function SettingsScreen({ lang, setLang, darkMode, setDarkMode, backendPref, setBackendPref, outputDir, setOutputDir, cliPath, setCliPath, env, onSave, cleanOpts, setCleanOpts }: {
+function SettingsScreen({ lang, setLang, darkMode, setDarkMode, backendPref, setBackendPref, outputDir, setOutputDir, cliPath, setCliPath, env, onSave, cleanOpts, setCleanOpts, strictVerify, setStrictVerify }: {
   lang: Lang;
   setLang: (l: Lang) => void;
   darkMode: boolean;
@@ -1250,6 +1256,8 @@ function SettingsScreen({ lang, setLang, darkMode, setDarkMode, backendPref, set
   onSave: () => void;
   cleanOpts: boolean[];
   setCleanOpts: (v: boolean[]) => void;
+  strictVerify: boolean;
+  setStrictVerify: (v: boolean) => void;
 }) {
   const t = T[lang].settings;
   const [mineruToken, setMinerUToken] = useState("");
@@ -1517,6 +1525,20 @@ function SettingsScreen({ lang, setLang, darkMode, setDarkMode, backendPref, set
               </div>
             </section>
 
+            {/* Quality check */}
+            <section>
+              <div className={`text-[10px] text-[var(--muted-foreground)] mb-4 ${lang === "zh" ? "cjk-label font-medium" : "font-mono tracking-[0.16em] uppercase"}`}>
+                {t.quality}
+              </div>
+              <Toggle
+                checked={strictVerify}
+                onChange={setStrictVerify}
+                label={t.strictOpt[0]}
+                description={t.strictOpt[1]}
+                lang={lang}
+              />
+            </section>
+
             {/* Appearance */}
             <section>
               <div className={`text-[10px] text-[var(--muted-foreground)] mb-3 ${lang === "zh" ? "cjk-label font-medium" : "font-mono tracking-[0.16em] uppercase"}`}>
@@ -1620,6 +1642,10 @@ export default function App() {
     () => localStorage.getItem("pdf2epub.cliPath") || "",
   );
   const [cleanOpts, setCleanOpts] = useState<boolean[]>(loadCleanOpts);
+  // 「严格校验」开关(默认关):开启后 CLI 生成 EPUB 后做结构校验,失败即判该文件失败
+  const [strictVerify, setStrictVerify] = useState<boolean>(
+    () => localStorage.getItem("pdf2epub.strict") === "1",
+  );
   const canceled = useRef<Set<string>>(new Set());
   // 当前生效的「关闭清理项」列表(传给 CLI --clean-disable)
   // useMemo:保持引用稳定,避免拖放监听等依赖它的回调反复重注册
@@ -1714,6 +1740,7 @@ export default function App() {
         cliPath: cliPath || null,
         taskId: f.id,
         cleanDisable,
+        strict: strictVerify,
       });
       if (canceled.current.has(f.id)) return;
       setFiles(prev => prev.map(x => x.id === f.id ? {
@@ -1738,7 +1765,7 @@ export default function App() {
         error: String(err),
       } : x));
     }
-  }, [outputDir, backendPref, cliPath, cleanDisable]);
+  }, [outputDir, backendPref, cliPath, cleanDisable, strictVerify]);
 
   const addFiles = useCallback(async (paths: string[]) => {
     const newFiles: QueueFile[] = paths.map((p, i) => {
@@ -1853,11 +1880,18 @@ export default function App() {
     localStorage.setItem("pdf2epub.lang", l);
   };
 
+  // 严格校验开关:改一次即持久化(单开关,不必等 SAVE)
+  const handleStrictVerify = (v: boolean) => {
+    setStrictVerify(v);
+    localStorage.setItem("pdf2epub.strict", v ? "1" : "0");
+  };
+
   const saveSettings = useCallback(async () => {
     localStorage.setItem("pdf2epub.backend", backendPref);
     localStorage.setItem("pdf2epub.outputDir", outputDir);
     localStorage.setItem("pdf2epub.cliPath", cliPath);
     localStorage.setItem("pdf2epub.clean", JSON.stringify(cleanOpts));
+    localStorage.setItem("pdf2epub.strict", strictVerify ? "1" : "0");
     try {
       await invoke("set_cli_path", { path: cliPath || null });
     } catch { /* 忽略 */ }
@@ -1865,7 +1899,7 @@ export default function App() {
       const e = await invoke<EnvState>("check_env");
       setEnv(e);
     } catch { /* 忽略 */ }
-  }, [backendPref, outputDir, cliPath, cleanOpts]);
+  }, [backendPref, outputDir, cliPath, cleanOpts, strictVerify]);
 
   // 书库数据源:library.json 数据库(转换完成自动入库,打开/刷新时同步)
   const books: LibraryBook[] = diskBooks.map(b => {
@@ -2032,6 +2066,8 @@ export default function App() {
               onSave={() => void saveSettings()}
               cleanOpts={cleanOpts}
               setCleanOpts={setCleanOpts}
+              strictVerify={strictVerify}
+              setStrictVerify={handleStrictVerify}
             />
           )}
         </div>
