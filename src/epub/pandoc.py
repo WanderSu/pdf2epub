@@ -37,11 +37,19 @@ def build_epub(
     author: str | None = None,
     css: str | Path = DEFAULT_CSS,
     out_name: str | None = None,
+    lang: str | None = None,
+    identifier: str | None = None,
+    date: str | None = None,
+    cover_image: str | Path | None = None,
 ) -> Path:
     """用 Pandoc 将 work/book.md 转为 EPUB,返回 epub 路径。
 
     out_name: 输出文件名(不含 .epub)。默认取 work 目录名(被 sanitize 过),
     调用方应传原始「标题 - 作者」名,避免空格被写成下划线。
+    lang: dc:language(默认 zh-CN;由调用方做检测/覆盖)。
+    identifier: dc:identifier(稳定 UUID,见 batch.stable_identifier)。
+    date: dc:date(ISO 日期)。
+    cover_image: 封面 JPEG(pandoc --epub-cover-image)。
 
     Raises:
         RuntimeError: Pandoc 执行失败
@@ -61,10 +69,16 @@ def build_epub(
         "--resource-path", str(work_dir),
         "--mathml",
         "--metadata", f"title={title}",
-        "--metadata", "lang=zh-CN",
+        "--metadata", f"lang={lang or 'zh-CN'}",
     ]
     if author:
         cmd += ["--metadata", f"author={author}"]
+    if identifier:
+        cmd += ["--metadata", f"identifier={identifier}"]
+    if date:
+        cmd += ["--metadata", f"date={date}"]
+    if cover_image:
+        cmd += ["--epub-cover-image", str(cover_image)]
     proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if proc.returncode != 0:
         raise RuntimeError(f"Pandoc 失败(exit={proc.returncode}): {proc.stderr[:500]}")

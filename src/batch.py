@@ -15,17 +15,95 @@ from __future__ import annotations
 import logging
 import re
 import time
+import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from backends import get_backend
+from backends.base import file_fingerprint
 from convert import convert_auto, load_config
 from epub.content import verify_content
 from epub.pandoc import build_epub
 from epub.verify import VerifyResult, verify_epub
+from lang_detect import resolve_language
 from markdown.cleaner import CleanOptions, clean_file, resolve_options
 from detector.pdf_detector import PDFType
 from paths import config_file
+
+#: 封面 JPEG 宽度 / 质量(v0.3.2 P1-4:PDF 首页渲染,不裁切)
+COVER_WIDTH = 1200
+COVER_QUALITY = 88
+#: 语言检测读取的正文前多少字符(整本读没必要,前几万字足够定脚本)
+LANG_SAMPLE_CHARS = 20000
+
+
+def stable_identifier(source: Path, epub_stem: str) -> str:
+    """由**源文件内容指纹**派生的稳定 dc:identifier。
+
+    同一本书重复转换必须得到同一个 id(否则阅读器会把它当新书,书架重复、
+    阅读进度丢失);内容变了才换 id。所以用 uuid5(内容指纹)而不是随机 uuid4。
+    """
+    digest = file_fingerprint(source)
+    return f"urn:uuid:{uuid.uuid5(uuid.NAMESPACE_URL, f'pdf2epub:{epub_stem}:{digest}')}"
+
+
+def source_date(source: Path) -> str:
+    """dc:date:优先用 PDF 内嵌的创建日期,取不到就用源文件修改日期(ISO)。"""
+    if source.suffix.lower() == ".pdf":
+        try:
+            import pymupdf
+
+            with pymupdf.open(source) as doc:
+                raw = (doc.metadata or {}).get("creationDate", "")
+            parsed = _parse_pdf_date(raw)
+            if parsed:
+                return parsed
+        except Exception:  # noqa: BLE001 - 元数据读不到不是失败理由
+            pass
+    return datetime.fromtimestamp(source.stat().st_mtime).date().isoformat()
+
+
+def _parse_pdf_date(raw: str) -> str | None:
+    """PDF 的 `D:20200101120000+08'00'` → `2020-01-01`。"""
+    m = re.match(r"D:(\d{4})(\d{2})?(\d{2})?", raw or "")
+    if not m or not m.group(2) or not m.group(3):
+        return None
+    return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+
+
+def render_cover(pdf: Path, work_dir: Path, *, width: int = COVER_WIDTH,
+                 quality: int = COVER_QUALITY) -> Path | None:
+    """把 PDF 首页渲染成封面 JPEG(idea.md §12:封面用 PDF 第一页)。
+
+    返回 None 表示这次没做成封面(渲染失败 / 空 PDF)—— 不阻断转换,EPUB 只是没封面。
+    """
+    try:
+        import pymupdf
+
+        work_dir = Path(work_dir)
+        work_dir.mkdir(parents=True, exist_ok=True)
+        with pymupdf.open(pdf) as doc:
+            if doc.page_count == 0:
+                return None
+            page = doc[0]
+            zoom = width / max(1.0, page.rect.width)
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom))
+            out = work_dir / "cover.jpg"
+            pix.save(str(out), jpg_quality=quality)
+        return out if out.exists() and out.stat().st_size else None
+    except Exception as e:  # noqa: BLE001 - 封面失败不影响正文
+        logger.warning("封面渲染失败(%s): %s", pdf.name, e)
+        return None
+
+
+def epub_language(book_md: Path, override: str | None) -> str:
+    """EPUB dc:language:显式覆盖 > 正文脚本检测 > zh-CN。"""
+    try:
+        text = book_md.read_text(encoding="utf-8", errors="replace")[:LANG_SAMPLE_CHARS]
+    except OSError:
+        text = ""
+    return resolve_language(text, override=override)
 
 logger = logging.getLogger("pdf2epub.batch")
 
@@ -166,8 +244,12 @@ def process_one(
     force: bool = False,
     clean_options: CleanOptions | None = None,
     strict: bool = False,
+    lang_override: str | None = None,
 ) -> TaskResult:
-    """处理单个文件(PDF 或 Markdown),带重试与跳过。"""
+    """处理单个文件(PDF 或 Markdown),带重试与跳过。
+
+    lang_override: 显式指定的 EPUB 语言(CLI `--lang` / 配置),优先于正文检测。
+    """
     t0 = time.time()
     result = TaskResult(source=source)
     safe_stem = sanitize_name(source.stem)   # 工作目录名(PyMuPDF 限制:不能含空格)
@@ -188,11 +270,12 @@ def process_one(
             if source.suffix.lower() == ".md":
                 result.backend, result.pdf_type = "markdown", "markdown"
                 result = _process_markdown(source, work_root, output_dir, t0, result,
-                                           safe_stem, out_epub.stem, clean_options, strict)
+                                           safe_stem, out_epub.stem, clean_options, strict,
+                                           lang_override)
             else:
                 result = _process_pdf(source, config, work_root, output_dir,
                                       backend_override, t0, result, safe_stem, out_epub.stem,
-                                      clean_options, strict)
+                                      clean_options, strict, lang_override)
             result.status = "done"
             return result
         except VerifyError as e:
@@ -214,7 +297,8 @@ def process_one(
 
 
 def _process_pdf(source, config, work_root, output_dir, backend_override, t0, result,
-                 safe_stem, out_name, clean_options=None, strict=False) -> TaskResult:
+                 safe_stem, out_name, clean_options=None, strict=False,
+                 lang_override=None) -> TaskResult:
     work = work_root / safe_stem
     detection = None                      # 手动指定后端时没有检测结果
     if backend_override and backend_override != "auto":
@@ -239,7 +323,11 @@ def _process_pdf(source, config, work_root, output_dir, backend_override, t0, re
         logger.info("[clean] %s", issue)
 
     title, author = parse_title_author(source.stem)
-    epub = build_epub(conv.book_md, work, output_dir, title=title, author=author, out_name=out_name)
+    cover = render_cover(source, work)
+    epub = build_epub(conv.book_md, work, output_dir, title=title, author=author, out_name=out_name,
+                      lang=epub_language(conv.book_md, lang_override),
+                      identifier=stable_identifier(source, out_name),
+                      date=source_date(source), cover_image=cover)
     result.epub = epub
     result.verify = verify_output(
         epub, strict=strict, book_md=conv.book_md,
@@ -251,7 +339,7 @@ def _process_pdf(source, config, work_root, output_dir, backend_override, t0, re
 
 
 def _process_markdown(source, work_root, output_dir, t0, result, safe_stem, out_name,
-                      clean_options=None, strict=False) -> TaskResult:
+                      clean_options=None, strict=False, lang_override=None) -> TaskResult:
     work = work_root / safe_stem
     work.mkdir(parents=True, exist_ok=True)
     # 已有 Markdown:复制到统一 work 目录(连同 images/)
@@ -271,7 +359,10 @@ def _process_markdown(source, work_root, output_dir, t0, result, safe_stem, out_
     for issue in report.issues:
         logger.info("[clean] %s", issue)
     title, author = parse_title_author(source.stem)
-    epub = build_epub(book_md, work, output_dir, title=title, author=author, out_name=out_name)
+    epub = build_epub(book_md, work, output_dir, title=title, author=author, out_name=out_name,
+                      lang=epub_language(book_md, lang_override),
+                      identifier=stable_identifier(source, out_name),
+                      date=source_date(source))
     result.epub = epub
     result.verify = verify_output(epub, strict=strict, book_md=book_md).summary()
     result.elapsed = time.time() - t0
@@ -291,6 +382,7 @@ def process_batch(
     force: bool = False,
     clean_options: CleanOptions | None = None,
     strict: bool = False,
+    lang: str | None = None,
 ) -> list[TaskResult]:
     """批量处理,返回全部任务结果。单个失败不中断。
 
@@ -298,8 +390,11 @@ def process_batch(
     传入的开关会先落到 config(如关闭 bold 等价于 pymupdf.bold_fonts 为空),
     再逐文件生效。
 
-    strict=True → 每个 EPUB 生成后做结构校验,有 error 即判该任务 failed
+    strict=True → 每个 EPUB 生成后做结构 + 内容校验,有 error 即判该任务 failed
     (默认 False:只告警,不打断既有流程)。
+
+    lang → EPUB dc:language 的显式覆盖(CLI `--lang`);为 None 时用配置 `language:`
+    再回退到正文脚本检测。
     """
     if config is None:
         config = load_config(config_path or config_file())
@@ -311,6 +406,11 @@ def process_batch(
     output_dir = Path(output_dir)
     work_root.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 语言:CLI --lang > config `language:` > 正文脚本检测(逐文件)
+    lang_override = lang or config.get("language") or None
+    if lang_override:
+        logger.info("EPUB 语言: %s(显式指定)", lang_override)
 
     sources = iter_sources(paths)
     if not sources:
@@ -331,6 +431,7 @@ def process_batch(
             force=force,
             clean_options=clean_options,
             strict=strict,
+            lang_override=lang_override,
         ))
 
     # 汇总

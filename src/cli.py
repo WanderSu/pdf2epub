@@ -38,7 +38,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-resume", action="store_true",
                    help="不复用云端 OCR 已提交的任务(默认中断后可续跑,不重新上传)")
     p.add_argument("--strict", action="store_true",
-                   help="EPUB 生成后做结构校验,有失败项即判该文件失败(默认只告警)")
+                   help="EPUB 生成后做结构 + 内容校验,有失败项即判该文件失败(默认只告警)")
+    p.add_argument("--lang", default=None,
+                   help="EPUB 语言(如 zh-CN/en/ja/ko);默认按正文脚本自动检测")
     p.add_argument("--dry-run", action="store_true",
                    help="预检:只检测类型/页数/计划后端/分片与额度,不产出任何文件")
     p.add_argument("--json", action="store_true",
@@ -135,6 +137,7 @@ def main(argv: list[str] | None = None) -> int:
         force=args.force,
         clean_options=clean_options,
         strict=args.strict,
+        lang=args.lang,
     )
     if not results:
         return 2

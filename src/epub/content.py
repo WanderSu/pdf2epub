@@ -105,7 +105,8 @@ def verify_content(
         return result
 
     md_images = markdown_images(md)
-    epub_images = structure.stats.get("images", 0)
+    # 排除封面:封面由 pandoc 注入(源 Markdown 里没有),否则每本书都会多报一张
+    epub_images = structure.stats.get("images_no_cover", structure.stats.get("images", 0))
     md_math = markdown_math_count(md)
     epub_math = structure.stats.get("math", 0)
     md_chars = markdown_text_chars(md)
