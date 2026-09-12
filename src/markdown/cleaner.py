@@ -4,17 +4,23 @@
 当前实现:
   - 统一换行符(CRLF → LF)
   - 页码残留剔除(独立纯数字行 1-3 位)
+  - 页眉页脚重复行剔除(跨页反复出现的短行,扫描书收益最大)
   - 跨页断行连接(被页码/页脚隔断或非标点结尾的连续段落)
+  - OCR 异常空格合并(中文语境里被拆开的拉丁词,如 `Py Mu PDF`)
   - 中文排版空格修正(汉字-汉字、汉字-数字之间的空格)
   - 多余空行压缩(连续 ≥3 个空行 → 1 个)
+  - 重复标题去重(相邻同名标题)/ 空标题删除 / 标题层级跳跃修正
   - 行尾空白清理
   - 图片引用存在性校验
 各项可用 CleanOptions 单独开关(配置 clean: 段 / CLI --clean-disable)。
-后续扩展(待办):OCR 异常空格、重复/空标题、标题层级修正、页眉页脚重复行。
+
+新增启发式规则的共同原则:**默认保守 + 可单独关闭 + 配「不该改的例子」测试**。
+不确定的改动一律不做(宁可留下噪声,也不破坏正文)。
 """
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -33,9 +39,24 @@ CJK_CHARS = (
     "\u201c\u201d\u2018\u2019\u2014\u2026"  # “”‘’—…
 )
 
+#: 标题行(`#` ~ `######` + 可选空格 + 文本)
+HEADING_RE = re.compile(r"^(#{1,6})\s*(.*)$")
+#: 行内 CJK 字符(判断「中文语境」)
+CJK_RE = re.compile(rf"[{CJK_CHARS}]")
+
 
 #: 清理项开关名:config `clean:` 段、CLI `--clean-disable`、桌面端「清理选项」共用
-CLEAN_KEYS = ("page_numbers", "join_lines", "cjk_spaces", "bold", "images")
+CLEAN_KEYS = (
+    "page_numbers",    # 剔除独立页码行
+    "running_heads",   # 剔除页眉页脚重复行
+    "join_lines",      # 跨页断行连接
+    "ocr_spaces",      # OCR 异常空格合并
+    "cjk_spaces",      # 中文排版空格修正
+    "dup_headings",    # 相邻重复标题去重
+    "headings",        # 空标题删除 + 层级修正
+    "bold",            # 强调字体 → `**` 粗体(实际作用于 pymupdf 后端)
+    "images",          # 图片引用存在性校验
+)
 
 
 @dataclass
@@ -47,8 +68,12 @@ class CleanOptions:
     """
 
     page_numbers: bool = True   # 剔除独立页码行
+    running_heads: bool = True  # 剔除页眉页脚重复行
     join_lines: bool = True     # 跨页断行连接
+    ocr_spaces: bool = True     # OCR 异常空格合并
     cjk_spaces: bool = True     # 中文排版空格修正
+    dup_headings: bool = True   # 相邻重复标题去重
+    headings: bool = True       # 空标题删除 + 标题层级修正
     bold: bool = False          # 强调字体 → `**` 粗体(实际作用于 pymupdf 后端)
     images: bool = True         # 图片引用存在性校验
 
@@ -128,7 +153,11 @@ def clean_markdown(
     if options.page_numbers:
         md = re.sub(r"(?m)^[ \t]*\d{1,3}[ \t]*$\n?", "", md)
 
-    # 3. 中文排版空格:中文(含中文标点)之间、中文与数字之间的空格
+    # 3. 剔除页眉页脚重复行(必须在跨页拼接之前:否则页眉会被拼进正文)
+    if options.running_heads:
+        md = _strip_running_heads(md, report)
+
+    # 4. 中文排版空格:中文(含中文标点)之间、中文与数字之间的空格
     #    (保留中英之间的空格)
     if options.cjk_spaces:
         md = re.sub(rf"(?<=[{CJK_CHARS}]) (?=[{CJK_CHARS}])", "", md)
@@ -140,21 +169,31 @@ def clean_markdown(
         md = re.sub(rf"(?<=[{CJK_CHARS}]) (?=[()])", "", md)
         md = re.sub(rf"(?<=[()]) (?=[{CJK_CHARS}])", "", md)
 
-    # 4. 中间空行压缩(页码行删除后会留下连续空行,压缩到单个空行
+    # 5. 中间空行压缩(页码行删除后会留下连续空行,压缩到单个空行
     #    以便跨页断行拼接能跨越)
     md = re.sub(r"\n{3,}", "\n\n", md)
 
-    # 5. 跨页断行连接(在页码删除与空格修正之后)
+    # 6. 跨页断行连接(在页码删除与空格修正之后)
     if options.join_lines:
         md = _join_broken_lines(md)
 
-    # 6. 压缩多余空行(3+ → 1,兜底)
+    # 7. OCR 异常空格合并(在拼接之后:先还原段落,再修词内空格)
+    if options.ocr_spaces:
+        md = _fix_ocr_spaces(md, report)
+
+    # 8. 重复标题去重 / 空标题与标题层级
+    if options.dup_headings:
+        md = _dedupe_headings(md, report)
+    if options.headings:
+        md = _normalize_headings(md, report)
+
+    # 9. 压缩多余空行(3+ → 1,兜底)
     md = re.sub(r"\n{3,}", "\n\n", md)
 
-    # 7. 行尾空白
+    # 10. 行尾空白
     md = re.sub(r"[ \t]+$", "", md, flags=re.MULTILINE)
 
-    # 8. 图片引用存在性校验
+    # 11. 图片引用存在性校验
     if options.images and images_dir is not None and images_dir.is_dir():
         existing = {p.name for p in images_dir.iterdir() if p.is_file()}
         for m in re.finditer(r"!\[[^\]]*\]\(([^)\s]+)\)", md):
@@ -164,6 +203,168 @@ def clean_markdown(
                 report.add(f"图片引用缺失: {ref}")
 
     return md
+
+
+def _is_running_head_candidate(s: str, max_len: int) -> bool:
+    """页眉页脚候选行:短、无句末标点、非 markdown 块结构。
+
+    页眉页脚(书名/章节名/页码装饰)在正文里反复出现且**不带句末标点**;
+    正文句子几乎总以标点结尾,列表/表格/标题/代码有块标记,都会被排除。
+    """
+    if not s or len(s) > max_len:
+        return False
+    if s.startswith(BLOCK_MARKERS) or "[" in s or "]" in s:
+        return False
+    if s[-1] in END_PUNCT:
+        return False
+    if s.isdigit():
+        return False                        # 纯页码交给 page_numbers
+    return any(ch.isalnum() or CJK_RE.match(ch) for ch in s)
+
+
+def _strip_running_heads(
+    md: str,
+    report: CleanReport,
+    *,
+    min_repeats: int = 3,
+    max_len: int = 40,
+) -> str:
+    """删除页眉页脚重复行:同一短行在全文中重复出现 ≥ min_repeats 次。
+
+    保守之处:只删「重复且短且无句末标点」的行;单次出现的短行一律保留。
+    局限:同一页内重复出现的短句(如反复出现的口号)也会被删,可用
+    `--clean-disable running_heads` 关闭。
+    """
+    lines = md.split("\n")
+    counts = Counter(s for s in (line.strip() for line in lines)
+                     if _is_running_head_candidate(s, max_len))
+    dupes = {s for s, c in counts.items() if c >= min_repeats}
+    if not dupes:
+        return md
+
+    kept: list[str] = []
+    removed = 0
+    for line in lines:
+        if line.strip() in dupes:
+            removed += 1
+            continue
+        kept.append(line)
+    report.add(f"页眉页脚: 剔除重复行 {removed} 行({len(dupes)} 种)")
+    return "\n".join(kept)
+
+
+def _fix_ocr_spaces(md: str, report: CleanReport, *, max_frag: int = 4,
+                    min_frags: int = 3, min_short: int = 2) -> str:
+    """合并 OCR 把单个拉丁词拆开留下的空格(`Py Mu PDF` → `PyMuPDF`)。
+
+    保守条件(缺一不可),避免误伤正常的英文短语(`the cat sat` 不满足②):
+      ① 该行含中文 —— OCR 拆词几乎只发生在中文语境里;
+      ② 连续 ≥3 个 ≤4 字母的拉丁片段,其中至少 2 个片段长 ≤2(拆开的碎片通常极短);
+      ③ 片段之间只有单个空格,且两端不与其它字母相连。
+    """
+    frag = rf"[A-Za-z]{{1,{max_frag}}}"
+    pattern = re.compile(rf"(?<![A-Za-z]){frag}(?: {frag}){{{min_frags - 1},}}(?![A-Za-z])")
+    hits = 0
+
+    def fix_line(line: str) -> str:
+        nonlocal hits
+        if not CJK_RE.search(line):
+            return line
+
+        def repl(m: re.Match[str]) -> str:
+            nonlocal hits
+            parts = m.group(0).split(" ")
+            if sum(1 for p in parts if len(p) <= 2) < min_short:
+                return m.group(0)
+            hits += 1
+            return "".join(parts)
+
+        return pattern.sub(repl, line)
+
+    fixed = "\n".join(fix_line(line) for line in md.split("\n"))
+    if hits:
+        report.add(f"OCR 空格: 合并拆开的拉丁词 {hits} 处")
+    return fixed
+
+
+def _dedupe_headings(md: str, report: CleanReport, *, max_blanks: int = 1) -> str:
+    """相邻重复标题只保留一条(提取/OCR 常在页眉处重复输出同一标题)。
+
+    只在「中间只有 ≤1 个空行、级别与文字都相同」时判定为相邻重复;
+    被正文隔开的同名标题(如两章各有一个「小结」)一律保留,
+    级别不同的同名标题(书名标题 + 章标题)也保留。
+    """
+    lines = md.split("\n")
+    out: list[str] = []
+    removed = 0
+    prev_heading: tuple[int, str] | None = None
+    blanks = 0
+
+    for line in lines:
+        s = line.strip()
+        if s == "":
+            blanks += 1
+            out.append(line)
+            continue
+        m = HEADING_RE.match(s)
+        if m is None:
+            prev_heading = None
+            blanks = 0
+            out.append(line)
+            continue
+        key = (len(m.group(1)), m.group(2).strip())
+        if key[1] and prev_heading == key and blanks <= max_blanks:
+            removed += 1
+            prev_heading = None   # 连续三个同名标题也只留一个
+            continue
+        prev_heading = key if key[1] else None
+        blanks = 0
+        out.append(line)
+
+    if removed:
+        report.add(f"重复标题: 去重 {removed} 行")
+    return "\n".join(out)
+
+
+def _normalize_headings(md: str, report: CleanReport) -> str:
+    """空标题删除 + 标题层级修正。
+
+    修正规则(只动 `#` 的个数,不改标题文字):
+      - 首个标题若层级 >1 → 提升为 1 级(文档理应有 1 级标题)
+      - 层级跳跃(如 `#` 后直接 `###`)→ 收为「上一级 +1」
+    """
+    lines = md.split("\n")
+    out: list[str] = []
+    dropped = 0
+    promoted = 0
+    leveled = 0
+    prev_level: int | None = None
+
+    for line in lines:
+        m = HEADING_RE.match(line.strip())
+        if m is None:
+            out.append(line)
+            continue
+        level = len(m.group(1))
+        text = m.group(2).strip()
+        if not text:
+            dropped += 1
+            continue
+        if prev_level is None:
+            if level > 1:
+                level = 1
+                promoted += 1
+        elif level > prev_level + 1:
+            level = prev_level + 1
+            leveled += 1
+        prev_level = level
+        out.append("#" * level + " " + text)
+
+    if dropped:
+        report.add(f"空标题: 删除 {dropped} 行")
+    if promoted or leveled:
+        report.add(f"标题层级: 修正 {promoted + leveled} 处")
+    return "\n".join(out)
 
 
 def _join_broken_lines(md: str) -> str:

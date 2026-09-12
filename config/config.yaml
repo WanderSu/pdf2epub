@@ -15,11 +15,15 @@ mineru:
   resume: true              # 中断(超时/关窗口)后复用已提交的云端任务,不重新上传
 
 # Markdown 清理项开关(CLI --clean-disable 可在单次运行中关闭某项;
-# 桌面端「清理选项」对应 page_numbers / join_lines / bold / images)
+# 桌面端「清理选项」逐项对应)
 clean:
   page_numbers: true        # 剔除独立页码行
+  running_heads: true       # 剔除页眉页脚重复行(跨页反复出现的短行)
   join_lines: true          # 跨页断行连接
+  ocr_spaces: true          # OCR 异常空格合并(中文行内被拆开的拉丁词)
   cjk_spaces: true          # 中文排版空格修正(汉字/中文标点/数字之间的空格)
+  dup_headings: true        # 相邻同名标题去重
+  headings: true            # 空标题删除 + 标题层级跳跃修正
   bold: false               # 强调字体(楷体/中宋等)→ ** 粗体,标注较密集,默认关
   images: true              # 图片引用存在性校验(缺失会在清理报告中提示)
 
