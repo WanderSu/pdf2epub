@@ -88,6 +88,7 @@ def plan_source(
         else:
             item.kind = "pdf-scanned"
             item.ocr_pages = detection.total_pages
+            item.notes.append("手动指定云端 OCR:全篇按 OCR 处理(不看文字层检测结果)")
     elif detection.pdf_type == PDFType.TEXT:
         item.kind = "pdf-text"
         item.backend = "pymupdf"
