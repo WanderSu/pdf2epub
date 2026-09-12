@@ -1,839 +1,168 @@
-# PDF → EPUB 电子书转换工具
+# pdf2epub 设计文档
 
-## 1. 项目目标
+Windows 下的 PDF → EPUB 转换工具：把电子版 PDF、扫描版 PDF 与已 OCR 的 Markdown 统一转成高质量 EPUB。
 
-构建一个 Windows 下的电子书转换工具，统一处理：
+本文件只讲**架构与取舍**；安装、用法、配置项、已知限制见 [README.md](README.md)。
 
-1. 可复制文字的电子版 PDF
-2. 扫描版 PDF
-3. 已经 OCR 完成的 Markdown 文件
-
-最终统一输出高质量 EPUB。
-
-核心设计：
-
-电子版 PDF
-→ PyMuPDF4LLM
-→ Markdown + images/
-→ Markdown 清理
-→ Pandoc + EPUB CSS
-→ EPUB
-
-扫描版 PDF
-→ 云端 MinerU 或 PaddleOCR-VL 1.6
-→ Markdown + images/
-→ Markdown 清理
-→ Pandoc + EPUB CSS
-→ EPUB
-
-已有 Markdown
-→ Markdown 清理
-→ Pandoc + EPUB CSS
-→ EPUB
+> **贯穿全文的三条验收基线**
+> 1. 图片与公式是硬性验收项 —— 要真的在阅读器里能看，不能因为命令跑成功就算过。
+> 2. 「Pandoc 执行成功」≠ EPUB 合格：产物必须另做两层校验（结构 + 内容）。
+> 3. 正常产物必须零提示：告警只在真有问题时出现，否则用户会学会忽略提示。
 
 ---
 
-## 2. 核心工作流
+## 1. 目标与范围
 
-### 电子版 PDF
+三类输入，一条后处理管线：
 
-适用于具有可靠文字层、可以直接复制文字的 PDF。
+| 输入 | 走哪条路 |
+|---|---|
+| 电子版 PDF（有可靠文字层） | 本地 PyMuPDF4LLM 提取 |
+| 扫描版 PDF（无有效文字层） | 云端 OCR（MinerU Cloud / PaddleOCR-VL） |
+| 已 OCR 的 Markdown（`book.md` + `images/`） | 不重新 OCR，只清理与组装 |
+
+不做的事见 §12。
+
+## 2. 统一中间格式
 
 ```text
-PDF
- ↓
-PDF 类型检测
- ↓
-PyMuPDF4LLM
- ↓
-Markdown + images/
- ↓
-Markdown 清理
- ↓
-Pandoc + EPUB CSS
- ↓
-EPUB
+输入 ──► 提取 ──► work/<书名>/book.md + images/ ──► 清理 ──► Pandoc + book.css ──► EPUB ──► 双层校验
 ```
 
-默认不进行 OCR。
+**所有来源都必须先变成同一份 Markdown**：不允许任何解析器直接产出自己的 EPUB。这样替换 PDF 解析器或 OCR 服务时，后处理一行都不用改。
 
-### 扫描版 PDF
+- 工作目录固定为 `work/<书名>/`，书名做 sanitize（空白 → `_`），因为 PyMuPDF 写图的路径不能含空格；输出 EPUB 保留原始文件名。
+- 中间产物（`book.md` / `images/` / 页码注释 / 续跑记录）是排障与验收的入口：出问题先看中间产物，再怀疑下游。
 
-扫描 PDF 的 OCR 不在本地运行。
+## 3. 类型判定与页级路由
 
-OCR 使用云端服务，可切换：
+检测按**页**统计有效字符（总字符 − 空白 − 可疑乱码）：
 
-- MinerU Cloud
-- PaddleOCR-VL 1.6
+| 判定 | 条件 | 路由 |
+|---|---|---|
+| `text` | 文字页占比 ≥ 90% | 全本地提取 |
+| `scanned` | ≤ 10% | 全云端 OCR |
+| `hybrid` | 其余 | **页级路由**：文字页本地提，扫描页送云端 |
+
+不要只看文件大小来判断类型。
+
+**伪文字层**是独立信号：嵌入字体缺少正确的 ToUnicode 映射时，页面渲染正常但提取全是乱码。检测按可疑字符（私有区 / 替换符 / 框线绘图 / 杂项符号 / CJK 扩展区）占比判定，超过阈值即提示。它只是**警告，不是判决** —— 单文件交互询问是否改用 OCR，批处理仅警告，最终由用户决定。
+
+**路由与合并的唯一排序依据是真实页码**：
+
+- 文字页逐页提取（`page_chunks=True`），一页一个页单元；
+- 扫描页按**连续区段**切分，一段渲染成纯图 PDF 提交一次云端 OCR，一段一个页单元；
+- 全部页单元按 1-indexed 原始页码排序合并，并写入页码注释（`<!-- page 3 -->` / `<!-- page 4-5 ocr -->`，合并过的非连续区段如实写 `<!-- page 2,4 ocr -->`）。
+
+只要携带真实页码，`text→scan→text` 交错的书就不会错序 —— 按「各组首页页码」整块拼接会把扫描块提到最前，产出「看着正常、内容其实错序」的书。
+
+区段数超过 `hybrid.max_ocr_runs`（默认 8）时按顺序均分合并，以控制云端任务数，并打印警告（合并区段内的局部页序可能与原文不一致，内容不丢）。**预检与实际提交必须共用同一份区段规划**，否则会出现「预检说 1 个任务、实际提交 5 个」。
+
+## 4. 提取后端
+
+统一 `Backend` 接口，具体服务与后续流程解耦（见 §11）。凭证读取顺序：显式参数 → 环境变量（`MINERU_API_TOKEN` / `PADDLEOCR_TOKEN`）→ 项目根 `apikey.json`（gitignore，用户维护）；**Token 不打印、不进日志、不进会话记录**。
+
+- **PyMuPDF4LLM（本地）**：逐页提取，图片按需导出。行间公式是矢量绘制，会被渲染成 PNG（见 §6 公式一节）。
+- **云端（MinerU / PaddleOCR-VL）**：输出 LaTeX + images。单任务有页数上限，超过时按 `page_ranges` 分片提交到同一 batch，结果按段序合并为统一的 `book.md` + `images/`（跨段重名图片加前缀并改引用），并写入真实页码注释。
+- **降级**：云端解析失败时渲染纯图（JPEG 压缩）重试一次。判定只看云端返回的 `err_msg`，不看自己拼的中文前缀 —— 否则任何失败都会触发重试，白跑一轮并重复消耗额度。
+- **续跑**：任务提交成功即把 `batch_id` / `job_id` + 内容指纹写入 `work/<书名>/.ocr_task.json`，解包成功后才清除。重跑先探测该任务是否仍可用（有记录、未失败）→ 继续轮询并解包，**不重新上传**；缓存失效、指纹不符或降级变体不匹配时才重新提交。这样超时、Ctrl+C、关掉桌面端都不会白扣配额；`--no-resume` 可强制重提。
+
+## 5. Markdown 清理
+
+独立模块，原则是**修复结构，而不是改写正文**。顺序有依赖，不能随意调换：
+
+页码行剔除 → **页眉页脚重复行剔除（必须在跨页拼接之前，否则页眉会被拼进正文）** → 中文排版空格修正 → 跨页断行连接（结构感知：保护代码块与表格行） → **OCR 拆词空格合并（必须在拼接之后：先还原段落，再修词内空格）** → 重复标题去重 / 空标题删除与层级收敛 → 行尾空白 → 图片引用存在性校验。
+
+- 每条规则都是启发式：**默认保守 + 可单独关闭 + 配「不该改」的测试**（误伤比漏改严重）。
+- 拼接带**长度门槛**（相邻行 ≥ 6 字、跨空行 ≥ 10 字）：把短行（诗句、年份、只出现两次的页眉）拼进段落，比漏拼一处严重得多；不拼接的位置**还原原有空行数**，否则紧凑列表 / 引用块会被松散化。
+- 清理动作必须打到日志（`[clean] …`），否则规则静默生效、用户无从判断。
+- 开关三处同源：`config.yaml` 的 `clean:` 段 / CLI `--clean-disable` / 桌面端「清理选项」。
+
+## 6. EPUB 产物
+
+统一 Pandoc（`--toc --toc-depth=3 --css config/book.css --mathml`）。CSS 由项目自维护（`config/book.css`），目标：中文正文舒适、标题层级清晰、图片与公式自适应阅读器宽度、脚注与表格正常、常见阅读器兼容。CSS 只负责显示，不能掩盖内容问题。
+
+元数据：
+
+- **`dc:identifier` 必须是内容指纹派生的稳定 id** —— 同一本书重转要得到同一个 id，否则阅读器当作新书（书架重复、阅读进度丢失）；内容变了才换。
+- `dc:title` / `dc:creator` 由文件名「标题 - 作者」推断；`dc:date` 优先取 PDF 内嵌创建日期。
+- `dc:language` 按正文 Unicode 脚本检测（zh-CN / en / ja / ko），`--lang` 或配置可覆盖，**不写死**。
+- 封面取 PDF 首页渲染，渲染失败不阻断转换。
+
+公式：云端路径的 LaTeX 经 `--mathml` 转 MathML。**MathML 不支持 `\tag{n}`** —— pandoc 只会把它留在 `<annotation>` 里，编号在阅读器里会整个消失，因此生成前归一化成可见的编号（`\tag*{n}` 保持无括号）；只改数学片段，围栏代码块原样保留。本地路径的行间公式以图片落地（公式编号可能被上游的矢量簇聚簇切成独立小图，内容不丢、位置错）——公式多的书走云端后端。
+
+## 7. 质量校验（两层）
+
+1. **结构校验**：容器 / manifest / 内部链接 / 图片引用与媒体类型 / MathML / 脚注 / TOC / CSS、孤立图片、成规模空章节。
+2. **内容完整性**：拿产物与**源 Markdown** 对照图片数、公式数、正文字符数、标题数，断崖式差异判 error。
+
+阈值刻意宽松（正文字符 < 40% 才 error、< 90% 只告警），因为**正常产物必须零提示**。标题页 / 目录 / 封面页 / 标题章天然短，一律不参与空章节统计；「章节偏短」只统计不告警。
+
+校验在每次转换后自动跑，默认只告警；`--strict` 让 error 直接判该文件失败（校验失败是确定性结果，**不重试** —— 重试会重复消耗云端额度）。
+
+验收样本：普通中文电子书、双栏、图片多、公式多、脚注、中英混排、扫描书、复杂排版扫描书、混合型、已有 Markdown。仓库 `samples/` 提供 6 类实体样本，缺的类目由 `tests/conftest.py` 合成样本覆盖。
+
+## 8. 桌面端
+
+Tauri 2 壳 + React，UI 按设计稿实现；**业务逻辑全部在引擎里**，壳只负责进程、事件与展示。
+
+- **状态与进度只能来自结构化事件**：壳调用 CLI 时加 `--json-events`，stdout 只走 JSON Lines，人类可读日志走 stderr。事件覆盖 `hello / detect / plan / stage / progress / shards / verify / warning / error / complete / skip`；阶段权重由 `hello` 下发，前端不另写一份。**禁止从人类日志文案解析状态**（文案一改就静默失效）；兜底正则必须显式标出自己在兜底。
+- **stdout 与 stderr 都必须被持续读掉**：管道缓冲区写满会让子进程永久阻塞，症状是「转换莫名卡住」。
+- **进度条只许前进**：阶段内进度未知时可以给猜测值，但展示值取历史峰值。
+- **取消 = 结束整棵进程树**（`taskkill /T /F`）：只杀父进程时 PyInstaller 的子进程会继续跑完并计费。
+- 凭证可在设置页写入 `apikey.json`（值不回显）；清理项开关与引擎同源。
+
+## 9. 命令行与批处理
 
 ```text
-扫描 PDF
- ↓
-云端 OCR
- ├── MinerU
- └── PaddleOCR-VL 1.6
- ↓
-统一 Markdown + images/
- ↓
-Markdown 清理
- ↓
-Pandoc + EPUB CSS
- ↓
-EPUB
+ebook-converter <文件|目录>... -o output
+    [--backend auto|pymupdf|mineru|paddleocr] [--retries N] [--force]
+    [--clean-disable LIST] [--strict] [--lang zh-CN] [--json-events]
+    [--dry-run [--json]] [--no-resume] [--verbose] [--no-log]
 ```
 
-OCR 后端必须通过 Adapter 接口接入，不能让具体 OCR 服务与后续流程耦合。
+默认自动判定类型，也可显式指定后端；`.md` 输入跳过 OCR。
 
-### 已有 Markdown
+批处理语义：单文件失败不中断整体；失败按指数退避重试；已完成的文件跳过（断点续跑）；默认不并发，优先稳定性。`--dry-run` 只做预检（类型 / 页数 / 计划后端 / 分片数 / 当日额度），不建目录、不写日志文件。
 
-已经 OCR 完成的 Markdown 不再重新 OCR。
+## 10. 目录结构
 
 ```text
-book.md + images/
- ↓
-Markdown 清理
- ↓
-Pandoc + EPUB CSS
- ↓
-EPUB
+src/
+  detector/       # PDF 类型检测（含伪文字层识别）
+  backends/       # base（抽象）/ pymupdf / mineru / paddleocr
+  markdown/       # cleaner（清理）/ bold（强调字体 → 粗体）
+  epub/           # pandoc（封装）/ verify（结构）/ content（内容对照）
+  page_result.py  # 页单元：页码、排序、页码注释、扫描区段规划
+  events.py       # 阶段事件流（--json-events）
+  convert.py      # 自动路由（text / scanned / hybrid）
+  batch.py        # 批处理（重试 / 跳过 / 断点续跑）
+  dryrun.py       # 印前检查
+  lang_detect.py  # dc:language 检测
+  cli.py          # ebook-converter 入口
+  paths.py        # 路径与凭证
+config/           # config.yaml + book.css
+desktop/          # Tauri 2 壳（React + Tailwind）
+tests/            # pytest（样本现场生成，不依赖真实书籍）
+scripts/          # 样本生成 / 端到端 / 校验 / 版本与打包
 ```
 
----
-
-## 3. PDF 类型
-
-需要支持三种情况：
-
-### text
-
-PDF 存在可靠文字层。
-
-→ PyMuPDF4LLM
-
-### scanned
-
-PDF 基本没有有效文字层。
-
-→ 云端 OCR
-
-### 伪文字层(检测增强,已实现)
-
-部分 PDF 文字层损坏(嵌入字体无正确 ToUnicode 映射),提取出乱码但渲染正常。
-
-检测:统计页内「可疑字符」占比(私有区 / 替换符 / 框线绘图 / 杂项符号 / CJK 扩展区),超过阈值(25%)视为伪文字层页。
-
-处理:检测到疑似伪文字层时,**由用户手动决定是否改用 OCR**(单文件交互询问;批处理仅警告)。
-
-### hybrid
-
-部分页面存在文字层，部分页面是扫描内容。
-
-需要保留 hybrid 能力。
-
-优先提取原生文字，无法提取的内容再进入 OCR 流程。
-
-不要仅根据 PDF 文件大小判断类型。
-
-> 补充：**页单元(PageResult)架构(2026-09 实现,`src/page_result.py`)**。
-> 文字页逐页提取(`page_chunks=True`)→ 一页一个页单元;扫描页按**连续区段**
-> (contiguous run)切分,每段渲染成纯图 PDF 单独提交一次 OCR → 一段一个页单元。
-> 所有页单元按 1-indexed 原始页码排序合并,合并时写入页码注释
-> (`<!-- page 3 -->` / `<!-- page 4-5 ocr -->`;合并过的非连续区段如实写作
-> `<!-- page 2,4 ocr -->`)。这样 `text→scan→text` 交错时不会再把整块扫描内容
-> 提到最前(旧实现按「各组首页页码」排序,页序错位且页边界丢失)。
-> 区段数超过 `hybrid.max_ocr_runs`(默认 8)时按顺序均分合并以控制云端任务数,
-> 并打印警告(合并区段内局部页序可能与原文不一致,内容不丢)。
-> 预检(`--dry-run`)用同一份区段规划报云端任务数,与实际提交一致。
-
----
-
-## 4. 技术选型
-
-### 核心
-
-- Python
-- uv
-- PyMuPDF4LLM
-- Pandoc
-
-### 云端 OCR
-
-- MinerU Cloud
-- PaddleOCR-VL 1.6
-
-### 桌面端(Phase 8 新增)
-
-- Tauri 2 + React + Tailwind v4
-- UI 源自 Figma 设计稿,桥接 CLI 子进程
-- 构建工具链:Windows MSVC
-
-> 补充:**界面状态来自引擎事件流(2026-09 实现)**。此前桌面端用 5 个正则从 CLI 的
-> 中文日志里猜状态(文案一改就静默失效),进度百分比按「日志行到达 +5」估算(永远到不了
-> 95%)。现在壳给 CLI 加 `--json-events`:stdout 只走 JSON Lines
-> (`hello/detect/plan/stage/progress/shards/verify/warning/error/complete`),
-> 人类日志改走 stderr 且**必须被持续读掉**(管道写满会让子进程卡死)。
-> 阶段权重由引擎的 `hello` 事件下发,前端不另写一份;`progress` 事件让云端 OCR 的
-> 区段/分片进度变成真实百分比。前端取历史峰值,进度条只许前进(阶段猜测值可能高于
-> 首个真实分片进度,否则会倒退)。老版 CLI 仍走正则兜底,日志行会标 LEGACY。
-
-### EPUB
-
-统一使用 Pandoc。
-
-项目自行维护 EPUB CSS，不依赖已经存在的 `book.css`。
-
----
-
-## 5. 不使用的工具
-
-当前阶段不要引入：
-
-- 本地 MinerU
-- 本地 PaddleOCR-VL
-- pdf-craft
-- research2epub
-- Docling
-- Marker
-
-除非实际测试证明当前方案无法满足需求，否则不要增加新的 PDF 解析框架。
-
----
-
-## 6. Markdown 是核心中间格式
-
-所有来源最终都必须进入统一结构：
-
-```text
-work/<书名>/
-├── book.md
-└── images/
-```
-
-> 注：实际实现中按书名分目录(`work/<书名>/`),便于多书并行与批处理跳过判定。
-
-不同解析器不能直接生成各自独立的 EPUB。
-
-应该统一：
-
-```text
-各种输入
- ↓
-Markdown
- ↓
-清理
- ↓
-Pandoc
- ↓
-EPUB
-```
-
-这样以后可以方便替换 PDF 解析器和 OCR 服务。
-
----
-
-## 7. Markdown 清理
-
-建立独立的 Markdown 清理模块。
-
-需要处理：
-
-- 多余空行 ✅ 已实现(连续 ≥3 压缩)
-- 页眉 ⏳ 未实现(依赖 OCR 服务自身过滤)
-- 页脚 ⏳ 未实现(同上)
-- 页码 ✅ 已实现(独立纯数字行剔除)
-- 跨页断行 ✅ 已实现(结构感知拼接,保护代码块/表格)
-- OCR 异常空格 ⏳ 未实现(如 "Py Mu PDF 4 LLM" 类,待处理)
-- 重复标题 ⏳ 未实现
-- 空标题 ⏳ 未实现
-- Markdown 格式错误 ⏳ 未实现
-- 图片路径 ✅ 已实现(引用存在性校验)
-- 标题层级 ⏳ 未实现
-- 中文排版空格 ✅ 已实现(汉字-汉字/数字、中文标点两侧、标签与括号两侧)
-- 强调字体粗体标注 ✅ 已实现(`src/markdown/bold.py`,KaiTi/中宋等 → `**`)
-
-清理项开关 ✅ 已实现(`CleanOptions`,配置 `clean:` 段 + CLI `--clean-disable` +
-桌面端「清理选项」同源):`page_numbers` / `join_lines` / `cjk_spaces` / `bold` / `images`
-(`bold` 默认关,关闭等价于 `pymupdf.bold_fonts` 为空;hybrid 与纯文字版同一条链路,
-文字页同样走 bold 标注)。
-
-原则：
-
-> 修复结构，而不是改写正文。
-
-禁止使用 LLM 大规模重写正文。
-
-尤其中文书籍必须尽量保持原文。
-
----
-
-## 8. 图片
-
-图片是 EPUB 的硬性质量要求。
-
-必须保证：
-
-```text
-PDF / OCR
- ↓
-images/
- ↓
-Markdown 正确引用
- ↓
-Pandoc
- ↓
-EPUB
-```
-
-最终 EPUB 中：
-
-- 图片不能丢失
-- 图片路径必须正确
-- 中文文件名必须正常
-- 空格和特殊字符必须正常
-- MIME type 必须正确
-- 图片不能无故被裁切
-- 图片应根据阅读器宽度自适应
-- 阅读器必须能够正常显示
-
-生成 EPUB 后需要检查图片引用和实际文件是否匹配。
-
----
-
-## 9. 数学公式
-
-公式是 EPUB 的硬性质量要求。
-
-Markdown 中优先保持：
-
-```markdown
-$...$
-```
-
-和：
-
-```markdown
-$$
-...
-$$
-```
-
-或者其他 Pandoc 能可靠转换的数学表示。
-
-最终 EPUB 必须实际检查公式是否能够显示。
-
-不能仅因为 Pandoc 命令执行成功，就认为公式正常。
-
-如果默认 Pandoc EPUB 方案不能可靠显示公式，需要调整转换方案。
-
-注意：
-
-> CSS 只能负责公式的显示和排版，不能代替数学公式的正确转换。
-
-目标：
-
-> 公式在最终 EPUB 阅读器中可读，并尽量保持原始结构。
-
-> 补充：**公式编号 `\tag{n}`（2026-09 实测修复）**。MathML 没有 `\tag` 这个概念：
-> pandoc 只把它留在 `<annotation encoding="application/x-tex">` 里，MathML 正文一个字
-> 都不出现 —— 阅读器里**编号整个消失**（云端 OCR 产出的 LaTeX 带 `\tag{1}`/`\tag{2}`，
-> 实测两处编号全丢）。生成 EPUB 前归一化成可见的 `\qquad{(n)}`（编号跟着公式一起渲染，
-> 仍属同一个 MathML 块），`\tag*{n}` 保持无括号。只改数学片段，围栏代码块原样保留；
-> 不就地改 `book.md`（它是内容对照的源），写一份 `book.pandoc.md` 副本给 pandoc。
->
-> 另一侧：**本地路径（PyMuPDF4LLM）的公式编号会被切成独立小图**。这份样本 PDF 里
-> 一张位图都没有，那 4 张「公式图」是 `cluster_drawings` 把矢量公式簇渲染出来的；
-> 编号 `(1)` 的括号是独立矢量路径、离公式本体约 155 pt → 自己成一个簇、单独成图
-> （内容不丢，位置错；容差参数未暴露，修不了）。公式多的书走云端后端。
-
----
-
-## 10. EPUB CSS
-
-项目自行维护基础 EPUB CSS，例如：
-
-```text
-config/
-└── book.css
-```
-
-不依赖旧的 `book.css`，因为原文件已经删除。
-
-CSS 的目标是：
-
-- 中文正文舒适阅读
-- 合理的字体大小和行距
-- 合理的段落间距
-- H1/H2/H3 层级清晰
-- 图片自适应阅读器宽度
-- 图片不超出页面
-- 脚注正常显示
-- 表格尽量适应屏幕
-- 公式显示区域不被破坏
-- 不使用过度复杂的固定布局
-- 兼容常见 EPUB 阅读器
-
-不要一开始设计复杂的主题。
-
-优先建立简单、稳定、跨阅读器兼容的基础 CSS。
-
-CSS 应该独立于 Markdown 清理和 PDF 解析模块。
-
----
-
-## 11. EPUB
-
-统一使用 Pandoc。
-
-默认考虑：
-
-```text
---toc
---toc-depth=3
---css=config/book.css
-```
-
-但具体参数以实际测试为准。
-
-需要支持：
-
-- 中文
-- 图片
-- 数学公式
-- 脚注
-- TOC
-- 标题
-- 超链接
-- 表格
-- 代码块
-
-> 补充：**封面、元数据与语言(2026-09 实现)**。封面取 **PDF 首页**渲染成 JPEG
-> (1200px 宽 / q88 / 不裁切)经 `--epub-cover-image` 注入,渲染失败不阻断转换。
-> `dc:identifier` 用**源文件内容指纹派生的 uuid5** —— 同一本书重转必须是同一个 id
-> (否则阅读器当新书:书架重复、阅读进度丢失),内容变了才换;`dc:date` 优先取 PDF
-> 内嵌创建日期;`dc:language` 由 `src/lang_detect.py` 按 Unicode 脚本区间检测
-> (zh-CN/en/ja/ko),优先级 CLI `--lang` > 配置 `language:` > 检测 > zh-CN 回退,
-> **不再写死 zh-CN**。
-
----
-
-## 12. EPUB 验证
-
-生成 EPUB 后不能只检查命令是否成功。
-
-至少检查：
-
-- EPUB 文件结构
-- XHTML
-- 图片
-- CSS
-- 图片引用
-- 数学公式
-- TOC
-- 空章节
-- 内部链接
-
-如果环境中有 EPUBCheck，可以使用。
-
-如果没有 EPUBCheck，不要声称完成了 EPUB 标准验证。
-
-至少需要实际使用一个 EPUB 阅读器验证最终文件。
-
-重点确认：
-
-1. 中文正文正常
-2. 图片正常
-3. 数学公式正常
-4. TOC 正常
-5. CSS 正常
-6. 脚注正常
-
-> 补充：**内容完整性对照(2026-09 实现)**。结构校验(`src/epub/verify.py`)只能证明
-> 「包合法」;空章节、图片被吞、公式全消失的产物在结构上完全合法。因此新增
-> `src/epub/content.py::verify_content()`:**拿产物和源 Markdown 对照**(图片数、
-> 公式数、正文字符数、标题数),断崖式差异(文本 <40%、图片/公式变少)判 error,
-> 其余(EPUB 多出封面图、正文略少于标记剥离差异)只告警 —— 阈值刻意宽松,
-> **正常产物必须零提示**,否则用户会学会忽略提示。
-> 接入点:`batch._process_pdf/_process_markdown` 生成 EPUB 后自动跑(带源 book.md
-> 与原始页数),`scripts/verify_epub.py --content <book.md> [--expect-pages N]` 可手工核验。
-
----
-
-## 13. OCR Adapter
-
-MinerU 和 PaddleOCR-VL 必须有统一接口。
-
-例如：
-
-```python
-class OCRBackend:
-    def convert(self, pdf_path) -> ConversionResult:
-        ...
-```
-
-实现：
-
-- `MinerUAdapter`
-- `PaddleOCRAdapter`
-
-配置能够切换：
-
-```text
-ocr_backend = mineru
-```
-
-或者：
-
-```text
-ocr_backend = paddleocr
-```
-
-API Key 和 Endpoint 不得硬编码。
-
-使用环境变量或配置文件。✅ 已实现,读取顺序:显式参数 → 环境变量(`MINERU_API_TOKEN` / `PADDLEOCR_TOKEN`)→ 项目根 `apikey.json`(已 gitignore,由用户维护)。
-
-> 补充：MinerU 解析失败时(如伪文字层 PDF)自动降级为「渲染纯图(JPEG 压缩)后重试」,已固化在后端内。
-
-> 补充：**>200 页自动分片(2026-08 实现)**。MinerU 官方精准解析 API 单任务限制 ≤200 页 / ≤200MB(超限错误码 `-60006`,官方建议"拆分文件或使用 page_ranges")。实现采用 page_ranges 方案:`MinerUAdapter` 提交 PDF 时按 `mineru.max_pages_per_task`(默认 200)切分为多个 files 条目(如 302 页 → `1-200`、`201-302`),同一 batch 并行解析;条目名带 `_partN` 后缀 + `data_id`,轮询按 data_id/file_name 区分;结果下载后按段序合并为统一 `work/book.md` + `work/images/`(跨段图片重名自动加 `p{N}_` 前缀并替换引用),并加**真实页码**注释 `<!-- page 201-302 -->`(页码来自提交时的 page_ranges;缺失时退化为旧的 `<!-- page-group N -->`,与 hybrid 的页码注释同源)。CLI 与桌面端(Tauri 壳为 CLI 子进程)均自动生效。
-
----
-
-> 补充：**云端任务续跑(2026-09 实现)**。OCR 任务提交成功后把 `batch_id`(MinerU)/
-> `job_id`(PaddleOCR-VL)连同文件内容指纹写入 `work/<书名>/.ocr_task.json`,结果解包成功后清除。
-> 重跑同一文件时先探测该任务是否仍可用(有记录/未失败)→ 直接继续轮询并解包,**不重新上传**;
-> 缓存失效、指纹不符(文件被换掉)、或降级渲染变体不匹配时才重新提交。这样超时、Ctrl+C、
-> 关掉桌面端都不会白扣云端配额。`--no-resume`(CLI)可强制重新提交。
-
-> 补充：**取消要杀进程树(2026-09 实现)**。桌面端的取消此前只改前端状态,CLI 子进程会继续跑完
-> 并写出 EPUB、云端 OCR 继续计费。现在 Rust 侧保存 `task_id → pid` 映射,取消时用
-> `taskkill /PID <pid> /T /F` 结束**整棵进程树**(实测:只杀父进程时 PyInstaller 引导进程的子进程会存活)。
-
-## 14. CLI
-
-最终希望支持：
-
-```powershell
-ebook-converter book.pdf
-```
-
-自动判断 PDF 类型。
-
-也支持：
-
-```powershell
-ebook-converter book.pdf --backend pymupdf
-ebook-converter book.pdf --backend mineru
-ebook-converter book.pdf --backend paddleocr
-ebook-converter book.md
-ebook-converter ./books/
-ebook-converter book.pdf --clean-disable join_lines,cjk_spaces   # 关闭部分清理项
-ebook-converter book.pdf --no-resume                             # 不复用云端已提交任务
-```
-
-批量处理不能因为单个文件失败而全部停止。
-
----
-
-## 15. 批处理
-
-需要支持：
-
-- 批量处理
-- 日志
-- 失败重试
-- 跳过已完成文件
-- 断点续跑
-
-默认不要大量并发。
-
-云端 OCR 必须考虑 API 限制。
-
-优先保证稳定性。
-
----
-
-## 16. 推荐目录结构
-
-```text
-ebook-converter/
-├── src/
-│   ├── detector/
-│   │   └── pdf_detector.py      # 类型检测(含乱码率/伪文字层判定)
-│   ├── backends/
-│   │   ├── base.py              # Backend 抽象 + normalize_image_refs
-│   │   ├── pymupdf_backend.py
-│   │   ├── mineru_backend.py    # 含渲染降级重试
-│   │   └── paddleocr_backend.py
-│   ├── markdown/
-│   │   ├── cleaner.py           # 清理(页码/断行/空格/图片校验)
-│   │   └── bold.py              # 强调字体 → 粗体标注
-│   ├── epub/
-│   │   ├── pandoc.py            # Pandoc → EPUB 封装
-│   │   ├── verify.py            # 结构校验(容器/manifest/链接/图片/公式/CSS)
-│   │   └── content.py           # 内容完整性(对照源 Markdown 查内容丢失)
-│   ├── batch.py                 # 批处理(重试/跳过/断点续跑)
-│   ├── convert.py               # 自动路由(text/scanned/hybrid)
-│   ├── page_result.py           # 页单元(页码/排序/页码注释)+ 扫描区段规划
-│   ├── events.py                # 阶段事件流(--json-events:JSON Lines)
-│   ├── cli.py                   # ebook-converter 命令入口
-│   └── paths.py                 # 路径与 apikey.json 凭证读取
-├── config/
-│   ├── config.yaml
-│   └── book.css
-├── desktop/                     # Tauri 2 桌面端(React + Tailwind v4,Figma 设计稿)
-├── tests/                       # 真实书测试样本(已 gitignore)
-├── logs/
-├── output/
-├── pyproject.toml
-├── README.md
-└── IDEA.md
-```
-
-实际结构可以根据工程需要调整，不要求机械遵守。
-
----
-
-## 17. 开发顺序
-
-### Phase 1：环境检查
-
-检查：
-
-- Python
-- uv
-- Pandoc
-- PyMuPDF4LLM
-- 当前项目
-- 当前文件结构
-
-不要直接修改环境。
-
-✅ 已完成。
-
----
-
-### Phase 2：Markdown → EPUB
-
-先完成：
-
-```text
-Markdown + images
- ↓
-Pandoc + config/book.css
- ↓
-EPUB
-```
-
-建立最小测试 Markdown，同时包含：
-
-- 中文正文
-- 一级标题
-- 二级标题
-- 图片
-- 行内公式
-- 行间公式
-- 脚注
-- 超链接
-
-重点验证：
-
-- 中文
-- 图片
-- 数学公式
-- TOC
-- CSS
-- 脚注
-
-必须实际打开生成的 EPUB 进行验证。
-
-✅ 已完成。
-
----
-
-
----
-
-### Phase 3：电子 PDF → Markdown
-
-实现：
-
-```text
-电子 PDF
- ↓
-PyMuPDF4LLM
- ↓
-Markdown + images/
- ↓
-EPUB
-```
-
-重点测试：
-
-- 普通中文电子书
-- 双栏电子书
-- 图片较多的 PDF
-- 含公式的 PDF
-- 含脚注的 PDF
-
-✅ 已完成。
-
----
-
-
----
-
-### Phase 4：MinerU Cloud
-
-加入：
-
-```text
-扫描 PDF
- ↓
-MinerU Cloud
- ↓
-统一 Markdown + images/
-```
-
-✅ 已完成。
-
----
-
-
----
-
-### Phase 5：PaddleOCR-VL 1.6
-
-加入：
-
-```text
-扫描 PDF
- ↓
-PaddleOCR-VL 1.6
- ↓
-统一 Markdown + images/
-```
-
-确保其输出可以进入与 MinerU 完全相同的后处理流程。
-
-✅ 已完成。
-
----
-
-
----
-
-### Phase 6：自动检测
-
-实现：
-
-```text
-PDF
- ↓
-PDFDetector
- ↓
-text / scanned / hybrid
-```
-
-对应：
-
-```text
-text
-→ PyMuPDF4LLM
-
-scanned
-→ 配置的 OCR backend
-
-hybrid
-→ hybrid 流程
-```
-
-✅ 已完成。
-
----
-
-
----
-
-### Phase 7：批处理
-
-最后实现：
-
-- 批量处理
-- 日志
-- 重试
-- 跳过已完成文件
-- 断点续跑
-
-✅ 已完成。
-
----
-
-### Phase 8：增强与桌面端(已完成)
-
-在 Phase 1-7 基础上追加：
-
-- ✅ 文件名「标题 - 作者」→ EPUB 元数据(`dc:title` / `dc:creator`)
-- ✅ 凭证支持项目根 `apikey.json`(环境变量优先,已 gitignore)
-- ✅ 伪文字层检测(乱码率)+ 运行时交互询问是否 OCR
-- ✅ MinerU 解析失败自动降级「渲染纯图(JPEG)重试」
-- ✅ MinerU >200 页自动分片(page_ranges 方案,详见 §13 补充;CLI/桌面端均生效)
-- ✅ 桌面端:CLI 子进程隐藏控制台黑窗口(`CREATE_NO_WINDOW`)+ CLI stdout 行缓冲,前端日志实时显示、可点击展开完整日志
-- ✅ 中文清理增强:页码剔除、跨页断行连接(结构感知)、中文空格修正、强调字体粗体标注
-- ✅ 桌面端:Tauri 2 + React,UI 源自 Figma 设计稿(瑞士国际主义风格),桥接 CLI 子进程 + 进度事件
-- ✅ 清理项开关:`CleanOptions`(config `clean:` 段 / CLI `--clean-disable` / 桌面端「清理选项」三处同源,设置随 localStorage 持久化)
-- ✅ 云端任务续跑:`work/<书名>/.ocr_task.json` 记录 batch/job id + 内容指纹,中断后重跑不重新上传
-- ✅ 桌面端「取消」真的结束 CLI 进程树(`taskkill /T /F`),不再白跑完并写产物
-- ✅ 桌面端凭证可保存:设置页填入 Token → 写入 `apikey.json`(值不回显),CLEAR 删除,环境检查显示文件位置
-- ✅ 工具链:Windows MSVC(Visual Studio Build Tools + rustup stable-x86_64-pc-windows-msvc)
-- ✅ 发布:GitHub Release v0.1.0(绿色版 exe),MIT License,仓库公开
-
----
-
-## 18. 测试
-
-至少测试：
-
-1. 普通中文电子 PDF
-2. 双栏电子 PDF
-3. 扫描中文书
-4. 复杂排版扫描书
-5. 混合型 PDF
-6. 已有 OCR Markdown
-7. 大量图片的书
-8. 数学公式较多的书
-9. 有脚注的书
-10. 中英文混排的书
-
-重点检查：
-
-- 文本是否缺失
-- 阅读顺序
-- 标题层级
-- TOC
-- 图片
-- 公式
-- 脚注
-- CSS
-- EPUB 阅读器兼容性
-
----
-
-## 19. 开发原则
-
-1. 不部署本地 MinerU。
-2. 不部署本地 PaddleOCR-VL。
-3. OCR 使用云端。
-4. 已有 Markdown 不重新 OCR。
-5. 不为了“智能”而使用 LLM 重写正文。
-6. 不过度引入新的框架。
-7. 优先使用 uv。
-8. 项目自行维护 `config/book.css`。
-9. 图片和公式是硬性验收项目。
-10. “Pandoc 命令执行成功”不等于 EPUB 质量合格。
-11. OCR 后端必须通过 Adapter 解耦。
-12. 每完成一个 Phase 都先测试，再进入下一阶段。
-13. 如果发现架构问题，先说明问题和影响，再修改。
-14. 优先简单、可靠、可维护，而不是功能堆砌。
-15. 不要为了处理一种特殊 PDF 而引入大量新的依赖。
-16. 优先保证最终 EPUB 的阅读体验，而不是追求中间 Markdown 的形式复杂度。
-17. 伪文字层等检测结果不可靠时，由用户手动决定是否使用 OCR，不强行自动判定。
-18. 凭证只存于环境变量或 `apikey.json`(gitignore)，绝不入库；Token 不打印、不进会话记录。
+具体结构可以按工程需要调整，不要求机械遵守。
+
+## 11. 开发原则
+
+1. OCR 只用云端：不部署本地 MinerU / PaddleOCR-VL；已有 Markdown 不重新 OCR。
+2. 不用 LLM 重写正文；不为一种特殊 PDF 引入一堆新依赖；不过度引入新框架。
+3. 优先 uv；`config/book.css` 由项目自维护。
+4. 图片和公式是硬性验收项；「命令执行成功」不等于质量合格。
+5. OCR 后端通过 Adapter 解耦，配置可切换。
+6. 每条启发式规则「默认保守 + 可单独关闭 + 配不该改的测试」；正常产物零提示。
+7. 检测不可靠时（伪文字层）由用户决定，不强行自动判定。
+8. 状态只能来自结构化事件，不从人类文案解析。
+9. 凭证只存环境变量或 `apikey.json`（gitignore），绝不入库、不打印、不进会话记录。
+10. 改动要有可复现的验证：测试全绿是底线；调阈值或改启发式之前，先加能复现问题的样本。
+11. 发现架构问题先说明问题与影响，再动手；优先简单、可靠、可维护，而不是功能堆砌。
+
+## 12. 明确不做
+
+本地 MinerU / 本地 PaddleOCR-VL / Docling / Marker / pdf-craft / research2epub · LLM 重写正文 · MOBI / AZW3 · 复杂在线服务 · 大规模并发 · 自动更新插件 · 代码签名 · 为 UI 引入新前端框架 · 自动判决伪文字层 · 从人类日志文本解析状态。

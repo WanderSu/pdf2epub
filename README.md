@@ -365,7 +365,7 @@ cd desktop/src-tauri && cargo test     # Rust 测试(IPC / 书库 / 凭证合并
 cd desktop && npm run build            # 前端类型检查 + 构建
 ```
 
-路线图与下一步计划见 `.hermes/plans/`;设计依据见 [IDEA.md](IDEA.md)。
+设计与取舍见 [IDEA.md](IDEA.md)（架构、类型判定、后端、清理与校验原则）。
 
 ---
 
