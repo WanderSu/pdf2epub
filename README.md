@@ -2,8 +2,8 @@
 
 > **PDF → EPUB 电子书转换工具** · 电子版 / 扫描版 / Markdown 一键转换,自动清理,排版精致
 
-[![Release](https://img.shields.io/github/v/release/WanderSu/pdf2epub?color=FF4D00&label=release)](https://github.com/WanderSu/pdf2epub/releases)
-[![Stars](https://img.shields.io/github/stars/WanderSu/pdf2epub?color=0A0A0A&label=stars)](https://github.com/WanderSu/pdf2epub)
+[![Release](https://img.shields.io/github/v/release/WanderSu/pdf2epub?color=B5342A&label=release)](https://github.com/WanderSu/pdf2epub/releases)
+[![Stars](https://img.shields.io/github/stars/WanderSu/pdf2epub?color=14110E&label=stars)](https://github.com/WanderSu/pdf2epub)
 [![Platform](https://img.shields.io/badge/platform-Windows-0078D6)](https://github.com/WanderSu/pdf2epub/releases)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -11,36 +11,72 @@
 
 ---
 
-## 📑 目录
+## 目录
 
-- [✨ 特性](#-特性)
-- [🚀 快速开始](#-快速开始)
-- [🖥️ 桌面端](#️-桌面端)
-- [⌨️ CLI 用法](#️-cli-用法)
-- [⚙️ 配置](#️-配置)
-- [❓ 常见问题](#-常见问题)
-- [⚠️ 已知限制](#️-已知限制)
-- [📁 目录结构](#-目录结构)
-- [📄 License](#-license)
+- [截图](#截图)
+- [特性](#特性)
+- [工作流](#工作流)
+- [快速开始](#快速开始)
+- [桌面端](#桌面端)
+- [CLI 用法](#cli-用法)
+- [配置](#配置)
+- [常见问题](#常见问题)
+- [已知限制](#已知限制)
+- [目录结构](#目录结构)
+- [开发](#开发)
+- [License](#license)
 
 ---
 
-## ✨ 特性
+## 截图
+
+| 转换(浅色) | 转换(深色) |
+|---|---|
+| ![convert light](docs/screenshot-convert-light.png) | ![convert dark](docs/screenshot-convert-dark.png) |
+
+| 规范(设置) |
+|---|
+| ![settings](docs/screenshot-settings-light.png) |
+
+界面语言:**铅字工坊**——全站只由纸、墨、朱砂三种材质构成:转换流程叫**工序**(制版 → 检字 → 校勘 → 付印),
+分片叫**折帖**(「第 2 帖 · 共 3 帖」),清理项叫**校勘清单**,预检叫**印前检查**,控制台叫**排字记录**,书库叫**书目**。
+
+---
+
+## 特性
+
+### 转换引擎
 
 | 特性 | 说明 |
 |---|---|
 | 🔍 **自动检测** | 文字层完好 → 本地提取;纯扫描 → 云端 OCR;混合 → 页级路由 |
-| 🧠 **伪文字层识别** | 提取乱码的 PDF 会提示你,由你决定是否改用 OCR |
+| 🧠 **伪文字层识别** | 提取乱码的 PDF 会提示你,由你决定是否改用 OCR(不做自动判决) |
 | ☁️ **云端 OCR** | MinerU / PaddleOCR-VL 可切换;MinerU 失败自动降级为渲染纯图重试 |
-| 📇 **元数据** | 文件名符合「标题 - 作者」自动嵌入 `dc:title` / `dc:creator` |
-| 🧹 **智能清理** | 页码剔除、页眉页脚重复行剔除、跨页断行连接、OCR 空格合并、中文空格修正、重复/空标题与层级修正、强调字体标注粗体;各项可单独开关 |
-| ♻️ **中断续跑** | 云端 OCR 已提交的任务(batch/job id)落盘;超时、关窗口后重跑直接继续轮询,不重新上传、不重复扣配额 |
-| 📦 **批处理** | 失败重试(指数退避)、跳过已完成、断点续跑、单文件失败不中断 |
+| 🪧 **印前检查** | `--dry-run` 预检:转换前看到类型 / 页数 / 计划后端 / 折帖数 / 当日云端页数是否够用,不产出文件、不消耗额度 |
 | 📚 **>200 页自动分片** | MinerU 单任务限 200 页/200MB;超大书自动按 page_ranges 分段提交、并行解析、按序合并 |
-| 🎨 **精装书级排版** | 内置 book.css:中文衬线正文、首行缩进、标题体系、公式/表格/图片保护 |
-| 🌐 **双语界面** | 桌面端中/英一键切换;类型徽标、阶段进度、分片指示、实时控制台、环境检查 |
+| ♻️ **中断续跑** | 云端 OCR 已提交的任务(batch/job id)落盘;超时、关窗口后重跑直接继续轮询,不重新上传、不重复扣配额 |
+| 🧹 **校勘式清理** | 页码剔除、页眉页脚重复行剔除、跨页断行连接、OCR 空格合并、中文空格修正、重复/空标题与层级修正、强调字体标注粗体;9 项可单独开关 |
+| 📇 **元数据** | 文件名符合「标题 - 作者」自动嵌入 `dc:title` / `dc:creator` |
+| 📦 **批处理** | 失败重试(指数退避)、跳过已完成、断点续跑、单文件失败不中断 |
+| 🎨 **精装书级排版** | 内置 `config/book.css`:中文衬线正文、首行缩进、标题体系、公式/表格/图片保护 |
+| ✅ **结构校验** | 每次转换后自动校验 EPUB(图片/公式/脚注/TOC/内部链接/CSS);`--strict` 可让失败项直接判该文件失败 |
 
-### 工作流
+### 桌面端
+
+| 特性 | 说明 |
+|---|---|
+| 🗂 **3 个工作区** | `01 转换` / `02 书目` / `03 规范`——目录式导航,不再有独立的导入页(拖放区就是转换区的空状态) |
+| 🪧 **印前检查面板** | 拖入文件后立刻显示检测结果(类型 / 页数 / 折帖 / 云端页数),并把结果回写到队列行 |
+| 🔧 **工序进度** | 制版 → 检字 → 校勘 → 付印,云端 OCR 时标 `OCR`,折帖进度显示「第 N 帖 · 共 M 帖」 |
+| 🗒 **排字记录** | 实时 CLI 日志(时间戳 / 级别 / 内容),可折叠、可 TAIL / PAUSE |
+| ⛔ **真实取消** | 取消会 `taskkill /T` 杀掉整棵 CLI 进程树——不会白跑完还继续扣云端配额 |
+| 📖 **书目** | `library.json` 持久化,标题/作者取自 EPUB 元数据;类型 / 后端 / 页数随转换回写,重启不丢 |
+| ⚙️ **规范页** | OCR 后端、凭证、输出目录、转换器路径、环境检查、9 项校勘开关、严格校验、主题、语言;未保存改动会提示,「放弃」能真正回滚 |
+| 🌐 **双语 + 双主题** | 中/英一键切换(技术 token 两语都保持英文),亮/暗双主题 |
+
+---
+
+## 工作流
 
 ```text
 电子版 PDF ──► PyMuPDF4LLM(本地)──┐
@@ -51,30 +87,27 @@ MinerU 输出 ──► full.md + images ──┤      (自动:页码/断行/�
 
 ---
 
-## 🚀 快速开始
+## 快速开始
 
 ### 方式一:桌面端(推荐)
 
-从 [Releases](https://github.com/WanderSu/pdf2epub/releases) 下载 `pdf2epub-v0.2.4-win-x64.zip` 并解压到任意目录,双击 `pdf2epub.exe`。
+从 [Releases](https://github.com/WanderSu/pdf2epub/releases) 下载 `pdf2epub-v0.3.0-win-x64.zip` 并解压到任意目录,双击 `pdf2epub.exe`。
 
-> 💡 压缩包内含转换引擎 `cli.exe`(已内置 Python 运行环境,免安装 Python);保持 `pdf2epub.exe`、`cli.exe`、`config/` 三者同级即可运行,无需放在项目根。
+> 💡 压缩包内含转换引擎 `cli.exe`(已内置 Python 运行环境,免安装 Python);保持 `pdf2epub.exe`、`cli.exe`、`config/` 三者同级即可运行。
 
 **首次使用两步**:
 
 1. 安装 [Pandoc](https://pandoc.org/installing.html)(EPUB 生成引擎,必需):`winget install pandoc`
-2. 在解压目录创建 `apikey.json`(云端 OCR 凭证,模板见下方「准备凭证」)
+2. 在解压目录创建 `apikey.json`(云端 OCR 凭证,模板见下方「准备凭证」)——或直接在 **03 规范 → OCR 与凭证** 里粘贴密钥后点保存
 
-- **Import** — 拖放 / 选择 PDF、Markdown;类型检测预览(TXT / SCN / HYB / MD)与计划后端、分片数一目了然
-- **Queue** — 转换队列,阶段进度(DETECT → EXTRACT → CLEAN → BUILD)、分片指示、伪文字层提醒、失败重试、实时控制台日志;取消按钮会真的结束 CLI 子进程树(不会白跑完)
-- **Library** — 转换结果,一键打开 EPUB / 在资源管理器中定位 / 重新转换
-- **Settings** — OCR 后端(Auto / MinerU / PaddleOCR)、输出目录、CLI 路径、API 凭证(填好后写入 `apikey.json`,CLEAR 删除)、环境检查(Pandoc / 引擎 / 凭证)、清理选项(生效并随设置保存)、质量校验(严格校验 EPUB,默认关)、主题(亮/暗)、语言(中/英)
+**三个工作区**:`01 转换`(拖放 + 队列 + 排字记录) · `02 书目`(转换结果) · `03 规范`(设置)。
 
 ### 方式二:CLI
 
 **依赖**:Python 3.12 · [uv](https://docs.astral.sh/uv/) · [Pandoc](https://pandoc.org/installing.html)(≥3.0,需在 PATH 中)
 
 ```bash
-git clone <repo-url> pdf2epub
+git clone https://github.com/WanderSu/pdf2epub.git
 cd pdf2epub
 uv sync    # 创建 .venv 并安装 ebook-converter 命令
 ```
@@ -102,14 +135,14 @@ uv sync    # 创建 .venv 并安装 ebook-converter 命令
 # 已有 Markdown(含 MinerU 桌面端输出的 full.md,按「书名.md + images/」放置)
 .venv/Scripts/ebook-converter.exe "我的书.md" -o output
 
+# 转换前先预检(不产出文件、不消耗额度)
+.venv/Scripts/ebook-converter.exe "扫描书.pdf" --dry-run
+
 # 强制指定 OCR 后端
 .venv/Scripts/ebook-converter.exe "扫描书.pdf" -o output --backend mineru
 
 # 关闭部分清理项(逗号分隔;默认全部开启,bold 默认关)
 .venv/Scripts/ebook-converter.exe "我的书.pdf" -o output --clean-disable join_lines,cjk_spaces
-
-# 不复用云端已提交的任务(默认中断后可续跑)
-.venv/Scripts/ebook-converter.exe "扫描书.pdf" -o output --no-resume
 ```
 
 **输出**:每本书生成 `output/<书名>.epub`;中间产物在 `work/<书名>/book.md + images/`(可手工修订后重新生成)。
@@ -118,24 +151,31 @@ uv sync    # 创建 .venv 并安装 ebook-converter 命令
 
 ---
 
-## 🖥️ 桌面端
+## 桌面端
 
-基于 **Tauri 2 + React**,UI 源自 Figma 设计稿(瑞士国际主义风格,黑白 + 橙色强调)。
+基于 **Tauri 2 + React 19 + Tailwind v4**,UI 源自 Figma 设计稿(铅字工坊主题:纸 / 墨 / 朱砂)。
 
 ### 从源码构建
 
 ```bash
 cd desktop
 npm install
-npm run tauri dev                    # 开发模式
-npm run tauri build -- --no-bundle   # 构建 release exe
+npm run tauri dev                    # 开发模式(vite 热更新)
+npm run tauri build -- --no-bundle   # 构建 release exe(产物 desktop.exe)
 ```
 
 前置要求:Node.js ≥ 20 · Rust(`stable-x86_64-pc-windows-msvc`)· Visual Studio Build Tools(C++ workload)
 
+一键打包发布(版本守卫:四处版本号必须一致):
+
+```bash
+uv run python scripts/build_release.py 0.3.0            # 构建引擎 + 壳 + 打包 + 自检
+uv run python scripts/build_release.py 0.3.0 --skip-build --no-check   # 只复用现有产物重新打包
+```
+
 ---
 
-## ⌨️ CLI 用法
+## CLI 用法
 
 ```
 ebook-converter <文件或目录>... [-o 输出目录] [选项]
@@ -148,15 +188,16 @@ ebook-converter <文件或目录>... [-o 输出目录] [选项]
 | `--retries N` | 单文件失败重试次数,指数退避(默认 2) |
 | `--force` | 忽略「已完成」状态,强制重新转换 |
 | `--clean-disable LIST` | 关闭指定清理项(逗号分隔):`page_numbers,running_heads,join_lines,ocr_spaces,cjk_spaces,dup_headings,headings,bold,images` |
-| `--strict` | EPUB 生成后做结构校验(图片/公式/脚注/TOC/内部链接/CSS),有失败项即判该文件失败(默认只告警) |
-| `--dry-run` | 预检:只输出类型/页数/计划后端/分片数与当日 OCR 额度,不产出任何文件 |
+| `--strict` | EPUB 生成后做结构校验,有失败项即判该文件失败(默认只告警) |
+| `--dry-run` | 预检:只输出类型/页数/计划后端/折帖数与当日 OCR 额度,不产出任何文件 |
+| `--dry-run --json` | 同上,但输出 JSON(桌面端「印前检查」用的就是这个) |
 | `--no-resume` | 不复用云端已提交的 OCR 任务(默认中断后续跑,不重新上传) |
 | `--no-log` | 不写日志文件 |
 | `--verbose` | 控制台输出 DEBUG 日志 |
 
 ---
 
-## ⚙️ 配置
+## 配置
 
 `config/config.yaml`:
 
@@ -165,7 +206,7 @@ ocr_backend: mineru          # 默认 OCR 后端:mineru / paddleocr
 mineru:
   max_pages_per_task: 200    # MinerU 单任务页数上限;超过自动分片提交(page_ranges)
   resume: true               # 中断后复用已提交的云端任务(续跑)
-clean:                       # 清理项开关(桌面端「清理选项」/ CLI --clean-disable 同源)
+clean:                       # 清理项开关(桌面端「校勘流水线」/ CLI --clean-disable 同源)
   page_numbers: true         # 剔除独立页码行
   running_heads: true        # 剔除页眉页脚重复行(跨页反复出现的短行)
   join_lines: true           # 跨页断行连接
@@ -184,18 +225,24 @@ pymupdf:
 
 ---
 
-## ❓ 常见问题
+## 常见问题
+
+<details>
+<summary><b>密钥保存到哪个文件?</b></summary>
+
+保存到**壳 exe 所在目录**的 `apikey.json`。所以「便携版解压目录里的 exe」和「项目根开发形态的 exe」用的是两份不同的凭证文件——换 exe 启动时看起来像"密钥丢了",其实是读了另一个文件。桌面端 **03 规范** 页可以直接粘贴保存,也可手写该文件。
+</details>
 
 <details>
 <summary><b>扫描 PDF 转换很慢 / 耗 Token?</b></summary>
 
-OCR 是云端按页计费服务。确认这本书值得转再跑;`--retries 0` 可避免失败重试浪费配额。
+OCR 是云端按页计费服务。桌面端拖入文件后**印前检查会先告诉你这本书需要多少云端页数、是否超出当日额度**,确认值得再跑;`--retries 0` 可避免失败重试浪费配额。
 </details>
 
 <details>
 <summary><b>检测说「文字层损坏」但我想要本地提取?</b></summary>
 
-交互询问时选 `[3] 继续本地提取`,或直接 `--backend pymupdf`。注意结果可能不可读。
+交互询问时选 `[3] 继续本地提取`,或直接 `--backend pymupdf`;桌面端在排字记录上方的伪文字层提示里选 **CONTINUE LOCAL**。注意结果可能不可读。
 </details>
 
 <details>
@@ -207,13 +254,13 @@ OCR 是云端按页计费服务。确认这本书值得转再跑;`--retries 0` �
 <details>
 <summary><b>超过 200 页的书能转吗?</b></summary>
 
-可以。MinerU 单任务限 200 页,工具自动按 200 页分段(page_ranges)并行解析后按序合并,日志会显示「自动分片 N 段」。注意云端每日有 1000 页优先额度。
+可以。MinerU 单任务限 200 页,工具自动按 200 页分段(page_ranges)并行解析后按序合并,日志会显示「自动分片 N 段」,界面显示为折帖数。注意云端每日有 1000 页优先额度,预检会提前警告。
 </details>
 
 <details>
 <summary><b>转换结果有乱码 / 页码 / 断行问题?</b></summary>
 
-`src/markdown/cleaner.py` 负责清理,各项可单独关闭:桌面端 **Settings → 清理选项**,或 CLI `--clean-disable join_lines`。若你的书出现误删/误拼,先关掉对应那一项再看。
+`src/markdown/cleaner.py` 负责清理,9 项可单独关闭:桌面端 **03 规范 → 校勘流水线**,或 CLI `--clean-disable join_lines`。若你的书出现误删/误拼,先关掉对应那一项再看。
 </details>
 
 <details>
@@ -225,47 +272,72 @@ OCR 是云端按页计费服务。确认这本书值得转再跑;`--retries 0` �
 <details>
 <summary><b>怎么确认图片 / 公式真的进 EPUB 了?</b></summary>
 
-每次转换都会自动做一次结构校验(包结构、图片引用、MathML、脚注、TOC、内部链接、CSS),日志里打出 `[verify] N 失败 N 警告`。默认只告警;**要让「有失败项」直接算转换失败**,桌面端打开 **Settings → 质量校验 → 严格校验 EPUB**(默认关闭),或 CLI 加 `--strict`。也可单独复核:`python scripts/verify_epub.py output/某书.epub --expect-images 2`。
+每次转换都会自动做一次结构校验(包结构、图片引用、MathML、脚注、TOC、内部链接、CSS),日志里打出 `[verify] N 失败 N 警告`。默认只告警;**要让「有失败项」直接算转换失败**,桌面端打开 **03 规范 → 质量与外观 → 严格校验 EPUB**(默认关闭),或 CLI 加 `--strict`。也可单独复核:`uv run python scripts/verify_epub.py output/某书.epub --expect-images 2`。
 </details>
 
 <details>
 <summary><b>书名 / 作者不对?</b></summary>
 
-文件名命名为「标题 - 作者」格式(如 `三体 - 刘慈欣.pdf`),元数据自动正确;否则 EPUB 标题取文件名。
+文件名命名为「标题 - 作者」格式(如 `三体 - 刘慈欣.pdf`),元数据自动正确;否则 EPUB 标题取文件名。书目页显示的标题/作者取自 EPUB 元数据本身。
+</details>
+
+<details>
+<summary><b>界面上的进度百分比是真实的吗?</b></summary>
+
+**部分是。** CLI 没有百分比事件,百分比是按日志行推进估算的(封顶 95%),完成时置 100;分片转换用折帖数映射,相对准确。工序节点(制版/检字/校勘/付印)与折帖进度**都是真实状态**。
 </details>
 
 ---
 
-## ⚠️ 已知限制
+## 已知限制
 
 - PyMuPDF4LLM 提取行间公式为图片(非 LaTeX);云端 OCR 的 LaTeX 公式可正常转为 MathML
 - 双栏 PDF 偶发同行合并(边缘情况)
 - 页码剔除 / 断行拼接为启发式规则,极端排版可能有误伤
 - MinerU 分片后,跨段边界的表格 / 段落可能被截断(清理规则可部分弥补)
 - EPUBCheck 未安装,未做 EPUB 标准合规验证
+- 界面进度百分比按日志估算(见上);**真实封面提取尚未实现**,书目封面为几何色块占位
+- 队列不跨重启保留(最近文件列表会保留);v0.3.0 之前的旧书库记录没有类型/后端/页数,重新转换一次即可补上
 
 ---
 
-## 📁 目录结构
+## 目录结构
 
 ```text
 src/
   backends/         # 后端:base(抽象) / pymupdf / mineru / paddleocr
   detector/         # PDF 类型自动检测(含伪文字层识别)
   markdown/         # cleaner(清理) / bold(粗体标注)
-  epub/             # pandoc 封装
+  epub/             # pandoc 封装 + EPUB 结构校验(verify)
+  dryrun.py         # 印前检查(--dry-run / --dry-run --json)
   batch.py          # 批处理(重试/跳过/断点续跑)
   cli.py            # ebook-converter 命令入口
   convert.py        # 自动路由(text/scanned/hybrid)
   paths.py          # 路径与凭证(apikey.json)读取
 config/             # config.yaml + book.css
-desktop/            # Tauri 2 桌面端(React + Tailwind v4)
-scripts/            # 测试样本生成 / 端到端测试 / EPUB 验证
+desktop/            # Tauri 2 桌面端(React 19 + Tailwind v4)
+  src/App.tsx       # 全部界面(三工作区 + 组件族)
+  src-tauri/src/lib.rs  # IPC:convert_file / preflight / cancel_convert / library / env / apikey
+docs/               # 界面截图
+scripts/            # 测试样本生成 / 端到端测试 / EPUB 验证 / 版本与打包
+tests/              # pytest(detector / cleaner / dryrun / epub verify / paths / 版本同步)
 ```
 
 ---
 
-## 📄 License
+## 开发
+
+```bash
+uv run pytest -q                       # Python 测试
+cd desktop/src-tauri && cargo test     # Rust 测试(IPC / 书库 / 凭证合并)
+cd desktop && npm run build            # 前端类型检查 + 构建
+```
+
+路线图与下一步计划见 `.hermes/plans/`;设计依据见 [IDEA.md](IDEA.md)。
+
+---
+
+## License
 
 [MIT](LICENSE) © 2026 WanderSu
 

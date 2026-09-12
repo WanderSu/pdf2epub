@@ -148,3 +148,36 @@ def test_dry_run_supports_markdown(tmp_path: Path, capsys: pytest.CaptureFixture
     assert cli.main([str(md), "--dry-run"]) == 0
     out = capsys.readouterr().out
     assert "预检" in out and "markdown" in out
+
+
+# ---------------------------------------------------------------- 结构化的 JSON 输出
+
+def test_to_json_is_parseable_and_structured() -> None:
+    import json
+
+    from dryrun import to_json
+
+    items = [
+        PlanItem(source=Path("混合书.pdf"), kind="pdf-hybrid", backend="hybrid(mineru)",
+                 pages=300, text_pages=240, ocr_pages=60, shards=1),
+        PlanItem(source=Path("手记.md"), kind="markdown", backend="markdown"),
+    ]
+    payload = json.loads(to_json(items, CFG))
+    first = payload["files"][0]
+    assert first["kind"] == "pdf-hybrid"
+    assert first["ocr_pages"] == 60
+    assert first["shards"] == 1
+    assert payload["files"][1]["needs_ocr"] is False
+    assert payload["total_ocr_pages"] == 60
+    assert payload["over_quota"] is False
+    assert payload["quota"] == DAILY_OCR_PAGE_QUOTA
+
+
+def test_dry_run_json_flag_is_json(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    import json
+
+    pdf = make_pdf(tmp_path / "book.pdf", pages=1, with_image=False)
+    assert cli.main([str(pdf), "--dry-run", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["files"][0]["name"] == "book.pdf"
+    assert "notes" in payload["files"][0]
