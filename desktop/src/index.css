@@ -1,4 +1,5 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300;0,14..32,400;0,14..32,500;0,14..32,600;0,14..32,700;0,14..32,800;0,14..32,900;1,14..32,300;1,14..32,400&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300;0,14..32,400;0,14..32,500;0,14..32,600;0,14..32,700;1,14..32,400&display=swap');
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&display=swap');
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&display=swap');
 @import 'tailwindcss';
@@ -7,95 +8,147 @@
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
-  --color-card-foreground: var(--card-foreground);
-  --color-primary: var(--primary);
-  --color-primary-foreground: var(--primary-foreground);
   --color-secondary: var(--secondary);
-  --color-secondary-foreground: var(--secondary-foreground);
   --color-muted: var(--muted);
   --color-muted-foreground: var(--muted-foreground);
-  --color-accent: var(--accent);
-  --color-accent-foreground: var(--accent-foreground);
   --color-border: var(--border);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
   --color-ring: var(--ring);
 }
 
+/* ── PAPER / INK / CINNABAR — light ── */
 :root {
-  --background: #F5F4F0;
-  --foreground: #0A0A0A;
-  --card: #FFFFFF;
-  --card-foreground: #0A0A0A;
-  --primary: #FF4D00;
-  --primary-foreground: #FFFFFF;
-  --secondary: #EBEBEB;
-  --secondary-foreground: #0A0A0A;
-  --muted: #E8E7E3;
-  --muted-foreground: #6B6B6B;
-  --accent: #FF4D00;
-  --accent-foreground: #FFFFFF;
-  --border: #D0CFC9;
-  --ring: #FF4D00;
+  --background: #F7F5EF;
+  --card: #FFFDF8;
+  --secondary: #EFEAE0;
+  --muted: #E7E1D5;
+  --border: #DDD8CC;
+  --foreground: #14110E;
+  --muted-foreground: #6E6A60;
+  --primary: #B5342A;
+  --primary-foreground: #FFFDF8;
+  --ring: #B5342A;
+  /* annotation — text/dot/rule only */
+  --ok: #2F6B4F;
+  --danger: #A6262E;
+  --warn: #8A5A00;
+  --info: #1F3C6E;
+  --paddle: #5B3A8E;
 }
 
+/* ── dark ── */
 .dark {
-  --background: #0C0C0C;
-  --foreground: #F0EFE9;
-  --card: #161616;
-  --card-foreground: #F0EFE9;
-  --primary: #FF4D00;
-  --primary-foreground: #FFFFFF;
-  --secondary: #1E1E1E;
-  --secondary-foreground: #F0EFE9;
-  --muted: #1A1A1A;
-  --muted-foreground: #8A8A8A;
-  --accent: #FF4D00;
-  --accent-foreground: #FFFFFF;
-  --border: #2A2A2A;
-  --ring: #FF4D00;
+  --background: #12110F;
+  --card: #1A1815;
+  --secondary: #221F1A;
+  --muted: #26221C;
+  --border: #2E2A24;
+  --foreground: #EDE7DA;
+  --muted-foreground: #9A9385;
+  --primary: #C2452F;
+  --primary-foreground: #FFFDF8;
+  --ring: #C2452F;
+  --ok: #4E9E75;
+  --danger: #C0453C;
+  --warn: #C08A2E;
+  --info: #5B86C7;
+  --paddle: #9B7BD4;
 }
 
 *, *::before, *::after { box-sizing: border-box; }
 html, body, #root { width: 100%; height: 100%; margin: 0; padding: 0; }
 
 body {
-  font-family: 'Inter', system-ui, sans-serif;
+  font-family: 'Inter', 'Noto Sans SC', system-ui, sans-serif;
   background-color: var(--background);
   color: var(--foreground);
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-/* CJK font + reset tracking for Chinese glyphs */
-.lang-zh {
-  font-family: 'Noto Sans SC', 'Inter', system-ui, sans-serif;
+/* Typeface utilities */
+.font-serif {
+  font-family: 'Noto Serif SC', 'Georgia', serif;
 }
-.lang-zh .cjk-label {
+.font-mono {
+  font-family: 'JetBrains Mono', 'Courier New', monospace;
+}
+.font-sans {
+  font-family: 'Inter', 'Noto Sans SC', system-ui, sans-serif;
+}
+
+/* CJK: never uppercase, never tracked, line-height 1.7 */
+.lang-zh .cjk {
   font-family: 'Noto Sans SC', system-ui, sans-serif;
   letter-spacing: 0;
   text-transform: none;
+  line-height: 1.7;
 }
-/* mono always stays mono regardless of lang */
-.font-mono, .lang-zh .font-mono {
-  font-family: 'JetBrains Mono', 'Courier New', monospace;
+.lang-zh .cjk-serif {
+  font-family: 'Noto Serif SC', serif;
+  letter-spacing: 0;
+  text-transform: none;
+  line-height: 1.7;
 }
+/* mono always stays mono */
+.font-mono, .lang-zh .font-mono { font-family: 'JetBrains Mono', monospace; }
 
 /* Scrollbars */
 * { scrollbar-width: none; }
 *::-webkit-scrollbar { display: none; }
 *:hover { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
-*:hover::-webkit-scrollbar { display: block; width: 4px; }
-*:hover::-webkit-scrollbar-track { background: transparent; }
-*:hover::-webkit-scrollbar-thumb { background-color: var(--border); border-radius: 2px; }
+*:hover::-webkit-scrollbar { display: block; width: 3px; }
+*:hover::-webkit-scrollbar-thumb { background-color: var(--border); }
 
-/* Progress tick */
-@keyframes tick-blink {
+/* Progress pulse at leading edge */
+@keyframes ink-pulse {
   0%, 100% { opacity: 1; }
-  50% { opacity: 0.25; }
+  50% { opacity: 0.35; }
 }
-.progress-tick { animation: tick-blink 1.2s ease-in-out infinite; }
+.ink-pulse { animation: ink-pulse 1.6s cubic-bezier(0.2, 0, 0, 1) infinite; }
 
-/* Stage pulse */
-@keyframes stage-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 77, 0, 0.4); }
-  50% { box-shadow: 0 0 0 3px rgba(255, 77, 0, 0); }
+/* Stage active ring */
+@keyframes stage-breathe {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(181, 52, 42, 0); }
+  50% { box-shadow: 0 0 0 3px rgba(181, 52, 42, 0.25); }
 }
-.stage-active { animation: stage-pulse 1.8s ease-in-out infinite; }
+.dark .stage-breathe {
+  animation-name: stage-breathe-dark;
+}
+@keyframes stage-breathe-dark {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(194, 69, 47, 0); }
+  50% { box-shadow: 0 0 0 3px rgba(194, 69, 47, 0.3); }
+}
+.stage-breathe { animation: stage-breathe 1.8s cubic-bezier(0.2, 0, 0, 1) infinite; }
+
+/* Check stroke-dashoffset draw */
+@keyframes check-draw {
+  from { stroke-dashoffset: 20; }
+  to { stroke-dashoffset: 0; }
+}
+.check-draw { animation: check-draw 0.2s cubic-bezier(0.2, 0, 0, 1) forwards; }
+
+/* Row enter stagger (applied with delay inline) */
+@keyframes row-enter { from { opacity: 0; } to { opacity: 1; } }
+.row-enter { animation: row-enter 0.2s cubic-bezier(0.2, 0, 0, 1) both; }
+
+/* Composing room background */
+.composing-bg {
+  background-color: #F2EEE4;
+}
+.dark .composing-bg {
+  background-color: #14120F;
+}
+
+/* 排字记录 / 输入框要能选中复制(应用其余部分保持 select-none) */
+.composing-bg, .composing-bg * { user-select: text; }
+input, textarea, pre { user-select: text; }
+
+/* Prefers-reduced-motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0ms !important;
+    transition-duration: 0ms !important;
+  }
+}

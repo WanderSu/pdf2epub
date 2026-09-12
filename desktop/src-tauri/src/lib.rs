@@ -207,6 +207,53 @@ async fn convert_file(
     })
 }
 
+/// 预检(dry-run):检测类型 / 页数 / 计划后端 / 分片 / 当日云端额度,
+/// **不产出任何文件、不消耗 OCR 额度**。返回 CLI 的 JSON 文本,前端解析后
+/// 填「类型检测预览」与「印前检查」区域(转换前就能看到将要发生什么)。
+#[tauri::command]
+async fn preflight(
+    app: AppHandle,
+    file_paths: Vec<String>,
+    cli_path: Option<String>,
+) -> Result<String, String> {
+    if file_paths.is_empty() {
+        return Err("没有待预检的文件".into());
+    }
+    let state: State<CliConfig> = app.state();
+    let cli = match cli_path {
+        Some(p) if !p.trim().is_empty() => p,
+        _ => state.cli_path.lock().unwrap().clone(),
+    };
+    let mut cmd = Command::new(&cli);
+    #[cfg(windows)]
+    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    // cwd 规则与 convert_file 一致:发布形态(cli.exe 与壳同目录)固定 cwd,
+    // 保证 CLI 的 config_dir() 能定位同级的 config/
+    let cli_dir = PathBuf::from(&cli).parent().map(|p| p.to_path_buf());
+    let exe_dir = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf()));
+    if cli_dir.is_some() && cli_dir == exe_dir {
+        if let Some(dir) = &cli_dir {
+            cmd.current_dir(dir);
+        }
+    }
+    cmd.arg("--dry-run").arg("--json").args(&file_paths);
+
+    let cli_for_msg = cli.clone();
+    let output = tauri::async_runtime::spawn_blocking(move || cmd.output())
+        .await
+        .map_err(|e| format!("预检任务异常: {e}"))?
+        .map_err(|e| format!("无法启动 CLI({cli_for_msg}): {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            format!("预检失败(exit={})", output.status)
+        } else {
+            stderr
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 /// 取消转换:杀掉对应任务 **整棵进程树**(Windows 用 taskkill /T)。
 /// 不 kill 树的话 PyInstaller 引导进程被杀,真正的子进程会继续跑完。
 /// 返回是否找到了在跑的任务。
@@ -305,6 +352,14 @@ struct LibraryEntry {
     size: u64,
     mtime: u64,
     added_at: u64,
+    // 下面三项由转换完成时从界面回写(旧库没有这几个键 → 必须 default,
+    // 否则反序列化失败会让整个书库被清空)
+    #[serde(default)]
+    kind: Option<String>,      // TXT / SCN / HYB / MD
+    #[serde(default)]
+    backend: Option<String>,   // Local / MinerU / PaddleOCR / Auto
+    #[serde(default)]
+    pages: Option<u32>,
 }
 
 fn library_db_path() -> PathBuf {
@@ -491,6 +546,10 @@ fn upsert_library(epub_path: &str) {
             size,
             mtime,
             added_at: now_secs(),
+            // 类型/后端/页数由前端在转换完成后调用 library_set_meta 回写
+            kind: None,
+            backend: None,
+            pages: None,
         });
     }
     save_library(&dedupe_library(entries));
@@ -552,6 +611,9 @@ fn library_sync(output_dir: String) -> Vec<LibraryEntry> {
                 size,
                 mtime,
                 added_at: now_secs(),
+                kind: None,
+                backend: None,
+                pages: None,
             });
         }
     }
@@ -560,6 +622,35 @@ fn library_sync(output_dir: String) -> Vec<LibraryEntry> {
     entries.sort_by(|a, b| b.mtime.cmp(&a.mtime));
     save_library(&entries);
     entries
+}
+
+/// 转换完成后回写书库记录的类型/后端/页数。
+///
+/// 这三项只有转换过程知道(CLI 日志里才有),而 library.json 要跨会话保留它们 ——
+/// 否则重启后书库里的「TXT / LOCAL / 页数」全部退化成未知。仅更新已存在的记录;
+/// 记录不存在时返回错误(正常流程里 upsert 已在 convert_file 里先建好)。
+#[tauri::command]
+fn library_set_meta(
+    path: String,
+    kind: Option<String>,
+    backend: Option<String>,
+    pages: Option<u32>,
+) -> Result<(), String> {
+    let mut entries = load_library();
+    let Some(entry) = entries.iter_mut().find(|e| same_path(&e.path, &path)) else {
+        return Err(format!("书库中没有该记录: {path}"));
+    };
+    if kind.is_some() {
+        entry.kind = kind;
+    }
+    if backend.is_some() {
+        entry.backend = backend;
+    }
+    if let Some(p) = pages.filter(|p| *p > 0) {
+        entry.pages = Some(p);
+    }
+    save_library(&entries);
+    Ok(())
 }
 
 /// 用系统默认程序打开 EPUB(Rust 侧调用 opener 插件,绕开前端权限链;
@@ -837,11 +928,13 @@ pub fn run() {
         .manage(RunningTasks::default())
         .invoke_handler(tauri::generate_handler![
             convert_file,
+            preflight,
             cancel_convert,
             set_cli_path,
             check_env,
             save_apikey,
             library_sync,
+            library_set_meta,
             open_epub
         ])
         .run(tauri::generate_context!())
@@ -888,6 +981,9 @@ mod tests {
             size: 10,
             mtime: 5,
             added_at: 7,
+            kind: None,
+            backend: None,
+            pages: None,
         };
         let entries = vec![
             mk("E:\\out\\a.epub", "[日]_大江健三郎"),
@@ -897,6 +993,17 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].path, "E:\\out\\a.epub");
         assert_eq!(out[0].author, "[日] 大江健三郎");
+    }
+
+    #[test]
+    fn old_library_json_without_meta_fields_still_parses() {
+        // 旧 library.json 没有 kind/backend/pages 三个键:必须能反序列化,
+        // 否则 load_library 的 unwrap_or_default() 会把整个书库静默清空。
+        let old = r#"[{"path":"E:\\out\\a.epub","title":"T","author":"A",
+                      "size":1,"mtime":2,"added_at":3}]"#;
+        let entries: Vec<LibraryEntry> = serde_json::from_str(old).expect("旧库必须可解析");
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].kind.is_none() && entries[0].backend.is_none() && entries[0].pages.is_none());
     }
 
     #[test]

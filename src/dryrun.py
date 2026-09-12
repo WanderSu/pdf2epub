@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -171,3 +172,43 @@ def render(
     elif total_ocr:
         lines.append(f"[预检] 预计分片 {total_shards} 段,未超出当日额度")
     return "\n".join(lines)
+
+
+def to_json(
+    items: list[PlanItem],
+    config: dict | None = None,
+    backend_override: str | None = None,
+    quota: int = DAILY_OCR_PAGE_QUOTA,
+) -> str:
+    """机器可读的预检结果(`--dry-run --json`)。
+
+    桌面端的「类型检测预览 / 印前检查卡」需要结构化数据(检测类型、计划后端、
+    页数、需 OCR 页数、分片数、当日额度是否够),解析 render() 的人类可读文本太脆,
+    所以这里直接给 JSON。
+    """
+    config = config or {}
+    total_ocr = sum(i.ocr_pages for i in items)
+    return json.dumps(
+        {
+            "files": [
+                {
+                    "name": i.source.name,
+                    "path": str(i.source),
+                    "kind": i.kind,
+                    "backend": i.backend,
+                    "pages": i.pages,
+                    "text_pages": i.text_pages,
+                    "ocr_pages": i.ocr_pages,
+                    "shards": i.shards,
+                    "needs_ocr": i.needs_ocr,
+                    "notes": list(i.notes),
+                }
+                for i in items
+            ],
+            "total_ocr_pages": total_ocr,
+            "total_shards": sum(i.shards for i in items),
+            "quota": quota,
+            "over_quota": total_ocr > quota,
+        },
+        ensure_ascii=False,
+    )
