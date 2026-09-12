@@ -21,6 +21,7 @@ from pathlib import Path
 from backends import get_backend
 from convert import convert_auto, load_config
 from epub.pandoc import build_epub
+from epub.verify import VerifyResult, verify_epub
 from markdown.cleaner import CleanOptions, clean_file, resolve_options
 from detector.pdf_detector import PDFType
 from paths import config_file
@@ -28,6 +29,10 @@ from paths import config_file
 logger = logging.getLogger("pdf2epub.batch")
 
 SUPPORTED_SUFFIXES = {".pdf", ".md"}
+
+
+class VerifyError(RuntimeError):
+    """EPUB 结构校验未通过(--strict)。确定性失败:不重试。"""
 
 
 def sanitize_name(name: str) -> str:
@@ -93,6 +98,7 @@ class TaskResult:
     error: str = ""
     elapsed: float = 0.0
     epub: Path | None = None
+    verify: str = ""          # 结构校验摘要,如 "0 失败 0 警告"
 
 
 def iter_sources(paths: list[Path]) -> list[Path]:
@@ -121,6 +127,24 @@ def is_done(source: Path, output_dir: Path, force: bool = False) -> bool:
     return epub.stat().st_mtime >= source.stat().st_mtime
 
 
+def verify_output(epub: Path, *, strict: bool = False) -> VerifyResult:
+    """EPUB 结构校验(idea.md §12),接入转换流程。
+
+    默认只告警(不打断既有流程);strict=True 时只要有 error 就抛 VerifyError,
+    使该任务判 failed。
+    """
+    result = verify_epub(epub)
+    for issue in result.issues:
+        log = logger.warning if issue.level == "warning" else logger.error
+        log("[verify] %s", issue.message)
+    logger.info("[verify] %s", result.summary())
+    if strict and result.errors:
+        raise VerifyError(
+            f"EPUB 校验未通过({result.summary()}): {result.errors[0].message}"
+        )
+    return result
+
+
 def process_one(
     source: Path,
     *,
@@ -131,6 +155,7 @@ def process_one(
     retries: int = 2,
     force: bool = False,
     clean_options: CleanOptions | None = None,
+    strict: bool = False,
 ) -> TaskResult:
     """处理单个文件(PDF 或 Markdown),带重试与跳过。"""
     t0 = time.time()
@@ -153,13 +178,17 @@ def process_one(
             if source.suffix.lower() == ".md":
                 result.backend, result.pdf_type = "markdown", "markdown"
                 result = _process_markdown(source, work_root, output_dir, t0, result,
-                                           safe_stem, out_epub.stem, clean_options)
+                                           safe_stem, out_epub.stem, clean_options, strict)
             else:
                 result = _process_pdf(source, config, work_root, output_dir,
                                       backend_override, t0, result, safe_stem, out_epub.stem,
-                                      clean_options)
+                                      clean_options, strict)
             result.status = "done"
             return result
+        except VerifyError as e:
+            # 校验失败是确定性结果:重试只会重复整条链路(含云端 OCR 额度),直接判失败
+            last_error = e
+            break
         except Exception as e:  # noqa: BLE001 - 批处理需兜住所有失败
             last_error = e
             logger.warning("第 %d 次尝试失败(%s): %s", attempt, source.name, e)
@@ -175,7 +204,7 @@ def process_one(
 
 
 def _process_pdf(source, config, work_root, output_dir, backend_override, t0, result,
-                 safe_stem, out_name, clean_options=None) -> TaskResult:
+                 safe_stem, out_name, clean_options=None, strict=False) -> TaskResult:
     work = work_root / safe_stem
     if backend_override and backend_override != "auto":
         backend = get_backend(backend_override, config.get(backend_override, {}))
@@ -199,13 +228,14 @@ def _process_pdf(source, config, work_root, output_dir, backend_override, t0, re
     title, author = parse_title_author(source.stem)
     epub = build_epub(conv.book_md, work, output_dir, title=title, author=author, out_name=out_name)
     result.epub = epub
+    result.verify = verify_output(epub, strict=strict).summary()
     result.elapsed = time.time() - t0
     logger.info("完成(%s/%s): %s → %s", result.pdf_type, result.backend, source.name, epub.name)
     return result
 
 
 def _process_markdown(source, work_root, output_dir, t0, result, safe_stem, out_name,
-                      clean_options=None) -> TaskResult:
+                      clean_options=None, strict=False) -> TaskResult:
     work = work_root / safe_stem
     work.mkdir(parents=True, exist_ok=True)
     # 已有 Markdown:复制到统一 work 目录(连同 images/)
@@ -225,6 +255,7 @@ def _process_markdown(source, work_root, output_dir, t0, result, safe_stem, out_
     title, author = parse_title_author(source.stem)
     epub = build_epub(book_md, work, output_dir, title=title, author=author, out_name=out_name)
     result.epub = epub
+    result.verify = verify_output(epub, strict=strict).summary()
     result.elapsed = time.time() - t0
     logger.info("完成(markdown): %s → %s", source.name, epub.name)
     return result
@@ -241,12 +272,16 @@ def process_batch(
     retries: int = 2,
     force: bool = False,
     clean_options: CleanOptions | None = None,
+    strict: bool = False,
 ) -> list[TaskResult]:
     """批量处理,返回全部任务结果。单个失败不中断。
 
     clean_options=None → 按 config 的 `clean:` 段(CleanOptions 默认值)。
     传入的开关会先落到 config(如关闭 bold 等价于 pymupdf.bold_fonts 为空),
     再逐文件生效。
+
+    strict=True → 每个 EPUB 生成后做结构校验,有 error 即判该任务 failed
+    (默认 False:只告警,不打断既有流程)。
     """
     if config is None:
         config = load_config(config_path or config_file())
@@ -277,6 +312,7 @@ def process_batch(
             retries=retries,
             force=force,
             clean_options=clean_options,
+            strict=strict,
         ))
 
     # 汇总
@@ -284,6 +320,13 @@ def process_batch(
     skipped = sum(1 for r in results if r.status == "skipped")
     failed = sum(1 for r in results if r.status == "failed")
     total_s = sum(r.elapsed for r in results)
+    checked = [r for r in results if r.verify]
+    if checked:
+        # 校验摘要:有 error 的条目单独列出(便于 --strict 时定位)
+        bad = [r for r in checked if not r.verify.startswith("0 失败")]
+        logger.info("结构校验: %d 个 EPUB, %d 个存在失败项", len(checked), len(bad))
+        for r in bad:
+            logger.warning("  ⚠ %s: %s", r.source.name, r.verify)
     logger.info("批处理完成: 共 %d, 成功 %d, 跳过 %d, 失败 %d, 总耗时 %.1fs",
                 len(results), done, skipped, failed, total_s)
     return results
