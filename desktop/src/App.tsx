@@ -470,7 +470,7 @@ interface RecentEntry {
   at: number;
 }
 
-const APP_VERSION = "v0.4.0";
+const APP_VERSION = "v0.4.1";
 const RECENT_KEY = "pdf2epub.recent";
 const MAX_RECENT = 8;
 
