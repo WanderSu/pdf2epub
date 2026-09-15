@@ -134,6 +134,17 @@ PDF 基本没有有效文字层。
 
 不要仅根据 PDF 文件大小判断类型。
 
+> 补充：**页单元(PageResult)架构(2026-09 实现,`src/page_result.py`)**。
+> 文字页逐页提取(`page_chunks=True`)→ 一页一个页单元;扫描页按**连续区段**
+> (contiguous run)切分,每段渲染成纯图 PDF 单独提交一次 OCR → 一段一个页单元。
+> 所有页单元按 1-indexed 原始页码排序合并,合并时写入页码注释
+> (`<!-- page 3 -->` / `<!-- page 4-5 ocr -->`;合并过的非连续区段如实写作
+> `<!-- page 2,4 ocr -->`)。这样 `text→scan→text` 交错时不会再把整块扫描内容
+> 提到最前(旧实现按「各组首页页码」排序,页序错位且页边界丢失)。
+> 区段数超过 `hybrid.max_ocr_runs`(默认 8)时按顺序均分合并以控制云端任务数,
+> 并打印警告(合并区段内局部页序可能与原文不一致,内容不丢)。
+> 预检(`--dry-run`)用同一份区段规划报云端任务数,与实际提交一致。
+
 ---
 
 ## 4. 技术选型
@@ -233,7 +244,8 @@ EPUB
 
 清理项开关 ✅ 已实现(`CleanOptions`,配置 `clean:` 段 + CLI `--clean-disable` +
 桌面端「清理选项」同源):`page_numbers` / `join_lines` / `cjk_spaces` / `bold` / `images`
-(`bold` 默认关,关闭等价于 `pymupdf.bold_fonts` 为空;hybrid 流程的文字页不走 bold 标注)。
+(`bold` 默认关,关闭等价于 `pymupdf.bold_fonts` 为空;hybrid 与纯文字版同一条链路,
+文字页同样走 bold 标注)。
 
 原则：
 
@@ -443,7 +455,7 @@ API Key 和 Endpoint 不得硬编码。
 
 > 补充：MinerU 解析失败时(如伪文字层 PDF)自动降级为「渲染纯图(JPEG 压缩)后重试」,已固化在后端内。
 
-> 补充：**>200 页自动分片(2026-08 实现)**。MinerU 官方精准解析 API 单任务限制 ≤200 页 / ≤200MB(超限错误码 `-60006`,官方建议"拆分文件或使用 page_ranges")。实现采用 page_ranges 方案:`MinerUAdapter` 提交 PDF 时按 `mineru.max_pages_per_task`(默认 200)切分为多个 files 条目(如 302 页 → `1-200`、`201-302`),同一 batch 并行解析;条目名带 `_partN` 后缀 + `data_id`,轮询按 data_id/file_name 区分;结果下载后按段序合并为统一 `work/book.md` + `work/images/`(跨段图片重名自动加 `p{N}_` 前缀并替换引用),并加 `<!-- page-group N -->` 页标记(与 hybrid 流程一致)。CLI 与桌面端(Tauri 壳为 CLI 子进程)均自动生效。
+> 补充：**>200 页自动分片(2026-08 实现)**。MinerU 官方精准解析 API 单任务限制 ≤200 页 / ≤200MB(超限错误码 `-60006`,官方建议"拆分文件或使用 page_ranges")。实现采用 page_ranges 方案:`MinerUAdapter` 提交 PDF 时按 `mineru.max_pages_per_task`(默认 200)切分为多个 files 条目(如 302 页 → `1-200`、`201-302`),同一 batch 并行解析;条目名带 `_partN` 后缀 + `data_id`,轮询按 data_id/file_name 区分;结果下载后按段序合并为统一 `work/book.md` + `work/images/`(跨段图片重名自动加 `p{N}_` 前缀并替换引用),并加**真实页码**注释 `<!-- page 201-302 -->`(页码来自提交时的 page_ranges;缺失时退化为旧的 `<!-- page-group N -->`,与 hybrid 的页码注释同源)。CLI 与桌面端(Tauri 壳为 CLI 子进程)均自动生效。
 
 ---
 
@@ -520,6 +532,7 @@ ebook-converter/
 │   │   └── pandoc.py            # Pandoc → EPUB 封装
 │   ├── batch.py                 # 批处理(重试/跳过/断点续跑)
 │   ├── convert.py               # 自动路由(text/scanned/hybrid)
+│   ├── page_result.py           # 页单元(页码/排序/页码注释)+ 扫描区段规划
 │   ├── cli.py                   # ebook-converter 命令入口
 │   └── paths.py                 # 路径与 apikey.json 凭证读取
 ├── config/

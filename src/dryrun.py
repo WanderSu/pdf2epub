@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from detector.pdf_detector import PDFDetector, PDFType
+from page_result import plan_ocr_runs, resolve_ocr_run_limit
 
 #: 云端 OCR 每日额度(页)。MinerU Cloud 免费额度为 1000 页/日;
 #: 超出后提交会失败,预检阶段就提醒用户分批。
@@ -40,6 +41,20 @@ def max_pages_per_task(config: dict, backend: str) -> int:
         return int(value) if value else DEFAULT_MAX_PAGES_PER_TASK
     except (TypeError, ValueError):
         return DEFAULT_MAX_PAGES_PER_TASK
+
+
+def hybrid_ocr_runs(detection, config: dict) -> list[list[int]] | None:
+    """hybrid 的扫描页会分成几个云端任务(与 convert 用同一份区段规划)。
+
+    每个**连续扫描区段**提交一次 OCR(text/scan 交错的书可能不止一次),
+    返回 None 表示不是 hybrid 或没有扫描页。
+    """
+    text_idxs = set(detection.text_page_idxs or [])
+    scanned = [i for i in range(detection.total_pages) if i not in text_idxs]
+    if not scanned:
+        return None
+    limit = resolve_ocr_run_limit((config.get("hybrid") or {}).get("max_ocr_runs"))
+    return plan_ocr_runs(scanned, limit)
 
 
 @dataclass
@@ -109,8 +124,17 @@ def plan_source(
         )
     if item.needs_ocr:
         per_task = max_pages_per_task(config, ocr_name)
-        item.shards = estimate_shards(item.ocr_pages, per_task)
-        item.notes.append(f"按 {per_task} 页/任务分片")
+        runs = hybrid_ocr_runs(detection, config) if item.kind == "pdf-hybrid" else None
+        if runs:
+            # hybrid:每个连续扫描区段一次云端提交,单段超页数上限时再按段内分片
+            item.shards = sum(estimate_shards(len(r), per_task) for r in runs)
+            item.notes.append(
+                f"扫描页分 {len(runs)} 个连续区段,各一次云端任务"
+                f"(单段 >{per_task} 页再分片)"
+            )
+        else:
+            item.shards = estimate_shards(item.ocr_pages, per_task)
+            item.notes.append(f"按 {per_task} 页/任务分片")
     return item
 
 

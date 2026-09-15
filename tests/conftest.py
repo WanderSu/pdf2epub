@@ -129,3 +129,34 @@ def make_pdf(path: Path, *, pages: int = 2, with_image: bool = True) -> Path:
     doc.save(path)
     doc.close()
     return path
+
+
+def make_mixed_pdf(path: Path, layout: str = "TTTSSTTT") -> Path:
+    """按 layout 生成混合 PDF:T = 文字页,S = 扫描页(纯图,无文字层)。
+
+    layout 顺序对应页序,例如 "TTTSSTTT" = 前 3 页文字、第 4-5 页扫描、后 3 页文字。
+    文字页带可识别页码的文字("第 N 页正文"之类),便于断言页序;
+    扫描页只放一张图,检测器据此判定为扫描页(hybrid 路由会把它送 OCR)。
+    """
+    import pymupdf
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    scan_img = write_png(path.parent / "scan_page.png", size=64)
+
+    doc = pymupdf.open()
+    for i, kind in enumerate(layout, start=1):
+        page = doc.new_page(width=595, height=842)
+        if kind.upper() == "S":
+            page.insert_image(page.rect, filename=str(scan_img))
+            continue
+        page.insert_textbox(pymupdf.Rect(60, 60, 535, 120),
+                            f"第 {i} 章 测试标题", fontname="china-s", fontsize=18)
+        page.insert_textbox(
+            pymupdf.Rect(60, 130, 535, 260),
+            f"这是原始 PDF 第 {i} 页的正文段落,内容长度足以被判定为文字页,"
+            f"并以句号结尾;再补一句话确保字符数稳定超过阈值。",
+            fontname="china-s", fontsize=11, lineheight=1.6,
+        )
+    doc.save(path)
+    doc.close()
+    return path
