@@ -39,6 +39,16 @@ CJK_CHARS = (
     "\u201c\u201d\u2018\u2019\u2014\u2026"  # “”‘’—…
 )
 
+#: 跨空行拼接时,「前一行」最少字符数(去空白后)。
+#: 空行在 Markdown 里通常是段落边界;只有足够长的一行才可能是被页码/页眉断开的
+#: 前半句。短行(年份 `1984`、页眉、小标题)拼进下一段会把独立行粘成正文 ——
+#: 这是比「漏拼一处」严重得多的误伤,所以这里取保守门槛。
+CROSS_BLANK_MIN_CHARS = 10
+#: 相邻行拼接时,「前一行」最少字符数(去空白后)。
+#: PDF 里被断开的正文行通常是排满的整行(中文 20-40 字);而 5-7 字的短行更多是
+#: 诗句/居中标题/短标签 —— 拼进去会毁掉诗的换行结构。门槛低到只挡这些短行,
+#: 漏拼一处段落只是多一个换行,属于可接受的方向。
+ADJACENT_MIN_CHARS = 6
 #: 标题行(`#` ~ `######` + 可选空格 + 文本)
 HEADING_RE = re.compile(r"^(#{1,6})\s*(.*)$")
 #: 行内 CJK 字符(判断「中文语境」)
@@ -374,6 +384,9 @@ def _join_broken_lines(md: str) -> str:
     普通文本行之间,若前段不以结束标点结尾、后段不以开始标点/
     markdown 块标记开头(允许中间隔 1 个空行,如被删除页码留下的),
     视为同一段落被断行,拼接。
+
+    不拼接的单元之间**还原原有空行数**:旧实现统一按一个空行重建,会把
+    紧凑列表与引用块的连续行拆成松散段落(渲染出多余段距),属于无谓的结构改写。
     """
     lines = md.split("\n")
     units: list[tuple[str, str]] = []  # (kind, text),kind: code/table/text
@@ -404,27 +417,31 @@ def _join_broken_lines(md: str) -> str:
             units.append(("text", s))
             i += 1
 
-    out: list[tuple[str, str]] = []
-    prev: tuple[str, str] | None = None
+    out: list[tuple[str, str, int]] = []      # (kind, text, 之前的空行数)
+    pending: tuple[str, str, int] | None = None
     blanks = 0
 
     for kind, text in units:
         if kind == "text" and text == "":
             blanks += 1
             continue
-        if prev is None:
-            prev = (kind, text)
+        if pending is None:
+            pending = (kind, text, blanks)
             blanks = 0
             continue
-        pk, pt = prev
+        pk, pt, pb = pending
+        gap = blanks
+        prev_len = len(re.sub(r"\s+", "", pt))
         joinable = (
             pk == "text"
             and kind == "text"
-            and blanks <= 1
+            and gap <= 1
             and not pt.startswith(BLOCK_MARKERS)
             and not text.startswith(BLOCK_MARKERS)
             and pt[-1] not in END_PUNCT
             and text[0] not in START_PUNCT
+            # 短行不拼(诗句/年份/页眉/小标题):跨空行比相邻更保守
+            and prev_len >= (CROSS_BLANK_MIN_CHARS if gap >= 1 else ADJACENT_MIN_CHARS)
         )
         if joinable:
             # 中英文断行拼接:两侧均为拉丁字母时补空格,否则直接相连
@@ -432,14 +449,20 @@ def _join_broken_lines(md: str) -> str:
             if pt and text and pt[-1].isascii() and pt[-1].isalpha() \
                     and text[0].isascii() and text[0].isalpha():
                 sep = " "
-            prev = ("text", pt + sep + text)
+            pending = ("text", pt + sep + text, pb)
         else:
-            out.append(prev)
-            prev = (kind, text)
+            out.append(pending)
+            pending = (kind, text, gap)
         blanks = 0
-    if prev is not None:
-        out.append(prev)
-    return "\n\n".join(t for _, t in out)
+    if pending is not None:
+        out.append(pending)
+
+    pieces: list[str] = []
+    for kind, text, gap in out:
+        if pieces:
+            pieces.append("\n" * (gap + 1))
+        pieces.append(text)
+    return "".join(pieces)
 
 
 def clean_file(book_md: str | Path, options: CleanOptions | None = None) -> CleanReport:

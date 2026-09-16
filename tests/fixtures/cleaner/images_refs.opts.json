@@ -1,0 +1,8 @@
+{
+  "images": [
+    "fig1.png"
+  ],
+  "expect_issues": [
+    "图片引用缺失"
+  ]
+}
