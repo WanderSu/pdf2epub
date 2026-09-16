@@ -175,6 +175,24 @@ def make_fake_text_layer_pdf(path: Path, *, text_pages: int = 2,
     return path
 
 
+def make_paged_pdf(path: Path, pages: int) -> Path:
+    """生成 N 页的小 PDF(每页一行短文字),用于分片/页数相关用例。
+
+    只关心页数,不关心内容,所以刻意做到体积很小(几百页也只有几百 KB),
+    不必为「450 页扫描书」造一个真的大文件。
+    """
+    import pymupdf
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = pymupdf.open()
+    for i in range(pages):
+        page = doc.new_page(width=595, height=842)
+        page.insert_text((60, 80), f"page {i + 1}", fontsize=12)
+    doc.save(path, deflate=True, garbage=3)
+    doc.close()
+    return path
+
+
 def make_mixed_pdf(path: Path, layout: str = "TTTSSTTT") -> Path:
     """按 layout 生成混合 PDF:T = 文字页,S = 扫描页(纯图,无文字层)。
 
