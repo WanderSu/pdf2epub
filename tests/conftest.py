@@ -84,8 +84,15 @@ def build_epub(
 
 
 def rewrite_epub(src: Path, dst: Path, *, drop: set[str] | None = None,
-                 drop_suffixes: tuple[str, ...] = ()) -> Path:
-    """复制 EPUB,可剔除指定条目(用于制造「图片丢失」「容器缺失」等损坏样本)。"""
+                 drop_suffixes: tuple[str, ...] = (),
+                 replace: tuple[tuple[str, str], ...] = (),
+                 add: dict[str, bytes] | None = None) -> Path:
+    """复制 EPUB,可剔除指定条目、替换文本条目内容、追加新条目。
+
+    - drop / drop_suffixes:制造「图片丢失」「容器缺失」等损坏样本
+    - replace:在 .xhtml/.opf/.ncx 文本里做字面替换(如注入一条 manifest 项)
+    - add:追加条目(如往包里塞一张没人引用的图片)
+    """
     import zipfile
 
     drop = drop or set()
@@ -94,7 +101,15 @@ def rewrite_epub(src: Path, dst: Path, *, drop: set[str] | None = None,
         for item in zin.infolist():
             if item.filename in drop or item.filename.endswith(drop_suffixes):
                 continue
-            zout.writestr(item, zin.read(item.filename))
+            data = zin.read(item.filename)
+            if replace and item.filename.endswith((".xhtml", ".opf", ".ncx")):
+                text = data.decode("utf-8")
+                for old, new in replace:
+                    text = text.replace(old, new)
+                data = text.encode("utf-8")
+            zout.writestr(item, data)
+        for name, data in (add or {}).items():
+            zout.writestr(name, data)
     return dst
 
 

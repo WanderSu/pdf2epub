@@ -20,6 +20,7 @@ from pathlib import Path
 
 from backends import get_backend
 from convert import convert_auto, load_config
+from epub.content import verify_content
 from epub.pandoc import build_epub
 from epub.verify import VerifyResult, verify_epub
 from markdown.cleaner import CleanOptions, clean_file, resolve_options
@@ -127,13 +128,22 @@ def is_done(source: Path, output_dir: Path, force: bool = False) -> bool:
     return epub.stat().st_mtime >= source.stat().st_mtime
 
 
-def verify_output(epub: Path, *, strict: bool = False) -> VerifyResult:
-    """EPUB 结构校验(idea.md §12),接入转换流程。
+def verify_output(epub: Path, *, strict: bool = False,
+                  book_md: Path | None = None,
+                  expected_pages: int | None = None) -> VerifyResult:
+    """EPUB 结构与内容完整性校验(idea.md §12 / v0.3.2 P0-3),接入转换流程。
+
+    - 结构:容器 / manifest / 链接 / 图片 / 公式 / CSS(verify_epub)
+    - 内容:对照源 Markdown 检查有无内容丢失(book_md 非空时追加)
 
     默认只告警(不打断既有流程);strict=True 时只要有 error 就抛 VerifyError,
     使该任务判 failed。
     """
     result = verify_epub(epub)
+    if book_md is not None and Path(book_md).exists():
+        content = verify_content(book_md, epub, expected_pages=expected_pages)
+        result.issues.extend(content.issues)
+        result.stats.update(content.stats)
     for issue in result.issues:
         log = logger.warning if issue.level == "warning" else logger.error
         log("[verify] %s", issue.message)
@@ -206,6 +216,7 @@ def process_one(
 def _process_pdf(source, config, work_root, output_dir, backend_override, t0, result,
                  safe_stem, out_name, clean_options=None, strict=False) -> TaskResult:
     work = work_root / safe_stem
+    detection = None                      # 手动指定后端时没有检测结果
     if backend_override and backend_override != "auto":
         backend = get_backend(backend_override, config.get(backend_override, {}))
         conv = backend.convert(source, work)
@@ -230,7 +241,10 @@ def _process_pdf(source, config, work_root, output_dir, backend_override, t0, re
     title, author = parse_title_author(source.stem)
     epub = build_epub(conv.book_md, work, output_dir, title=title, author=author, out_name=out_name)
     result.epub = epub
-    result.verify = verify_output(epub, strict=strict).summary()
+    result.verify = verify_output(
+        epub, strict=strict, book_md=conv.book_md,
+        expected_pages=getattr(detection, "total_pages", None) or conv.stats.get("pages"),
+    ).summary()
     result.elapsed = time.time() - t0
     logger.info("完成(%s/%s): %s → %s", result.pdf_type, result.backend, source.name, epub.name)
     return result
@@ -259,7 +273,7 @@ def _process_markdown(source, work_root, output_dir, t0, result, safe_stem, out_
     title, author = parse_title_author(source.stem)
     epub = build_epub(book_md, work, output_dir, title=title, author=author, out_name=out_name)
     result.epub = epub
-    result.verify = verify_output(epub, strict=strict).summary()
+    result.verify = verify_output(epub, strict=strict, book_md=book_md).summary()
     result.elapsed = time.time() - t0
     logger.info("完成(markdown): %s → %s", source.name, epub.name)
     return result

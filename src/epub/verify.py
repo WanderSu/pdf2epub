@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+import math
 import re
 import xml.etree.ElementTree as ET
 import zipfile
@@ -45,6 +46,14 @@ IMG_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp")
 
 #: 空章节判定阈值(去掉标签后的正文字符数)
 EMPTY_CHAPTER_CHARS = 10
+#: 「可疑偏短」章节阈值:仅统计,不告警 —— 版权页/前言/插页天然就短,
+#: 拿它报警会让正常书每次都被提示(用户很快就会学会忽略提示)
+SHORT_CHAPTER_CHARS = 200
+#: 空章节占比达到此比例(且数量 ≥ EMPTY_CHAPTER_MIN) → 判定内容疑似丢失(error)
+EMPTY_CHAPTER_RATIO = 0.5
+EMPTY_CHAPTER_MIN = 3
+#: 不参与「空/短章节」统计的文档类型(Pandoc 的封面页、标题页、目录)
+FRONTMATTER_TYPES = ("frontmatter", "titlepage", "toc", "landmarks", "cover")
 
 
 @dataclass(frozen=True)
@@ -204,8 +213,12 @@ def verify_epub(
         total_footnote_sections = 0
         total_footnote_refs = 0
         total_img_refs = 0
+        total_text_chars = 0
+        total_headings = 0
         broken_refs: list[str] = []
         empty_chapters: list[str] = []
+        short_chapters: list[str] = []
+        referenced_images: set[str] = set()
 
         for hf in html_files:
             hf_posix = str((opf_dir / hf).as_posix())
@@ -218,23 +231,42 @@ def verify_epub(
             fn_sections = len(re.findall(r'class="footnotes[^"]*"|epub:type="footnotes"', content))
             fn_refs = len(re.findall(r'class="footnote-ref"', content))
             imgs = re.findall(r'<img\b[^>]*src="([^"]+)"', content)
-            body_text = re.sub(r"<[^>]+>", "", content).strip()
+            # 正文文本必须**先剥掉 <head>**(pandoc 会把章节 id 写进 <title>,
+            # 否则「只剩标题的空章节」会因为多出这十几个字符而逃过检测)
+            body_html = re.sub(r"<head\b.*?</head>", "", content, flags=re.S)
+            body_text = re.sub(r"<[^>]+>", "", body_html).strip()
 
             total_math += math_count
             total_footnote_sections += fn_sections
             total_footnote_refs += fn_refs
             total_img_refs += len(imgs)
+            total_text_chars += len(re.sub(r"\s+", "", body_text))
+            total_headings += len(re.findall(r"<h[1-6]\b", content))
 
             for src in imgs:
+                referenced_images.add(src.split("/")[-1])
                 if not in_zip(src, hf_dir):
                     broken_refs.append(f"{hf} → {src}")
+            # 图片也可能来自 <image xlink:href>(SVG 内嵌 / pandoc 的 svg 包装)
+            for src in re.findall(r'<image\b[^>]*href="([^"]+)"', content):
+                referenced_images.add(src.split("/")[-1])
+            # 标题页/目录/封面不算章节内容(它们天然短),不参与空章节统计
+            types = set(re.findall(r'epub:type="([^"]+)"', content))
+            if types & set(FRONTMATTER_TYPES):
+                continue
             if len(body_text) < EMPTY_CHAPTER_CHARS:
                 empty_chapters.append(hf)
+            elif len(re.sub(r"\s+", "", body_text)) < SHORT_CHAPTER_CHARS:
+                short_chapters.append(hf)
 
         result.stats["math"] = total_math
         result.stats["footnote_sections"] = total_footnote_sections
         result.stats["footnote_refs"] = total_footnote_refs
         result.stats["img_refs"] = total_img_refs
+        result.stats["text_chars"] = total_text_chars
+        result.stats["headings"] = total_headings
+        result.stats["empty_chapters"] = len(empty_chapters)
+        result.stats["short_chapters"] = len(short_chapters)
 
         if broken_refs:
             result.fail("image_missing", f"图片引用缺失: {broken_refs[:5]}")
@@ -247,6 +279,24 @@ def verify_epub(
                         f"图片引用不足: 实际 {total_img_refs} 处 <img>,期望 {expect_images}")
         if empty_chapters:
             result.warn("empty_chapters", f"疑似空章节: {empty_chapters[:5]}")
+            # 空章节成规模 = 内容在链路里丢了(单条空章节可能只是版权页/插页)
+            if len(empty_chapters) >= max(EMPTY_CHAPTER_MIN,
+                                          math.ceil(len(html_files) * EMPTY_CHAPTER_RATIO)):
+                result.fail("chapters_empty_mass",
+                            f"{len(empty_chapters)}/{len(html_files)} 个章节没有正文,内容疑似丢失")
+        # 短章节只统计不告警(见 SHORT_CHAPTER_CHARS 注释):版权页/前言天然就短
+        # ── 孤立图片:manifest 里有、但没有任何 XHTML 引用(封面除外) ──
+        cover_href = ""
+        for item in opf.findall(".//opf:manifest/opf:item", NS):
+            if (item.get("properties") or "") == "cover-image" or item.get("id") == "cover-image":
+                cover_href = item.get("href", "").split("/")[-1]
+        orphans = [h for h in img_items.values()
+                   if h.split("/")[-1] not in referenced_images
+                   and h.split("/")[-1] != cover_href]
+        result.stats["orphan_images"] = len(orphans)
+        if orphans:
+            result.warn("image_orphan",
+                        f"{len(orphans)} 张图片在 manifest 里但正文从未引用: {orphans[:3]}")
 
         # ---- 5. TOC ----
         nav_path = None
