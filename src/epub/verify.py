@@ -54,6 +54,9 @@ EMPTY_CHAPTER_RATIO = 0.5
 EMPTY_CHAPTER_MIN = 3
 #: 不参与「空/短章节」统计的文档类型(Pandoc 的封面页、标题页、目录)
 FRONTMATTER_TYPES = ("frontmatter", "titlepage", "toc", "landmarks", "cover")
+#: Pandoc 的封面页只有 `<body id="cover">` + `#cover-image`,**没有** epub:type ——
+#: 不单独认它,每本带封面的书都会多一条「疑似空章节」告警
+COVER_DOC_RE = re.compile(r'<body[^>]*id="cover"|<div[^>]*id="cover-image"')
 
 
 @dataclass(frozen=True)
@@ -252,7 +255,7 @@ def verify_epub(
                 referenced_images.add(src.split("/")[-1])
             # 标题页/目录/封面不算章节内容(它们天然短),不参与空章节统计
             types = set(re.findall(r'epub:type="([^"]+)"', content))
-            if types & set(FRONTMATTER_TYPES):
+            if types & set(FRONTMATTER_TYPES) or COVER_DOC_RE.search(content):
                 continue
             if len(body_text) < EMPTY_CHAPTER_CHARS:
                 empty_chapters.append(hf)
@@ -294,6 +297,8 @@ def verify_epub(
                    if h.split("/")[-1] not in referenced_images
                    and h.split("/")[-1] != cover_href]
         result.stats["orphan_images"] = len(orphans)
+        # 封面是 pandoc 注入的,源 Markdown 里当然没有 —— 内容对照要比对的是正文图片
+        result.stats["images_no_cover"] = len(img_items) - (1 if cover_href else 0)
         if orphans:
             result.warn("image_orphan",
                         f"{len(orphans)} 张图片在 manifest 里但正文从未引用: {orphans[:3]}")
