@@ -123,12 +123,18 @@ def test_mass_empty_chapters_is_an_error(tmp_path: Path) -> None:
 
 
 def test_title_page_and_nav_do_not_count_as_empty_chapters(tmp_path: Path) -> None:
-    """正常产物里标题页/目录天然短小,不能被算成空章节(否则每本书都在报警)。"""
+    """正常产物里标题页/目录/标题章天然短小,不能被算成空章节。
+
+    三类都不算:标题页与目录(epub:type=frontmatter/titlepage/toc)、封面页
+    (只有 `<body id="cover">`)、pandoc 为 Markdown 首个 h1 单独生成的**标题章**
+    (它只有书名、没有正文)。漏掉任何一个,每本正常书都会带一条无用告警。
+    """
     src = tmp_path / "src"
     epub = build_epub(src, tmp_path / "ok.epub", title="样本书")
 
     result = verify_epub(epub)
 
+    assert result.stats["chapters"] >= 3          # 标题页 + 目录 + 正文章
     assert result.stats["empty_chapters"] == 0
     assert not any(i.code == "empty_chapters" for i in result.issues)
     assert result.ok

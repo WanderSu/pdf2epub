@@ -211,6 +211,9 @@ def verify_epub(
         spine = [i.get("idref") for i in opf.findall(".//opf:spine/opf:itemref", NS)]
         html_files = [manifest[i] for i in spine if i in manifest]
         result.stats["chapters"] = len(html_files)
+        # 书名标题(titles 章):pandoc 会把 Markdown 的首个 h1 单独变成一章,
+        # 它只有书名、没有正文 —— 不排除的话**每本书**都会多一条「疑似空章节」告警
+        book_title = re.sub(r"\s+", "", (title.text or "") if title is not None else "")
 
         total_math = 0
         total_footnote_sections = 0
@@ -256,6 +259,9 @@ def verify_epub(
             # 标题页/目录/封面不算章节内容(它们天然短),不参与空章节统计
             types = set(re.findall(r'epub:type="([^"]+)"', content))
             if types & set(FRONTMATTER_TYPES) or COVER_DOC_RE.search(content):
+                continue
+            # 只有书名的标题章也不算(它本来就没有正文)
+            if book_title and re.sub(r"\s+", "", body_text) == book_title:
                 continue
             if len(body_text) < EMPTY_CHAPTER_CHARS:
                 empty_chapters.append(hf)
