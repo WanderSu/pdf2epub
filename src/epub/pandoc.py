@@ -14,6 +14,43 @@ from paths import book_css
 
 DEFAULT_CSS = book_css()
 
+#: 数学片段:$$…$$ / $…$ / \[…\] / \(…\)(本地路径的公式是图片,只有云端 LaTeX 会命中)
+MATH_SPAN_RE = re.compile(r"\$\$.+?\$\$|\$[^$\n]+\$|\\\[.+?\\\]|\\\(.+?\\\)", re.S)
+#: LaTeX 公式编号:\tag{1} / \tag*{1}
+MATH_TAG_RE = re.compile(r"\\tag(\*?)\s*\{([^{}]*)\}")
+#: 围栏代码块(整段原样保留,里面的 $ 与 \tag 不动)。
+#: 必须带捕获组:否则 ``re.split`` 会把分隔符(整个代码块)**丢掉**。
+FENCE_RE = re.compile(r"(^```.*?^```)", re.S | re.M)
+
+
+def normalize_math_tags(text: str) -> str:
+    r"""把 ``\tag{n}`` / ``\tag*{n}`` 换成**可见**的编号。
+
+    MathML 没有 ``\tag`` 这个概念:pandoc 只会把它留在 ``<annotation
+    encoding="application/x-tex">`` 里,公式正文里一个字符都不出现 —— 阅读器里
+    **公式编号直接消失**(实测:云端路径的 ``$$\int x \tag{1}$$`` 转出来只有公式,
+    连同编号一起丢了)。换成 ``\qquad{(1)}`` 后编号跟着公式一起渲染,且仍属于同一
+    个 MathML 块。``\tag*{n}`` 本义是没有括号,这里同样不加。
+
+    只改数学片段;围栏代码块里的同名字样原样保留。
+    """
+    def fix_span(match: re.Match) -> str:
+        span = match.group(0)
+        if "\\tag" not in span:
+            return span
+
+        def fix_tag(tag: re.Match) -> str:
+            star, label = tag.group(1), tag.group(2).strip()
+            return f"\\qquad{{{label}}}" if star else f"\\qquad{{({label})}}"
+
+        return MATH_TAG_RE.sub(fix_tag, span)
+
+    parts = FENCE_RE.split(text)
+    # ``split`` 的分隔符本身会留在结果里(奇数下标即围栏块),它们不参与替换
+    for i in range(0, len(parts), 2):
+        parts[i] = MATH_SPAN_RE.sub(fix_span, parts[i])
+    return "".join(parts)
+
 
 def infer_title(book_md: Path, fallback: str | None = None) -> str:
     """从 Markdown 标题推断书名:跳过过短/无意义的候选(如版权页'说明')。"""
@@ -62,8 +99,18 @@ def build_epub(
     epub = output_dir / f"{out_name or book_md.parent.name}.epub"
     title = title or infer_title(book_md)
 
+    # MathML 不认识 \tag:公式编号会静默消失 → 先归一化成可见的 \qquad(n)。
+    # 不就地改 book.md(它是内容对照的源),只在需要时写一份给 pandoc 用的副本。
+    source_md = book_md
+    md_text = book_md.read_text(encoding="utf-8", errors="replace")
+    if "\\tag" in md_text:
+        normalized = normalize_math_tags(md_text)
+        if normalized != md_text:
+            source_md = book_md.parent / f"{book_md.stem}.pandoc.md"
+            source_md.write_text(normalized, encoding="utf-8")
+
     cmd = [
-        "pandoc", str(book_md), "-o", str(epub),
+        "pandoc", str(source_md), "-o", str(epub),
         "--toc", "--toc-depth=3",
         "--css", str(css),
         "--resource-path", str(work_dir),
