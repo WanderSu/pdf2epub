@@ -166,6 +166,25 @@ npm run tauri build -- --no-bundle   # 构建 release exe(产物 desktop.exe)
 
 前置要求:Node.js ≥ 20 · Rust(`stable-x86_64-pc-windows-msvc`)· Visual Studio Build Tools(C++ workload)
 
+### 界面状态从哪来(引擎事件流)
+
+桌面端**不再从中文日志里猜状态**。转换时壳会给 CLI 加 `--json-events`,stdout 只走
+JSON 事件(`hello/detect/plan/stage/progress/shards/verify/warning/error/complete`),
+人类可读日志走 stderr 进「排字记录」。进度百分比按事件里的**阶段权重 + 区段/分片进度**
+计算 —— 不是「日志行数 × 5%」。事件表与权重在 `src/events.py`(权威),前端消费逻辑在
+`desktop/src/events.ts`。
+
+未开事件流的老版 CLI 仍能用:前端会退回旧正则解析,并在排字记录里给该行标 **LEGACY** 徽标。
+
+不开窗口也能验证解析(桌面端没有测试框架,这条是唯一的自动化验证):
+
+```bash
+cd desktop
+npm run verify:events                            # 内置 hybrid / MinerU / legacy 三类事件流
+uv run ebook-converter samples/pdfs/中文电子书测试.pdf --json-events > /tmp/ev.jsonl   # 真实捕获
+npm run verify:events -- /tmp/ev.jsonl
+```
+
 一键打包发布(版本守卫:四处版本号必须一致):
 
 ```bash
@@ -191,6 +210,7 @@ ebook-converter <文件或目录>... [-o 输出目录] [选项]
 | `--strict` | EPUB 生成后做结构校验,有失败项即判该文件失败(默认只告警) |
 | `--dry-run` | 预检:只输出类型/页数/计划后端/折帖数与当日 OCR 额度,不产出任何文件 |
 | `--dry-run --json` | 同上,但输出 JSON(桌面端「印前检查」用的就是这个) |
+| `--json-events` | 阶段事件以 **JSON Lines** 写到 stdout(人类日志改走 stderr):桌面端据此显示真实进度与状态;与 `--dry-run` 同用时忽略(预检自带 JSON) |
 | `--no-resume` | 不复用云端已提交的 OCR 任务(默认中断后续跑,不重新上传) |
 | `--no-log` | 不写日志文件 |
 | `--verbose` | 控制台输出 DEBUG 日志 |
@@ -297,7 +317,7 @@ OCR 是云端按页计费服务。桌面端拖入文件后**印前检查会先�
 - 页码剔除 / 断行拼接为启发式规则,极端排版可能有误伤;拼接带长度门槛(相邻行 ≥6 字、跨空行 ≥10 字),**真正被断开的短行会漏拼**(代价是多一个换行,刻意选的保守方向)
 - MinerU 分片后,跨段边界的表格 / 段落可能被截断(清理规则可部分弥补)
 - EPUBCheck 未安装,未做 EPUB 标准合规验证
-- 界面进度百分比按日志估算;封面已实现(PDF 首页渲染),但**桌面端书库缩略图仍为几何色块占位**(下一版接)
+- 界面进度按**引擎事件流**计算(阶段权重 + 区段/分片进度);封面已实现(PDF 首页渲染),但**桌面端书库缩略图仍为几何色块占位**(下一版接)
 - `dc:language` 按 Unicode 脚本自动检测(zh-CN / en / ja / ko),不区分繁简;检测不出时回退 zh-CN
 - 内容完整性校验只做**数量级对照**(图片 / 公式 / 正文字符 / 标题),同一句话被改写、段落顺序变化它发现不了
 - hybrid 文本 / 扫描交错的书按真实页码合并;扫描区段数超过 `hybrid.max_ocr_runs`(默认 8)时合并区段,被合并区段内的局部页序可能与原文不一致(会打印警告)
@@ -314,6 +334,7 @@ src/
   markdown/         # cleaner(清理) / bold(粗体标注)
   epub/             # pandoc 封装 + EPUB 结构校验(verify)
   dryrun.py         # 印前检查(--dry-run / --dry-run --json)
+  events.py         # 阶段事件流(--json-events:JSON Lines,桌面端状态/进度的唯一来源)
   batch.py          # 批处理(重试/跳过/断点续跑)
   cli.py            # ebook-converter 命令入口
   convert.py        # 自动路由(text/scanned/hybrid)
@@ -321,6 +342,8 @@ src/
 config/             # config.yaml + book.css
 desktop/            # Tauri 2 桌面端(React 19 + Tailwind v4)
   src/App.tsx       # 全部界面(三工作区 + 组件族)
+  src/events.ts     # 事件流解析/归约(纯函数,node 可测)
+  scripts/verify-events.mjs  # 不开窗口验证事件解析(npm run verify:events)
   src-tauri/src/lib.rs  # IPC:convert_file / preflight / cancel_convert / library / env / apikey
 docs/               # 界面截图
 scripts/            # 测试样本生成 / 端到端测试 / EPUB 验证 / 版本与打包

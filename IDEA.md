@@ -167,6 +167,15 @@ PDF 基本没有有效文字层。
 - UI 源自 Figma 设计稿,桥接 CLI 子进程
 - 构建工具链:Windows MSVC
 
+> 补充:**界面状态来自引擎事件流(2026-09 实现)**。此前桌面端用 5 个正则从 CLI 的
+> 中文日志里猜状态(文案一改就静默失效),进度百分比按「日志行到达 +5」估算(永远到不了
+> 95%)。现在壳给 CLI 加 `--json-events`:stdout 只走 JSON Lines
+> (`hello/detect/plan/stage/progress/shards/verify/warning/error/complete`),
+> 人类日志改走 stderr 且**必须被持续读掉**(管道写满会让子进程卡死)。
+> 阶段权重由引擎的 `hello` 事件下发,前端不另写一份;`progress` 事件让云端 OCR 的
+> 区段/分片进度变成真实百分比。前端取历史峰值,进度条只许前进(阶段猜测值可能高于
+> 首个真实分片进度,否则会倒退)。老版 CLI 仍走正则兜底,日志行会标 LEGACY。
+
 ### EPUB
 
 统一使用 Pandoc。
@@ -552,6 +561,7 @@ ebook-converter/
 │   ├── batch.py                 # 批处理(重试/跳过/断点续跑)
 │   ├── convert.py               # 自动路由(text/scanned/hybrid)
 │   ├── page_result.py           # 页单元(页码/排序/页码注释)+ 扫描区段规划
+│   ├── events.py                # 阶段事件流(--json-events:JSON Lines)
 │   ├── cli.py                   # ebook-converter 命令入口
 │   └── paths.py                 # 路径与 apikey.json 凭证读取
 ├── config/

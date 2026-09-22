@@ -30,6 +30,7 @@ from lang_detect import resolve_language
 from markdown.cleaner import CleanOptions, clean_file, resolve_options
 from detector.pdf_detector import PDFType
 from paths import config_file
+import events
 
 #: 封面 JPEG 宽度 / 质量(v0.3.2 P1-4:PDF 首页渲染,不裁切)
 COVER_WIDTH = 1200
@@ -260,6 +261,7 @@ def process_one(
         result.epub = existing_epub(source, output_dir) or out_epub
         result.elapsed = time.time() - t0
         logger.info("跳过(已完成): %s", source.name)
+        events.emit("skip", file=source.name, epub=result.epub.name)
         return result
 
     attempt = 0
@@ -292,6 +294,8 @@ def process_one(
 
     result.status = "failed"
     result.error = str(last_error)
+    events.emit("error", code="verify_failed" if isinstance(last_error, VerifyError) else "convert_failed",
+                message=str(last_error), file=source.name)
     logger.error("失败: %s → %s", source.name, last_error)
     return result
 
@@ -302,11 +306,15 @@ def _process_pdf(source, config, work_root, output_dir, backend_override, t0, re
     work = work_root / safe_stem
     detection = None                      # 手动指定后端时没有检测结果
     if backend_override and backend_override != "auto":
+        events.stage("detect", "done", skipped=True)
+        events.stage("extract", "start", backend=backend_override)
         backend = get_backend(backend_override, config.get(backend_override, {}))
         conv = backend.convert(source, work)
         result.backend = conv.backend
         result.pdf_type = "manual"
+        events.stage("extract", "done", backend=conv.backend)
     else:
+        # detect / extract 阶段事件由 convert_auto 负责(检测与提取都在里面)
         conv, detection = convert_auto(source, work, config=config)
         result.backend = conv.backend
         result.pdf_type = detection.pdf_type.value
@@ -316,24 +324,40 @@ def _process_pdf(source, config, work_root, output_dir, backend_override, t0, re
                 "如需 OCR 请用 --backend mineru/paddleocr 重跑",
                 source.name, detection.suspicious_pages, detection.total_pages,
             )
+            events.emit("warning", code="suspicious_pages",
+                        message=f"{detection.suspicious_pages}/{detection.total_pages} 页疑似文字层损坏",
+                        pages=detection.total_pages, suspicious_pages=detection.suspicious_pages)
 
     # Markdown 清理(按 clean_options 开关)
+    events.stage("clean", "start")
     report = clean_file(conv.book_md, options=clean_options)
     for issue in report.issues:
         logger.info("[clean] %s", issue)
+    events.stage("clean", "done", issues=len(report.issues))
 
+    events.stage("build", "start")
     title, author = parse_title_author(source.stem)
     cover = render_cover(source, work)
     epub = build_epub(conv.book_md, work, output_dir, title=title, author=author, out_name=out_name,
                       lang=epub_language(conv.book_md, lang_override),
                       identifier=stable_identifier(source, out_name),
                       date=source_date(source), cover_image=cover)
+    events.stage("build", "done", cover=bool(cover))
     result.epub = epub
-    result.verify = verify_output(
+    events.stage("verify", "start")
+    verify = verify_output(
         epub, strict=strict, book_md=conv.book_md,
         expected_pages=getattr(detection, "total_pages", None) or conv.stats.get("pages"),
-    ).summary()
+    )
+    result.verify = verify.summary()
+    events.emit("verify", errors=len(verify.errors), warnings=len(verify.warnings),
+                message=verify.errors[0].message if verify.errors else
+                        (verify.warnings[0].message if verify.warnings else ""))
+    events.stage("verify", "done")
     result.elapsed = time.time() - t0
+    events.emit("complete", file=source.name, epub=epub.name, backend=result.backend,
+                pdf_type=result.pdf_type, verify=result.verify,
+                seconds=round(result.elapsed, 2))
     logger.info("完成(%s/%s): %s → %s", result.pdf_type, result.backend, source.name, epub.name)
     return result
 
@@ -355,17 +379,32 @@ def _process_markdown(source, work_root, output_dir, t0, result, safe_stem, out_
             if img.is_file():
                 shutil.copy2(img, dst_images / img.name)
 
+    # Markdown 输入没有「提取」这一步(只是复制),extract 直接以 skipped 收尾
+    events.stage("extract", "done", backend="markdown", skipped=True)
+    events.stage("clean", "start")
     report = clean_file(book_md, options=clean_options)
     for issue in report.issues:
         logger.info("[clean] %s", issue)
+    events.stage("clean", "done", issues=len(report.issues))
+    events.stage("build", "start")
     title, author = parse_title_author(source.stem)
     epub = build_epub(book_md, work, output_dir, title=title, author=author, out_name=out_name,
                       lang=epub_language(book_md, lang_override),
                       identifier=stable_identifier(source, out_name),
                       date=source_date(source))
+    events.stage("build", "done", cover=False)
     result.epub = epub
-    result.verify = verify_output(epub, strict=strict, book_md=book_md).summary()
+    events.stage("verify", "start")
+    verify = verify_output(epub, strict=strict, book_md=book_md)
+    result.verify = verify.summary()
+    events.emit("verify", errors=len(verify.errors), warnings=len(verify.warnings),
+                message=verify.errors[0].message if verify.errors else
+                        (verify.warnings[0].message if verify.warnings else ""))
+    events.stage("verify", "done")
     result.elapsed = time.time() - t0
+    events.emit("complete", file=source.name, epub=epub.name, backend="markdown",
+                pdf_type="markdown", verify=result.verify,
+                seconds=round(result.elapsed, 2))
     logger.info("完成(markdown): %s → %s", source.name, epub.name)
     return result
 
