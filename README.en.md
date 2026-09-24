@@ -335,7 +335,7 @@ cd desktop/src-tauri && cargo test     # Rust tests (IPC / library / credential 
 cd desktop && npm run build            # frontend type-check + build
 ```
 
-The roadmap lives in `.hermes/plans/`; design notes are in [IDEA.md](IDEA.md) (Chinese).
+Design notes are in [IDEA.md](IDEA.md) (Chinese).
 
 ---
 
