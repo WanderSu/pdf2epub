@@ -49,6 +49,16 @@ CROSS_BLANK_MIN_CHARS = 10
 #: 诗句/居中标题/短标签 —— 拼进去会毁掉诗的换行结构。门槛低到只挡这些短行,
 #: 漏拼一处段落只是多一个换行,属于可接受的方向。
 ADJACENT_MIN_CHARS = 6
+#: 「诗行」上界:两行都不超过该长度、且都不以句末标点结尾 → **不拼接**。
+#: 中文正文排满的整行通常 20 字以上(双栏样本实测 24-33 字),而律诗/绝句 5-7 字、
+#: 词 3-9 字、现代诗多数 ≤18 字 —— 两者之间有很宽的间隔,阈值放在间隔里。
+VERSE_MAX_CHARS = 18
+#: 「诗行」加硬换行的上界(比不拼接更严)。不拼接只保住 book.md 的换行,pandoc
+#: 仍会把换行渲染成空格(诗在阅读器里还是挤成一行);**行尾两空格**(Markdown 硬换行)
+#: 才会真分行。它有视觉影响,所以只在证据更强时(连续两行都 ≤ 该长度)才用。
+VERSE_HARD_MAX_CHARS = 12
+#: Markdown 硬换行:行尾两个空格(pandoc/CommonMark 通用)。
+HARD_BREAK = "  "
 #: 标题行(`#` ~ `######` + 可选空格 + 文本)
 HEADING_RE = re.compile(r"^(#{1,6})\s*(.*)$")
 #: 行内 CJK 字符(判断「中文语境」)
@@ -143,6 +153,59 @@ class CleanReport:
         self.issues.append(msg)
 
 
+def _is_verse_line(line: str) -> bool:
+    """诗行候选:短、无句末标点、非 markdown 块结构。
+
+    **引用块(`>`)里的诗是最常见的形态**,所以先把引用前缀剥掉再判定;
+    其他块结构(标题/列表/表格/图片/代码)一律不碰。
+    """
+    s = line.strip()
+    while s.startswith(">"):
+        s = s[1:].strip()
+    if not s or s.startswith(BLOCK_MARKERS):
+        return False
+    if len(re.sub(r"\s+", "", s)) > VERSE_HARD_MAX_CHARS:
+        return False
+    return s[-1] not in END_PUNCT
+
+
+def _mark_verse_lines(md: str, report: CleanReport) -> str:
+    """给连续短行(诗行)加 Markdown 硬换行,免得诗在阅读器里被渲染成一行。
+
+    判据:连续 ≥ 2 行都不超过 ``VERSE_HARD_MAX_CHARS``、都不以句末标点结尾、都不是
+    块结构(标题/引用/列表/表格/图片)。**空行会断开连续段**,所以空行分隔的单行诗
+    不会被处理(分段留白本身是原样保留的)。
+
+    只补不拼:本函数只加行尾两空格(``HARD_BREAK``),因此必须排在行尾空白清理之后;
+    对同一份文本重复运行不会叠加空格(先 rstrip 再补),幂等。
+    """
+    lines = md.split("\n")
+    out = lines[:]
+    i = 0
+    marked = 0
+    while i < len(lines):
+        if lines[i].strip().startswith("```"):        # 代码块整段跳过
+            i += 1
+            while i < len(lines) and not lines[i].strip().startswith("```"):
+                i += 1
+            i += 1
+            continue
+        if not _is_verse_line(lines[i]):
+            i += 1
+            continue
+        j = i
+        while j < len(lines) and _is_verse_line(lines[j]):
+            j += 1
+        if j - i >= 2:                                 # 连续 ≥2 行才当诗
+            for k in range(i, j - 1):                  # 段末行不需要硬换行
+                out[k] = out[k].rstrip() + HARD_BREAK
+                marked += 1
+        i = j
+    if marked:
+        report.add(f"诗行: 保留分行 {marked} 行")
+    return "\n".join(out)
+
+
 def clean_markdown(
     md_text: str,
     images_dir: Path | None = None,
@@ -202,6 +265,12 @@ def clean_markdown(
 
     # 10. 行尾空白
     md = re.sub(r"[ \t]+$", "", md, flags=re.MULTILINE)
+
+    # 10.5 诗行硬换行(必须在行尾空白清理之后:硬换行本身就是行尾两个空格)。
+    #      不拼接只保住 book.md 的换行,pandoc 仍会把换行渲染成空格 —— 这一步
+    #      才让诗在阅读器里真的分行。
+    if options.join_lines:
+        md = _mark_verse_lines(md, report)
 
     # 11. 图片引用存在性校验
     if options.images and images_dir is not None and images_dir.is_dir():
@@ -432,6 +501,15 @@ def _join_broken_lines(md: str) -> str:
         pk, pt, pb = pending
         gap = blanks
         prev_len = len(re.sub(r"\s+", "", pt))
+        cur_len = len(re.sub(r"\s+", "", text))
+        # 诗行对:两行都短、且**两行都没有句末标点** —— 换行是有意的,不能拼。
+        # 只看长度挡不住「短行被拼」(7 字律诗必踩);只不看标点又挡不住正常的
+        # 短行散文断行(样本 join_lines 的 9 字 + 14 字那对),所以两个条件都要。
+        verse_pair = (
+            prev_len <= VERSE_MAX_CHARS
+            and cur_len <= VERSE_MAX_CHARS
+            and text[-1] not in END_PUNCT
+        )
         joinable = (
             pk == "text"
             and kind == "text"
@@ -442,6 +520,7 @@ def _join_broken_lines(md: str) -> str:
             and text[0] not in START_PUNCT
             # 短行不拼(诗句/年份/页眉/小标题):跨空行比相邻更保守
             and prev_len >= (CROSS_BLANK_MIN_CHARS if gap >= 1 else ADJACENT_MIN_CHARS)
+            and not verse_pair
         )
         if joinable:
             # 中英文断行拼接:两侧均为拉丁字母时补空格,否则直接相连

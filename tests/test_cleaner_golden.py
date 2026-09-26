@@ -29,7 +29,9 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures" / "cleaner"
 GOLDEN_MAP: dict[str, list[str]] = {
     "page_numbers": ["page_numbers"],              # 正例:独立页码行被删;反例:年份 1984、句内数字保留
     "running_heads": ["running_heads"],            # 正例:重复 3 次被删;反例:只出现 2 次的短行保留
-    "join_lines": ["join_lines", "poetry_preserved"],   # 正例:断行拼接;反例:代码块/表格/诗句不拼
+    "join_lines": ["join_lines", "poetry_preserved", "poetry_quoted"],
+    #   正例:断行拼接(含「短行散文」那对);反例:代码块/表格不拼、诗行不拼且加硬换行
+    #   (hard break 也挂在 join_lines 开关下:它是「怎么处理换行」的同一件事)
     "ocr_spaces": ["ocr_spaces"],                  # 正例:Py Mu PDF → PyMuPDF;反例:正常英文短语
     "cjk_spaces": ["cjk_spaces", "should_not_touch"],   # 正例:汉字间空格;反例:中英之间空格保留
     "dup_headings": ["dup_headings"],              # 正例:相邻同名同级去重;反例:被正文隔开/不同级别保留
