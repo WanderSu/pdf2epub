@@ -93,7 +93,7 @@ Existing Markdown ───────────────────┘
 
 ### 1. Desktop app (recommended)
 
-Download `pdf2epub-v0.4.0-win-x64.zip` from [Releases](https://github.com/WanderSu/pdf2epub/releases), extract anywhere, double-click `pdf2epub.exe`.
+Download `pdf2epub-v0.4.1-win-x64.zip` from [Releases](https://github.com/WanderSu/pdf2epub/releases), extract anywhere, double-click `pdf2epub.exe`.
 
 > 💡 The zip bundles the engine (`cli.exe`, self-contained Python — no Python install needed). Keep `pdf2epub.exe`, `cli.exe` and `config/` in the same folder; no need to place it in a project root.
 
