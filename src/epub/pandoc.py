@@ -3,16 +3,53 @@
 统一命令:
     pandoc book.md -o out.epub --toc --toc-depth=3 --css=config/book.css
            --resource-path=<work> --mathml --metadata title/author/lang
+
+生成前会把 Markdown **副本**里两类「Markdown 合法、EPUB 非法」的写法归一化
+(`\\tag{n}` 公式编号、原始 HTML 空元素),不就地改 `book.md`(它是内容对照的源):
+
+  - `\\tag{n}`:MathML 没有这个概念,编号会在阅读器里整个消失。
+  - `<br>` / `<img>` 等空元素:HTML 允许省略斜杠,XHTML(EPUB 的正文格式)不允许 ——
+    pandoc 原样透传原始 HTML,一个 `<br>` 就足以让整章 XHTML 不再是良构 XML,
+    严格阅读器会拒绝渲染(云端 OCR 的图片文字块就带 `<br>`)。
 """
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
 from paths import book_css
 
 DEFAULT_CSS = book_css()
+
+#: pandoc 可执行文件名(Windows 上同样是 `pandoc`,PATHEXT 由 shutil.which 处理)
+PANDOC = "pandoc"
+
+#: 环境缺失时的提示(装完 pandoc 需要重开终端/桌面端才会进 PATH)
+MISSING_PANDOC_HINT = (
+    "未找到 pandoc(生成 EPUB 的必需组件):请安装 pandoc 并确保它在 PATH 中"
+    "(Windows 上装完需要重开终端或桌面端),然后重跑"
+)
+
+
+class PandocMissingError(RuntimeError):
+    """pandoc 不存在(环境缺失)。
+
+    **确定性失败,不该重试**:重试只会把同一堵墙再撞一遍,而每次重试都要重跑
+    整条链路(提取 + 云端 OCR),白烧云端额度。
+    """
+
+
+def pandoc_available() -> bool:
+    """pandoc 是否在 PATH 里(只探测,不执行)。"""
+    return shutil.which(PANDOC) is not None
+
+
+def require_pandoc() -> None:
+    """pandoc 缺失时抛 PandocMissingError(调用方可据此提前失败,不进入昂贵阶段)。"""
+    if not pandoc_available():
+        raise PandocMissingError(MISSING_PANDOC_HINT)
 
 #: 数学片段:$$…$$ / $…$ / \[…\] / \(…\)(本地路径的公式是图片,只有云端 LaTeX 会命中)
 MATH_SPAN_RE = re.compile(r"\$\$.+?\$\$|\$[^$\n]+\$|\\\[.+?\\\]|\\\(.+?\\\)", re.S)
@@ -21,6 +58,14 @@ MATH_TAG_RE = re.compile(r"\\tag(\*?)\s*\{([^{}]*)\}")
 #: 围栏代码块(整段原样保留,里面的 $ 与 \tag 不动)。
 #: 必须带捕获组:否则 ``re.split`` 会把分隔符(整个代码块)**丢掉**。
 FENCE_RE = re.compile(r"(^```.*?^```)", re.S | re.M)
+
+#: XHTML 空元素:HTML 允许写 `<br>`,XML 必须自闭合,否则整份文档不再是良构 XML。
+VOID_TAGS = ("area", "base", "br", "col", "embed", "hr", "img", "input", "link",
+             "meta", "param", "source", "track", "wbr")
+VOID_TAG_RE = re.compile(
+    r"<(?P<name>" + "|".join(VOID_TAGS) + r")\b(?P<attrs>[^<>]*?)(?:/)?\s*>",
+    re.I,
+)
 
 
 def normalize_math_tags(text: str) -> str:
@@ -50,6 +95,33 @@ def normalize_math_tags(text: str) -> str:
     for i in range(0, len(parts), 2):
         parts[i] = MATH_SPAN_RE.sub(fix_span, parts[i])
     return "".join(parts)
+
+
+def normalize_xhtml_voids(text: str) -> str:
+    r"""把原始 HTML 的空元素写成自闭合形式(`<br>` → `<br />`)。
+
+    XHTML 是 XML:`<br>` 是**未闭合标签**,一个就够让整章不再是良构 XML ——
+    Readium / KOReader / epubcheck 会直接拒绝或错乱渲染,而 pandoc 对 Markdown 里的
+    原始 HTML 是**原样透传**的(云端 OCR 的图片文字块常带 `<br>`;实测一本 300KB 的
+    章节就因为这一个标签整份失效)。归一化保留标签语义(换行仍然换行),只是把它
+    写对。
+
+    只改正文里的原始 HTML;围栏代码块里的同名字样是示例文本,原样保留。
+    """
+    def fix(match: re.Match) -> str:
+        tag = match.group("name")
+        attrs = match.group("attrs").strip()
+        return f"<{tag} {attrs} />" if attrs else f"<{tag} />"
+
+    parts = FENCE_RE.split(text)
+    for i in range(0, len(parts), 2):        # 奇数下标是围栏代码块
+        parts[i] = VOID_TAG_RE.sub(fix, parts[i])
+    return "".join(parts)
+
+
+def prepare_pandoc_markdown(text: str) -> str:
+    """把 Markdown 归一化成「Pandoc 能写出合法 EPUB3」的形式(见模块 docstring)。"""
+    return normalize_xhtml_voids(normalize_math_tags(text))
 
 
 def infer_title(book_md: Path, fallback: str | None = None) -> str:
@@ -89,25 +161,29 @@ def build_epub(
     cover_image: 封面 JPEG(pandoc --epub-cover-image)。
 
     Raises:
+        PandocMissingError: pandoc 不在 PATH(环境缺失,不该重试)
         RuntimeError: Pandoc 执行失败
     """
     book_md = Path(book_md)
     work_dir = Path(work_dir)
     output_dir = Path(output_dir)
+    # 先确认 pandoc 存在,再产生任何副作用(建目录、写 pandoc 用的副本):
+    # 环境缺失必须立刻暴露,而不是等到链路末尾
+    require_pandoc()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     epub = output_dir / f"{out_name or book_md.parent.name}.epub"
     title = title or infer_title(book_md)
 
     # MathML 不认识 \tag:公式编号会静默消失 → 先归一化成可见的 \qquad(n)。
-    # 不就地改 book.md(它是内容对照的源),只在需要时写一份给 pandoc 用的副本。
+    # XHTML 不接受原始 HTML 的空元素 → `<br>` 顺手写成 `<br />`。
+    # 不就地改 book.md(它是内容对照的源),只在确有改动时写一份给 pandoc 用的副本。
     source_md = book_md
     md_text = book_md.read_text(encoding="utf-8", errors="replace")
-    if "\\tag" in md_text:
-        normalized = normalize_math_tags(md_text)
-        if normalized != md_text:
-            source_md = book_md.parent / f"{book_md.stem}.pandoc.md"
-            source_md.write_text(normalized, encoding="utf-8")
+    prepared = prepare_pandoc_markdown(md_text)
+    if prepared != md_text:
+        source_md = book_md.parent / f"{book_md.stem}.pandoc.md"
+        source_md.write_text(prepared, encoding="utf-8")
 
     cmd = [
         "pandoc", str(source_md), "-o", str(epub),
@@ -126,7 +202,17 @@ def build_epub(
         cmd += ["--metadata", f"date={date}"]
     if cover_image:
         cmd += ["--epub-cover-image", str(cover_image)]
-    proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                              errors="replace")
+    except FileNotFoundError as e:
+        # 极少数情况下 which() 能解析、真正执行时却找不到(Windows: [WinError 2])。
+        # 这同样是环境缺失,不是「临时故障」—— 归成可重试错误会让整条链路白跑。
+        raise PandocMissingError(f"{MISSING_PANDOC_HINT}(执行 pandoc 失败: {e})") from e
     if proc.returncode != 0:
         raise RuntimeError(f"Pandoc 失败(exit={proc.returncode}): {proc.stderr[:500]}")
+    # 退出码 0 不等于「写出了产物」:产物缺失或 0 字节都是硬失败,不能把空文件
+    # 当成功结果交给上层(is_done 只认容器完整性,空文件会在这里就暴露)。
+    if not epub.exists() or epub.stat().st_size == 0:
+        raise RuntimeError(f"Pandoc 返回成功但没有写出 EPUB(产物缺失或为空): {epub}")
     return epub
