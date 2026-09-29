@@ -3,19 +3,28 @@
 原则:修复结构,不改写正文;不用 LLM 重写。
 当前实现:
   - 统一换行符(CRLF → LF)
+  - 围栏代码块 / 行内代码**掩码**:规则链全程不触碰代码,结束时逐字节还原
   - 页码残留剔除(独立纯数字行 1-3 位)
   - 页眉页脚重复行剔除(跨页反复出现的短行,扫描书收益最大)
-  - 跨页断行连接(被页码/页脚隔断或非标点结尾的连续段落)
+  - 跨页断行连接(被页码/页脚/页码注释隔断或非标点结尾的连续段落)
   - OCR 异常空格合并(中文语境里被拆开的拉丁词,如 `Py Mu PDF`)
   - 中文排版空格修正(汉字-汉字、汉字-数字之间的空格)
   - 多余空行压缩(连续 ≥3 个空行 → 1 个)
   - 重复标题去重(相邻同名标题)/ 空标题删除 / 标题层级跳跃修正
   - 行尾空白清理
+  - 诗行保护(连续短行不拼接 + 补 Markdown 硬换行)
   - 图片引用存在性校验
 各项可用 CleanOptions 单独开关(配置 clean: 段 / CLI --clean-disable)。
 
 新增启发式规则的共同原则:**默认保守 + 可单独关闭 + 配「不该改的例子」测试**。
 不确定的改动一律不做(宁可留下噪声,也不破坏正文)。
+
+两条结构性前提(改动清理器前先读):
+
+1. **代码块不可改写**。所有规则都是「按行改写正文」的启发式,一旦打到围栏代码块或
+   行内代码上就是语义损坏;因此规则链跑在掩码文本上,代码原文只在最后还原。
+2. **页码注释(`<!-- page N -->`)不是内容**,它标记页边界。它既不该被拼接吃掉,
+   也不该把「被页边界断开的段落」切断 —— 否则跨页连接这条规则在真实产物上完全失效。
 """
 from __future__ import annotations
 
@@ -25,12 +34,30 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
+from page_result import PAGE_MARK_RE
+
 # 段落结尾标点:以此结尾的段落视为完整段落,不参与跨页拼接
 END_PUNCT = set("。！？；：、，·…—”』」）】》%％\"'")
 # 段落开头标点:以此开头的段落不与上一段拼接
 START_PUNCT = set("“‘『「（【《〈\"'")
 # markdown 块级标记:不参与拼接
-BLOCK_MARKERS = ("#", ">", "|", "- ", "* ", "```", "<", "![", "+ ", "1. ", "2. ")
+BLOCK_MARKERS = ("#", ">", "|", "- ", "* ", "```", "<", "![", "+ ")
+#: 有序列表标记(`1. ` / `12) `):markdown 里任意数字都成立。
+#: 曾经只硬编码 `1. ` `2. `,于是目录/清单里第 3 条起的条目被当成正文,
+#: 与相邻行拼成一整行(实测真实书籍的目录:`…/30` + 页码 `I` + `5. 失踪与疯癫/35`)。
+ORDERED_ITEM_RE = re.compile(r"^\d{1,3}[.)](\s|$)")
+#: 独立成行的页码注释(格式由 page_result 定义,这里只判断「整行就是一条注释」)
+PAGE_MARK_LINE_RE = re.compile(rf"^\s*{PAGE_MARK_RE.pattern}\s*$")
+
+
+def _is_block_start(s: str) -> bool:
+    """行首是否为 markdown 块结构(标题/引用/表格/列表/代码/图片/HTML)。"""
+    return s.startswith(BLOCK_MARKERS) or bool(ORDERED_ITEM_RE.match(s))
+
+
+def _is_page_mark(line: str) -> bool:
+    """整行就是一条页码注释(`<!-- page 12 -->`)。"""
+    return bool(PAGE_MARK_LINE_RE.match(line.strip()))
 # 中文字符集(汉字 + 常见中文标点),用于空格修正
 CJK_CHARS = (
     "\u4e00-\u9fff"          # 汉字
@@ -49,20 +76,84 @@ CROSS_BLANK_MIN_CHARS = 10
 #: 诗句/居中标题/短标签 —— 拼进去会毁掉诗的换行结构。门槛低到只挡这些短行,
 #: 漏拼一处段落只是多一个换行,属于可接受的方向。
 ADJACENT_MIN_CHARS = 6
-#: 「诗行」上界:两行都不超过该长度、且都不以句末标点结尾 → **不拼接**。
+#: 「诗行」上界:两行都不超过该长度、且都不以句末标点结尾 → **不拼接**,并在这之后
+#: 补 Markdown 硬换行。两个动作必须用同一个门槛:既然已经判定「这不是被断开的段落」,
+#: 就得同时在渲染层保住换行 —— 只判不拼的话,pandoc 仍会把段落内的软换行渲染成空格,
+#: 13-18 字的现代诗/词照样在阅读器里挤成一行(硬换行门槛曾单独取 12,即此档漏网)。
 #: 中文正文排满的整行通常 20 字以上(双栏样本实测 24-33 字),而律诗/绝句 5-7 字、
 #: 词 3-9 字、现代诗多数 ≤18 字 —— 两者之间有很宽的间隔,阈值放在间隔里。
 VERSE_MAX_CHARS = 18
-#: 「诗行」加硬换行的上界(比不拼接更严)。不拼接只保住 book.md 的换行,pandoc
-#: 仍会把换行渲染成空格(诗在阅读器里还是挤成一行);**行尾两空格**(Markdown 硬换行)
-#: 才会真分行。它有视觉影响,所以只在证据更强时(连续两行都 ≤ 该长度)才用。
-VERSE_HARD_MAX_CHARS = 12
 #: Markdown 硬换行:行尾两个空格(pandoc/CommonMark 通用)。
 HARD_BREAK = "  "
 #: 标题行(`#` ~ `######` + 可选空格 + 文本)
 HEADING_RE = re.compile(r"^(#{1,6})\s*(.*)$")
 #: 行内 CJK 字符(判断「中文语境」)
 CJK_RE = re.compile(rf"[{CJK_CHARS}]")
+
+#: 围栏代码块标记(``` 开头即进入 / 退出代码块),与 markdown 惯例一致
+FENCE_MARK = "```"
+#: 行内代码:同一行内成对的单反引号片段(跨行、配不成对的一律不动)
+INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
+#: 占位符里用的哨兵字符:不可能出现在正常 Markdown 文本里
+SENTINEL = "\x00"
+#: 还原后仍残留的占位符(说明有规则改写了它 —— 那意味着代码块内容可能已损坏)
+MASK_LEFTOVER_RE = re.compile(rf"{SENTINEL}[fc]\d+{SENTINEL}")
+
+
+def _mask_code(md: str) -> tuple[str, list[tuple[str, str]]]:
+    """把围栏代码块与行内代码替换成惰性占位符,返回 (掩码文本, [(占位符, 原文)])。
+
+    为什么要整体掩码:清理规则全是「按行改写正文」的启发式,分头给每条规则加一次
+    「跳过代码块」既容易漏,也会随新规则再次失守。实测误伤(未掩码时):
+    围栏代码块里的 `123` / `32` 被当页码删除、`###` 被当空标题删除、
+    `"这是 测试 文本"` 被中文空格修正改写、重复出现的 `end` 被当页眉剔除;
+    行内代码 `` `git 中文 命令` `` 同样被改写。
+
+    占位符的约束(缺一不可,否则它自己会被规则吃掉):
+      - 唯一(不会触发「重复行」删除)、无 CJK、无空格、非纯数字;
+      - 围栏占位符以 `<` 开头 —— 与 markdown 块结构同类,拼接规则既不会吃掉它,
+        也不会把相邻正文拼进它。
+
+    围栏内的原文**逐字节保留**(含行尾空白):未闭合的围栏一路保护到文件末尾。
+    """
+    lines = md.split("\n")
+    out: list[str] = []
+    blocks: list[tuple[str, str]] = []          # [(占位符, 原文)]
+
+    def token(kind: str, text: str, wrapper: str = "") -> str:
+        """登记一块原文并返回占位符(返回值即插入文本的字符串)。"""
+        ph = f"{wrapper}{SENTINEL}{kind}{len(blocks)}{SENTINEL}{wrapper}"
+        blocks.append((ph, text))
+        return ph
+
+    i = 0
+    while i < len(lines):
+        if not lines[i].strip().startswith(FENCE_MARK):
+            out.append(lines[i])
+            i += 1
+            continue
+        j = i + 1
+        while j < len(lines) and not lines[j].strip().startswith(FENCE_MARK):
+            j += 1
+        end = min(j + 1, len(lines))                  # 含收尾围栏;未闭合则到文件尾
+        out.append(token("f", "\n".join(lines[i:end]), wrapper="<"))
+        i = end
+
+    masked = INLINE_CODE_RE.sub(lambda m: token("c", m.group(0)), "\n".join(out))
+    return masked, blocks
+
+
+def _unmask_code(md: str, blocks: list[tuple[str, str]]) -> str:
+    """还原代码块原文。还原不完整说明有规则改写了占位符 —— 报错,不静默丢内容。
+
+    只检查**占位符形状**而不是「文本里有没有哨兵字符」:输入文件本身带 NUL 时
+    不该让整本书转换失败(那是上游的问题,不是清理器的)。
+    """
+    for placeholder, original in blocks:
+        md = md.replace(placeholder, original)
+    if MASK_LEFTOVER_RE.search(md):
+        raise RuntimeError("清理器占位符还原失败(有规则改写了代码块占位符)")
+    return md
 
 
 #: 清理项开关名:config `clean:` 段、CLI `--clean-disable`、桌面端「清理选项」共用
@@ -154,7 +245,7 @@ class CleanReport:
 
 
 def _is_verse_line(line: str) -> bool:
-    """诗行候选:短、无句末标点、非 markdown 块结构。
+    """诗行候选:不超过 ``VERSE_MAX_CHARS``、无句末标点、非 markdown 块结构。
 
     **引用块(`>`)里的诗是最常见的形态**,所以先把引用前缀剥掉再判定;
     其他块结构(标题/列表/表格/图片/代码)一律不碰。
@@ -162,9 +253,9 @@ def _is_verse_line(line: str) -> bool:
     s = line.strip()
     while s.startswith(">"):
         s = s[1:].strip()
-    if not s or s.startswith(BLOCK_MARKERS):
+    if not s or _is_block_start(s):
         return False
-    if len(re.sub(r"\s+", "", s)) > VERSE_HARD_MAX_CHARS:
+    if len(re.sub(r"\s+", "", s)) > VERSE_MAX_CHARS:
         return False
     return s[-1] not in END_PUNCT
 
@@ -172,9 +263,10 @@ def _is_verse_line(line: str) -> bool:
 def _mark_verse_lines(md: str, report: CleanReport) -> str:
     """给连续短行(诗行)加 Markdown 硬换行,免得诗在阅读器里被渲染成一行。
 
-    判据:连续 ≥ 2 行都不超过 ``VERSE_HARD_MAX_CHARS``、都不以句末标点结尾、都不是
-    块结构(标题/引用/列表/表格/图片)。**空行会断开连续段**,所以空行分隔的单行诗
-    不会被处理(分段留白本身是原样保留的)。
+    判据与「不拼接」完全一致:连续 ≥ 2 行都不超过 ``VERSE_MAX_CHARS``、都不以句末标点
+    结尾、都不是块结构(标题/引用/列表/表格/图片)。**空行会断开连续段**,所以空行分隔
+    的单行诗不会被处理(分段留白本身是原样保留的)。页码注释行对连续性透明(见
+    ``_is_page_mark``):一首诗跨页时,页边界不该在诗中间留下一处缺硬换行的行。
 
     只补不拼:本函数只加行尾两空格(``HARD_BREAK``),因此必须排在行尾空白清理之后;
     对同一份文本重复运行不会叠加空格(先 rstrip 再补),幂等。
@@ -193,14 +285,22 @@ def _mark_verse_lines(md: str, report: CleanReport) -> str:
         if not _is_verse_line(lines[i]):
             i += 1
             continue
-        j = i
-        while j < len(lines) and _is_verse_line(lines[j]):
-            j += 1
-        if j - i >= 2:                                 # 连续 ≥2 行才当诗
-            for k in range(i, j - 1):                  # 段末行不需要硬换行
+        run = [i]                                      # 连续诗行的行号
+        cursor = i
+        while True:
+            k = cursor + 1
+            while k < len(lines) and _is_page_mark(lines[k]):
+                k += 1                                 # 页码注释透明
+            if k < len(lines) and _is_verse_line(lines[k]):
+                run.append(k)
+                cursor = k
+            else:
+                break
+        if len(run) >= 2:                              # 连续 ≥2 行才当诗
+            for k in run[:-1]:                         # 段末行不需要硬换行
                 out[k] = out[k].rstrip() + HARD_BREAK
                 marked += 1
-        i = j
+        i = cursor + 1
     if marked:
         report.add(f"诗行: 保留分行 {marked} 行")
     return "\n".join(out)
@@ -221,6 +321,9 @@ def clean_markdown(
 
     # 1. 统一换行
     md = md_text.replace("\r\n", "\n").replace("\r", "\n")
+
+    # 1.5 代码掩码:围栏代码块与行内代码对下面所有规则免疫(规则链只跑在正文上)
+    md, code_blocks = _mask_code(md)
 
     # 2. 剔除页码残留:独立纯数字行(1-3 位,前后可有空白)
     if options.page_numbers:
@@ -272,6 +375,9 @@ def clean_markdown(
     if options.join_lines:
         md = _mark_verse_lines(md, report)
 
+    # 10.8 还原代码块(必须排在所有规则之后:代码块原文逐字节回写)
+    md = _unmask_code(md, code_blocks)
+
     # 11. 图片引用存在性校验
     if options.images and images_dir is not None and images_dir.is_dir():
         existing = {p.name for p in images_dir.iterdir() if p.is_file()}
@@ -292,7 +398,7 @@ def _is_running_head_candidate(s: str, max_len: int) -> bool:
     """
     if not s or len(s) > max_len:
         return False
-    if s.startswith(BLOCK_MARKERS) or "[" in s or "]" in s:
+    if _is_block_start(s) or "[" in s or "]" in s:
         return False
     if s[-1] in END_PUNCT:
         return False
@@ -454,16 +560,24 @@ def _join_broken_lines(md: str) -> str:
     markdown 块标记开头(允许中间隔 1 个空行,如被删除页码留下的),
     视为同一段落被断行,拼接。
 
+    **页码注释(`<!-- page 12 -->`)是透明单元**:它标记页边界,不是内容,
+    既不参与拼接也不打断拼接。产物里每页之间都有一条注释(PyMuPDF / OCR 两条
+    链路都会写),不透明的话「被页边界断开的段落」永远拼不上 —— 该规则会在
+    真实产物上整体失效。拼接发生时注释落在拼接后的段落上方,注释本身一条不少。
+
     不拼接的单元之间**还原原有空行数**:旧实现统一按一个空行重建,会把
     紧凑列表与引用块的连续行拆成松散段落(渲染出多余段距),属于无谓的结构改写。
     """
     lines = md.split("\n")
-    units: list[tuple[str, str]] = []  # (kind, text),kind: code/table/text
+    units: list[tuple[str, str]] = []  # (kind, text),kind: code/table/text/mark
 
     i = 0
     while i < len(lines):
         s = lines[i].strip()
-        if s.startswith("```"):
+        if _is_page_mark(s):
+            units.append(("mark", s))
+            i += 1
+        elif s.startswith("```"):
             j = i
             buf = [lines[i]]
             j += 1
@@ -488,13 +602,20 @@ def _join_broken_lines(md: str) -> str:
 
     out: list[tuple[str, str, int]] = []      # (kind, text, 之前的空行数)
     pending: tuple[str, str, int] | None = None
+    marks: list[tuple[str, int]] = []         # 悬空的页码注释(文本, 之前的空行数)
     blanks = 0
 
     for kind, text in units:
         if kind == "text" and text == "":
             blanks += 1
             continue
+        if kind == "mark":
+            marks.append((text, blanks))       # 透明:先挂起,归属由下一个单元决定
+            blanks = 0
+            continue
         if pending is None:
+            out.extend(("mark", t, g) for t, g in marks)   # 文档开头的注释
+            marks = []
             pending = (kind, text, blanks)
             blanks = 0
             continue
@@ -514,8 +635,8 @@ def _join_broken_lines(md: str) -> str:
             pk == "text"
             and kind == "text"
             and gap <= 1
-            and not pt.startswith(BLOCK_MARKERS)
-            and not text.startswith(BLOCK_MARKERS)
+            and not _is_block_start(pt)
+            and not _is_block_start(text)
             and pt[-1] not in END_PUNCT
             and text[0] not in START_PUNCT
             # 短行不拼(诗句/年份/页眉/小标题):跨空行比相邻更保守
@@ -523,6 +644,8 @@ def _join_broken_lines(md: str) -> str:
             and not verse_pair
         )
         if joinable:
+            out.extend(("mark", t, g) for t, g in marks)   # 注释先落地
+            marks = []
             # 中英文断行拼接:两侧均为拉丁字母时补空格,否则直接相连
             sep = ""
             if pt and text and pt[-1].isascii() and pt[-1].isalpha() \
@@ -531,10 +654,13 @@ def _join_broken_lines(md: str) -> str:
             pending = ("text", pt + sep + text, pb)
         else:
             out.append(pending)
+            out.extend(("mark", t, g) for t, g in marks)
+            marks = []
             pending = (kind, text, gap)
         blanks = 0
     if pending is not None:
         out.append(pending)
+    out.extend(("mark", t, g) for t, g in marks)
 
     pieces: list[str] = []
     for kind, text, gap in out:

@@ -27,15 +27,26 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures" / "cleaner"
 
 #: 规则 → 覆盖它的样本(至少一个正向样本;含反例的样本会同时列在这里)
 GOLDEN_MAP: dict[str, list[str]] = {
-    "page_numbers": ["page_numbers"],              # 正例:独立页码行被删;反例:年份 1984、句内数字保留
-    "running_heads": ["running_heads"],            # 正例:重复 3 次被删;反例:只出现 2 次的短行保留
-    "join_lines": ["join_lines", "poetry_preserved", "poetry_quoted"],
-    #   正例:断行拼接(含「短行散文」那对);反例:代码块/表格不拼、诗行不拼且加硬换行
+    "page_numbers": ["page_numbers", "code_fence_protected"],
+    #   正例:独立页码行被删;反例:年份 1984、句内数字保留、代码块里的 123/32 保留
+    "running_heads": ["running_heads", "code_fence_protected"],
+    #   正例:重复 3 次被删;反例:只出现 2 次的短行保留、代码块里重复的 end 保留
+    "join_lines": ["join_lines", "poetry_preserved", "poetry_quoted", "poetry_modern",
+                   "page_markers", "ordered_list_toc"],
+    #   正例:断行拼接(含「短行散文」那对)、跨页码注释的拼接(page_markers)
+    #   反例:代码块/表格不拼、诗行不拼且加硬换行、标题/列表/引用跨注释不拼
+    #   (page_markers)、有序列表条目与页码行不被粘进相邻行(ordered_list_toc 取自
+    #   真实书籍目录:曾经 `…/30` + 页码 `I` + `5. 失踪与疯癫/35` 被拼成一整行)
     #   (hard break 也挂在 join_lines 开关下:它是「怎么处理换行」的同一件事)
-    "ocr_spaces": ["ocr_spaces"],                  # 正例:Py Mu PDF → PyMuPDF;反例:正常英文短语
-    "cjk_spaces": ["cjk_spaces", "should_not_touch"],   # 正例:汉字间空格;反例:中英之间空格保留
+    #   poetry_modern:13-18 字的现代诗行 —— 曾经只判「不拼接」而不加硬换行,
+    #   pandoc 把软换行渲染成空格,诗在阅读器里照样挤成一行(硬换行门槛与不拼接门槛必须一致)
+    "ocr_spaces": ["ocr_spaces", "code_fence_protected"],
+    #   正例:Py Mu PDF → PyMuPDF;反例:正常英文短语、代码块里的注释不被合并
+    "cjk_spaces": ["cjk_spaces", "should_not_touch", "code_fence_protected", "page_markers"],
+    #   正例:汉字间空格;反例:中英之间空格保留、代码块/行内代码里的空格保留
     "dup_headings": ["dup_headings"],              # 正例:相邻同名同级去重;反例:被正文隔开/不同级别保留
-    "headings": ["headings", "should_not_touch"],  # 正例:空标题删除 + 层级收敛;反例:正常层级不动
+    "headings": ["headings", "should_not_touch", "code_fence_protected"],
+    #   正例:空标题删除 + 层级收敛;反例:正常层级不动、代码块里的 ### 不动
     "images": ["images_refs"],                     # 正例:引用缺失上报;存在时不动
     # bold 不在此表:它不是纯文本清理规则,而是「开关 → 后端配置」落到 markdown/bold.py
     # (需要 PDF 字体信息),在 pymupdf 后端侧验证。
@@ -109,3 +120,15 @@ def test_clean_is_idempotent_on_every_sample(tmp_path: Path) -> None:
     for name in _cases():
         expected = _expected_text(name)
         assert clean_markdown(expected) == expected, f"样本 {name} 不幂等"
+
+
+def test_clean_is_idempotent_on_raw_inputs_too() -> None:
+    """幂等同样要在**未清理的输入**上成立(真实 book.md 的形态)。
+
+    只验期望输出是不够的:漂移往往发生在「第一次清理把文本改成某种形状、
+    第二次又改回去」的规则对之间(如硬换行 ↔ 行尾空白、拼接 ↔ 短行判定)。
+    """
+    for name in _cases():
+        source = _lf((FIXTURES / f"{name}.md").read_text(encoding="utf-8"))
+        once = clean_markdown(source)
+        assert clean_markdown(once) == once, f"样本 {name} 清理一次后不再幂等"
