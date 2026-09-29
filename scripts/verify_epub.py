@@ -31,24 +31,33 @@ SECTIONS = (
                     "mimetype_order", "opf_missing", "opf_invalid"),
      "META-INF/container.xml 与 OPF 正常"),
     ("[2] OPF(元数据 / manifest / spine)",
-     ("title_missing", "language_missing", "identifier_missing", "manifest_missing"),
-     "元数据完整,manifest 条目全部在包内找到"),
+     ("title_missing", "language_missing", "language_invalid", "date_invalid",
+      "identifier_missing", "manifest_missing", "spine_empty", "spine_broken"),
+     "元数据完整,manifest 条目全部在包内找到,spine 引用有效"),
     ("[3] 图片", ("mime_mismatch",), "图片条目 MIME 类型正确"),
-    ("[4] XHTML 内容检查(公式 / 脚注 / 图片引用)",
-     ("math_expected", "footnotes_expected", "image_missing", "images_expected", "empty_chapters"),
-     "公式 / 脚注 / 图片引用正常"),
-    ("[5] TOC", ("nav_missing",), "nav.xhtml 存在"),
+    ("[4] XHTML 内容检查(良构性 / 公式 / 脚注 / 图片引用)",
+     ("xhtml_invalid", "math_expected", "footnotes_expected", "image_missing",
+      "images_expected", "empty_chapters"),
+     "XHTML 均为良构 XML,公式 / 脚注 / 图片引用正常"),
+    ("[5] TOC(nav + ncx)",
+     ("nav_missing", "nav_invalid", "nav_not_toc", "toc_link_broken", "toc_empty",
+      "ncx_invalid", "ncx_link_broken"),
+     "nav 良构、目录链接目标存在"),
     ("[6] 内部链接", ("link_broken", "anchor_missing"), "内部链接均指向包内存在的文件"),
-    ("[7] CSS", ("css_missing",), "CSS 已嵌入"),
+    ("[7] CSS", ("css_missing", "css_unlinked", "css_link_broken"), "CSS 已嵌入且被正文引用"),
+    ("[8] 封面", ("cover_unreferenced", "cover_not_first"), "封面图确实被封面页引用、位于首位"),
 )
 
 # 内容完整性(v0.3.2 P0-3):对照源 Markdown 找内容丢失
 CONTENT_SECTIONS = (
-    ("[9] 内容对照(与源 Markdown 比)",
+    ("[10] 内容对照(与源 Markdown 比)",
      ("content_images_lost", "content_images_extra", "content_math_lost",
       "content_math_shrunk", "content_text_shrunk", "content_text_less",
-      "content_headings_lost", "content_page_coverage"),
-     "图片 / 公式 / 正文 / 标题数量与源 Markdown 一致"),
+      "content_headings_lost", "content_page_coverage", "content_breaks_lost",
+      "content_tables_lost", "content_tables_shrunk", "content_code_lost",
+      "content_code_shrunk", "content_footnotes_lost", "content_footnotes_shrunk",
+      "content_links_lost"),
+     "图片 / 公式 / 正文 / 标题 / 硬换行 / 表格 / 代码 / 脚注数量与源 Markdown 一致"),
 )
 
 
@@ -64,7 +73,16 @@ def print_report(epub_path: Path, result: VerifyResult, extract_dir: Path | None
           f"XHTML 内 <img> {result.stats.get('img_refs', 0)}, "
           f"MathML {result.stats.get('math', 0)}, "
           f"脚注区块 {result.stats.get('footnote_sections', 0)}, "
+          f"硬换行 {result.stats.get('hard_breaks', 0)}, "
+          f"表格 {result.stats.get('tables', 0)}, "
+          f"代码块 {result.stats.get('code_blocks', 0)}, "
+          f"封面 {'有' if result.stats.get('cover') else '无'}, "
           f"导航链接 {result.stats.get('toc_links', 0)}")
+    levels = ", ".join(f"h{i} {result.stats.get(f'headings_h{i}', 0)}"
+                       for i in range(1, 7)
+                       if result.stats.get(f"headings_h{i}"))
+    print(f"标题层级: {levels or '(无标题)'}"
+          f"(TOC {result.stats.get('toc_links', 0)} 条 / ncx {result.stats.get('ncx_points', 0)} 条)")
 
     shown: set[str] = set()
     for title, codes, ok_text in SECTIONS:
@@ -83,11 +101,15 @@ def print_report(epub_path: Path, result: VerifyResult, extract_dir: Path | None
 
     if content_result is not None:
         stats = content_result.stats
-        print("\n[9] 内容对照(与源 Markdown 比)")
+        print("\n[10] 内容对照(与源 Markdown 比)")
         print(f"  图片 {stats.get('content_md_images', 0)} → {stats.get('content_epub_images', 0)} 张, "
               f"公式 {stats.get('content_md_math', 0)} → {stats.get('content_epub_math', 0)} 处, "
               f"正文 {stats.get('content_md_chars', 0)} → {stats.get('content_epub_chars', 0)} 字, "
               f"标题 {stats.get('content_md_headings', 0)} → {stats.get('content_epub_headings', 0)} 个")
+        print(f"  硬换行 {stats.get('content_md_breaks', 0)} → {stats.get('content_epub_breaks', 0)} 处, "
+              f"表格 {stats.get('content_md_tables', 0)} → {stats.get('content_epub_tables', 0)} 张, "
+              f"代码块 {stats.get('content_md_code', 0)} → {stats.get('content_epub_code', 0)} 个, "
+              f"脚注 {stats.get('content_md_footnotes', 0)} → {stats.get('content_epub_footnotes', 0)} 条")
         if not content_result.issues:
             print(f"  [ OK ] {CONTENT_SECTIONS[0][2]}")
         for issue in content_result.issues:
@@ -105,7 +127,7 @@ def print_report(epub_path: Path, result: VerifyResult, extract_dir: Path | None
     if extract_dir is not None and result.readable:
         with zipfile.ZipFile(epub_path) as zf:
             zf.extractall(extract_dir)
-        print(f"\n[8] 已解包到 {extract_dir}")
+        print(f"\n[9] 已解包到 {extract_dir}")
 
     print(f"\n=== 结果: {result.summary()} ===")
 

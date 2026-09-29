@@ -16,9 +16,14 @@ import pytest
 import batch
 from conftest import build_epub, rewrite_epub, write_png
 from epub.content import (
+    markdown_code_block_count,
+    markdown_footnote_defs,
+    markdown_hard_breaks,
     markdown_heading_count,
     markdown_images,
+    markdown_link_count,
     markdown_math_count,
+    markdown_table_count,
     markdown_text_chars,
     verify_content,
 )
@@ -47,6 +52,31 @@ def test_markdown_parsers() -> None:
     assert markdown_math_count(md) == 2
     assert markdown_heading_count(md) == 2
     assert markdown_text_chars(md) > 10
+
+
+def test_markdown_structure_counters() -> None:
+    """分行 / 表格 / 代码 / 脚注 / 链接的源侧计数(内容对照的分子)。"""
+    md = ("# 书\n\n第一行  \n第二行(行尾两空格 = 硬换行)\n\n"
+          "| 甲 | 乙 |\n|---|---|\n| 1 | 2 |\n\n"
+          "```\ncode\n```\n\n"
+          "正文末尾有注释[^1]。\n\n[^1]: 脚注内容。\n\n"
+          "见 [链接](https://example.com)。\n")
+
+    assert markdown_hard_breaks(md) == 1
+    assert markdown_table_count(md) == 1
+    assert markdown_code_block_count(md) == 1
+    assert markdown_footnote_defs(md) == 1
+    assert markdown_link_count(md) == 1
+
+
+def test_counters_ignore_code_blocks() -> None:
+    """代码块里的 `  ` / `|---|` / `[^1]:` 都是示例文本,不能被当成结构。"""
+    md = "```\n第一行  \n| a | b |\n|---|---|\n[^1]: x\n```\n"
+
+    assert markdown_hard_breaks(md) == 0
+    assert markdown_table_count(md) == 0
+    assert markdown_footnote_defs(md) == 0
+    assert markdown_code_block_count(md) == 1
 
 
 # ---------------------------------------------------------------- 内容丢失(必须报错)
@@ -105,6 +135,132 @@ def test_page_coverage_below_expectation_warns(tmp_path: Path) -> None:
     # 没给 expected_pages 就不该报(文本版 Markdown 没有页码注释属正常)
     assert not any(i.code == "content_page_coverage"
                    for i in verify_content(md, epub).warnings)
+
+
+# ---------------------------------------------------------------- 结构侧的内容信号
+
+def test_poetry_hard_breaks_survive_into_the_epub(tmp_path: Path) -> None:
+    """诗行靠 Markdown 硬换行才在阅读器里真的分行(`<br>`),不能被压成一行。"""
+    src = tmp_path / "src"
+    verse = ("## 静夜思\n\n床前明月光  \n疑是地上霜  \n举头望明月  \n低头思故乡\n")
+    epub = build_epub(src, tmp_path / "verse.epub", title="诗选", body=verse,
+                      with_image=False, with_math=False)
+
+    report = verify_content(src / "book.md", epub)
+
+    # 前 3 行带硬换行,第 4 行是段末(段末的行尾空格 pandoc 不渲染成 <br>)
+    assert report.stats["content_md_breaks"] == 3
+    assert report.stats["content_epub_breaks"] == 3
+    assert report.issues == [], [i.message for i in report.issues]
+
+
+def test_trailing_break_at_paragraph_end_is_not_counted() -> None:
+    """段末的行尾空格不产生 `<br>`,源侧也不能把它算成硬换行(否则平白告警)。"""
+    assert markdown_hard_breaks("只有一行  \n\n下一段\n") == 0
+    assert markdown_hard_breaks("第一行  \n第二行\n\n下一段\n") == 1
+
+
+def test_flattened_poetry_is_reported(tmp_path: Path) -> None:
+    """源 Markdown 有硬换行、产物里一处都没有 → 诗被压成一行,必须报出来。"""
+    src = tmp_path / "src"
+    flat = "## 静夜思\n\n床前明月光\n疑是地上霜\n举头望明月\n低头思故乡\n"
+    epub = build_epub(src, tmp_path / "flat.epub", title="诗选", body=flat,
+                      with_image=False, with_math=False)
+    md = tmp_path / "verse.md"
+    md.write_text("# 诗选\n\n" + flat.replace("光\n", "光  \n"), encoding="utf-8")
+
+    report = verify_content(md, epub)
+
+    assert any(i.code == "content_breaks_lost" for i in report.warnings)
+    assert report.stats["content_epub_breaks"] == 0
+
+
+def test_lost_tables_and_code_are_reported(tmp_path: Path) -> None:
+    """表格 / 代码块整批没落进产物 → 判 error(结构上看不出来,内容却没了)。"""
+    src = tmp_path / "src"
+    epub = build_epub(src, tmp_path / "plain.epub", title="样本书",
+                      body="只有正文,句号结尾。", with_image=False, with_math=False)
+    md = tmp_path / "rich.md"
+    md.write_text("# 样本书\n\n正文,句号结尾。\n\n"
+                  "| 甲 | 乙 |\n|---|---|\n| 1 | 2 |\n\n"
+                  "```\nprint(1)\n```\n", encoding="utf-8")
+
+    report = verify_content(md, epub)
+    codes = [i.code for i in report.errors]
+
+    assert "content_tables_lost" in codes
+    assert "content_code_lost" in codes
+
+
+def test_table_and_code_survive_into_the_epub(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    body = ("| 甲 | 乙 |\n|---|---|\n| 1 | 2 |\n\n```\nprint(1)\n```\n")
+    epub = build_epub(src, tmp_path / "rich.epub", title="样本书", body=body,
+                      with_image=False, with_math=False)
+
+    report = verify_content(src / "book.md", epub)
+
+    assert report.stats["content_md_tables"] == report.stats["content_epub_tables"] == 1
+    assert report.stats["content_md_code"] == report.stats["content_epub_code"] == 1
+    assert report.issues == [], [i.message for i in report.issues]
+
+
+def test_lost_footnotes_are_reported(tmp_path: Path) -> None:
+    """脚注定义在源里有、产物里一处脚注都没有 = 整批注释消失。"""
+    src = tmp_path / "src"
+    epub = build_epub(src, tmp_path / "nofn.epub", title="样本书",
+                      body="正文,句号结尾。", with_image=False, with_math=False)
+    md = tmp_path / "fn.md"
+    md.write_text("# 样本书\n\n正文末尾有注释[^1]。\n\n[^1]: 脚注内容。\n", encoding="utf-8")
+
+    report = verify_content(md, epub)
+
+    assert any(i.code == "content_footnotes_lost" for i in report.errors)
+
+
+def test_footnotes_survive_into_the_epub(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    body = "正文末尾有注释[^1]。\n\n[^1]: 脚注内容,说明来龙去脉。\n"
+    epub = build_epub(src, tmp_path / "fn.epub", title="样本书", body=body,
+                      with_image=False, with_math=False)
+
+    report = verify_content(src / "book.md", epub)
+
+    assert report.stats["content_md_footnotes"] == 1
+    assert report.stats["content_epub_footnotes"] >= 1
+    assert report.issues == [], [i.message for i in report.issues]
+    # 脚注区块与引用都要在(阅读器要能点进去)
+    assert verify_epub(epub).stats["footnote_sections"] >= 1
+
+
+def test_lost_links_warn(tmp_path: Path) -> None:
+    """链接全丢只告警(产物里的链接含 pandoc 自动生成的脚注回链,数量不可直接比)。"""
+    src = tmp_path / "src"
+    epub = build_epub(src, tmp_path / "nolink.epub", title="样本书",
+                      body="只有正文,句号结尾。", with_image=False, with_math=False)
+    md = tmp_path / "link.md"
+    md.write_text("# 样本书\n\n见 [官方文档](https://example.com)。\n", encoding="utf-8")
+
+    report = verify_content(md, epub)
+
+    assert any(i.code == "content_links_lost" for i in report.warnings)
+
+
+def test_ocr_picture_text_break_is_counted(tmp_path: Path) -> None:
+    """云端 OCR 的图片文字块用原始 HTML `<br>` 分行,同样计入硬换行。"""
+    src = tmp_path / "src"
+    body = "<!-- Start of picture text -->\n出版社<br>版权所有\n"
+    epub = build_epub(src, tmp_path / "br.epub", title="样本书", body=body,
+                      with_image=False, with_math=False)
+
+    md = tmp_path / "book.md"
+    md.write_text(f"# 样本书\n\n{body}", encoding="utf-8")
+
+    report = verify_content(md, epub)
+
+    assert report.stats["content_md_breaks"] == 1
+    assert report.stats["content_epub_breaks"] >= 1
+    assert not any(i.code == "content_breaks_lost" for i in report.issues)
 
 
 # ---------------------------------------------------------------- 结构侧的内容信号

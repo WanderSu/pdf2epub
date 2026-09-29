@@ -113,6 +113,47 @@ def rewrite_epub(src: Path, dst: Path, *, drop: set[str] | None = None,
     return dst
 
 
+def truncate_file(path: Path, *, keep_ratio: float = 0.3) -> Path:
+    """把文件截断(模拟「写到一半进程就没了」的产物):大小仍 > 0,时间戳照常更新。"""
+    data = path.read_bytes()
+    path.write_bytes(data[: max(1, int(len(data) * keep_ratio))])
+    return path
+
+
+def corrupt_zip_member(path: Path) -> Path:
+    """把一个 zip 条目的**压缩数据**改坏(返回被改坏的条目名)。
+
+    文件的条目表、大小、时间戳一切正常,只有数据区坏了 —— 正是「看文件大小和
+    mtime 判断是否转好」漏掉的那种产物。改完顺手断言样本真的坏了,避免夹具
+    本身失效让用例假绿。
+    """
+    import zipfile as _zip
+    import zlib as _zlib
+
+    with _zip.ZipFile(path) as zf:
+        candidates = [i for i in zf.infolist()
+                      if not i.is_dir() and i.compress_size > 8]
+        target = next((i for i in candidates if i.filename.endswith(".xhtml")), candidates[0])
+    with open(path, "r+b") as f:
+        f.seek(target.header_offset)
+        header = f.read(30)
+        name_len = int.from_bytes(header[26:28], "little")
+        extra_len = int.from_bytes(header[28:30], "little")
+        pos = target.header_offset + 30 + name_len + extra_len + 1
+        f.seek(pos)
+        byte = f.read(1)
+        f.seek(pos)
+        f.write(bytes([byte[0] ^ 0xFF]))
+
+    with _zip.ZipFile(path) as zf:       # 自检:没改坏就说明夹具写错了
+        try:
+            broken = zf.testzip()
+        except (_zip.BadZipFile, _zlib.error):
+            broken = target.filename
+    assert broken is not None, f"夹具没把 {target.filename} 改坏"
+    return path
+
+
 @pytest.fixture(scope="session")
 def sample_epub(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """一份结构完整的 EPUB(含图片 + MathML 公式)。"""
