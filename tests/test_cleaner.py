@@ -126,6 +126,201 @@ def test_heading_text_untouched() -> None:
     assert only(md, headings=True) == md
 
 
+# ---------------------------------------------------------------- 代码块保护
+
+#: 代码块里的每一行都是「会被规则误伤」的形状:纯数字行、重复短行、中文间空格、
+#: 行尾空白、`#` 开头的注释、缩进。
+HAZARDOUS_FENCE = (
+    "```text\n"
+    "123\n"
+    "\n"
+    "32\n"
+    "端口 8080 与 主机 名\n"
+    "注释   缩进保留\n"
+    "end\n"
+    "end\n"
+    "end\n"
+    "###\n"
+    "#### 注释\n"
+    "尾部空白   \n"
+    "```"
+)
+
+
+def test_fenced_code_is_byte_identical() -> None:
+    """围栏代码块逐字节不变(页码/页眉/空格/标题/行尾空白规则都不得打进代码)。"""
+    md = f"{HAZARDOUS_FENCE}\n\n正文 中文 之间 有空 格。\n"
+    out = clean(md)
+    assert HAZARDOUS_FENCE in out
+    assert "正文中文之间有空格。" in out
+
+
+def test_fenced_code_keeps_digit_lines() -> None:
+    """代码块里的独立数字行不是页码。"""
+    out = clean("```text\n123\n\n32\n```\n")
+    assert out == "```text\n123\n\n32\n```"
+
+
+def test_fenced_code_keeps_repeated_short_lines() -> None:
+    """代码块里重复出现的短行不是页眉页脚。"""
+    out = clean("```text\nend\nend\nend\n```\n\n正文一,句号结尾。\n\n正文二,句号结尾。\n\n正文三,句号结尾。\n")
+    assert out.count("end") == 3
+
+
+def test_fenced_code_headings_untouched() -> None:
+    """代码块里的 `#` 注释不是标题(空标题删除 / 层级收敛都不得生效)。"""
+    out = clean("```text\n# 注释\n###\n#### 二级\n```\n")
+    assert out == "```text\n# 注释\n###\n#### 二级\n```"
+
+
+def test_fenced_code_trailing_whitespace_kept() -> None:
+    out = clean("```text\n代码   尾部空白   \n```\n")
+    assert out == "```text\n代码   尾部空白   \n```"
+
+
+def test_inline_code_untouched() -> None:
+    """行内代码里的空格是代码的一部分,不能被中文空格修正删掉。"""
+    out = clean("用 `git 中文 命令` 试一下。\n")
+    assert out == "用 `git 中文 命令` 试一下。"
+
+
+def test_unterminated_fence_protected_to_end() -> None:
+    """未闭合的围栏一路保护到文件末尾(不把代码当正文改写)。"""
+    md = "正文,句号结尾。\n\n```text\n123\n原文   空格\n"
+    assert clean(md) == md
+
+
+def test_fence_content_never_triggers_reports() -> None:
+    """代码块不该产生「诗行/页眉/OCR 空格」之类的清理报告。"""
+    from markdown.cleaner import CleanReport
+
+    report = CleanReport()
+    clean_markdown(HAZARDOUS_FENCE + "\n", report=report)
+    assert report.issues == []
+
+
+def test_input_with_nul_byte_is_not_fatal() -> None:
+    """输入文件自带 NUL 字节时不该让清理失败(占位符检查只看占位符形状)。"""
+    out = clean("正\x00文,句号结尾。\n")
+    assert "\x00" in out
+
+
+# ---------------------------------------------------------------- 页码注释(跨页)
+
+def test_paragraph_joined_across_page_marker() -> None:
+    """被页边界断开的正文必须拼回去 —— 页码注释不是段落边界。"""
+    md = ("<!-- page 12 -->\n正文前半句写到这里\n\n"
+          "<!-- page 13 -->\n后半句在下一页接上,并以句号结尾。\n")
+    out = clean(md)
+    assert "正文前半句写到这里后半句在下一页接上,并以句号结尾。" in out
+
+
+def test_page_markers_preserved() -> None:
+    """注释本身一条不少(内容对照要用它算页覆盖)。"""
+    md = ("<!-- page 12 -->\n正文前半句\n\n<!-- page 13 -->\n后半句接上。\n\n"
+          "<!-- page 14 -->\n下一段,句号结尾。\n")
+    out = clean(md)
+    assert out.count("<!-- page") == 3
+
+
+def test_poem_not_joined_across_page_marker() -> None:
+    """诗跨页仍然不拼接(诗行判据在注释两侧同样生效)。"""
+    md = "<!-- page 20 -->\n床前明月光\n疑是地上霜\n\n<!-- page 21 -->\n举头望明月\n低头思故乡\n"
+    out = clean(md)
+    assert "床前明月光  \n疑是地上霜" in out
+    assert "举头望明月  \n低头思故乡" in out
+
+
+def test_verse_run_across_marker_without_blank_line() -> None:
+    """注释直接夹在诗行之间时也透明:该补的硬换行不能少。"""
+    out = clean("床前明月光\n<!-- page 9 -->\n疑是地上霜\n")
+    assert out == "床前明月光  \n<!-- page 9 -->\n疑是地上霜"
+
+
+@pytest.mark.parametrize("block, tail", [
+    ("# 第三章", "# 第三章"),
+    ("- 列表项一", "- 列表项一"),
+    ("> 引用一行", "> 引用一行"),
+    ("| A | B |\n| --- | --- |\n| 1 | 2 |", "| A | B |\n| --- | --- |\n| 1 | 2 |"),
+    ("```py\nx = 1\n```", "```py\nx = 1\n```"),
+])
+def test_block_structure_not_joined_across_marker(block: str, tail: str) -> None:
+    """标题/列表/引用/表格/代码块是块结构,跨页边界也不与上一行拼接。"""
+    md = f"上一页的正文结尾没有标点\n\n<!-- page 31 -->\n{block}\n"
+    out = clean(md)
+    assert tail in out
+    assert "结尾没有标点" + tail.split("\n")[0] not in out
+
+
+# ---------------------------------------------------------------- 有序列表标记
+
+def test_ordered_list_items_not_joined() -> None:
+    """`3. ` 起的条目也是列表项 —— 曾经只认 `1. ` `2. `,第 3 条起会被拼成一行。"""
+    md = "# 目录\n\n1. 第一项/3\n\n2. 第二项/8\n\n3. 第三项/27\n4. 第四项/30\n\nIV\n\n5. 第五项/35\n"
+    assert clean(md) == md.rstrip("\n")
+
+
+def test_ordered_list_parenthesis_style() -> None:
+    """`12) ` 也是列表标记(数字 + 右括号)。"""
+    out = clean("正文上一行没有标点\n\n12) 第十二项\n")
+    assert out.startswith("正文上一行没有标点\n\n12)")
+    assert "标点12)" not in out
+
+
+def test_decimal_number_is_not_a_list_marker() -> None:
+    """`3.14` 不是列表标记(数字后必须有空白)。"""
+    out = clean("正文上一行没有标点\n\n3.14\n")
+    assert "标点\n\n3.14" in out
+
+
+# ---------------------------------------------------------------- 诗行边界
+
+def _line(n: int) -> str:
+    return "一" * n
+
+
+def test_verse_threshold_is_verse_max_chars() -> None:
+    """两行都在 VERSE_MAX_CHARS 以内 → 诗行(不拼接 + 硬换行);超出 → 正常拼接。
+
+    「不拼接」与「补硬换行」必须用同一个门槛:两者错开时,13-18 字的诗行
+    会既不拼接、又拿不到硬换行,在阅读器里照样挤成一行。
+    """
+    from markdown.cleaner import VERSE_MAX_CHARS
+
+    inside = clean(f"{_line(VERSE_MAX_CHARS)}\n{_line(VERSE_MAX_CHARS)}\n")
+    assert inside == f"{_line(VERSE_MAX_CHARS)}  \n{_line(VERSE_MAX_CHARS)}"
+
+    outside = clean(f"{_line(VERSE_MAX_CHARS + 1)}\n{_line(VERSE_MAX_CHARS + 1)}\n")
+    assert outside == _line(VERSE_MAX_CHARS + 1) + _line(VERSE_MAX_CHARS + 1)
+
+
+def test_short_lines_with_end_punctuation_are_joined() -> None:
+    """短行散文断行:下一行以句末标点结尾 → 是正常断行,拼接,不当诗。"""
+    out = clean("他走进屋子看看\n桌上放着一封信。\n")
+    assert out == "他走进屋子看看桌上放着一封信。"
+
+
+def test_two_short_lines_without_punctuation_treated_as_verse() -> None:
+    """已知边界(保守取舍):两行都短且都没有句末标点 → 当诗行处理。
+
+    代价是这种形状的散文断行不会被拼成一段(而是保留分行)。反向代价更大 ——
+    七言诗每行 7 字,只要按长度拼就必然把整首诗拼成一行,所以这里选「保留分行」。
+    真实书籍里排满的正文行普遍 20 字以上,与诗行之间有很宽的间隔。
+    """
+    out = clean("他走进屋子看看\n桌上放着一封信\n")
+    assert out == "他走进屋子看看  \n桌上放着一封信"
+
+
+# ---------------------------------------------------------------- 页码边界
+
+def test_page_number_rule_keeps_years_and_long_numbers() -> None:
+    """1-3 位独立数字行当页码删;4 位(年份)与带小数点的行保留。"""
+    out = clean("正文一,句号结尾。\n\n123\n\n2024\n\n正文二,句号结尾。\n\n3.14\n")
+    assert "\n123\n" not in out
+    assert "2024" in out
+    assert "3.14" in out
+
+
 # ---------------------------------------------------------------- 开关与配置
 
 def test_clean_keys_cover_all_option_fields() -> None:
