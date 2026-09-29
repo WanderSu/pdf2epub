@@ -20,10 +20,15 @@
 | `shards` | `total` / `ranges`(MinerU 分片的真实页码区间) |
 | `verify` | `errors` / `warnings` / `message` |
 | `warning` | `code` / `message` |
-| `error` | `code` / `message` |
+| `retry` | `attempt` / `retries` / `wait` / `message`(第 N 次尝试失败、即将重跑) |
+| `error` | `code` / `message`(见 `error_code()`:GUI 按 code 分类显示) |
+| `skip` | `file` / `epub`(**已有产物,本次未转换** —— 不是 complete) |
 | `complete` | `file` / `epub` / `backend` / `pdf_type` / `seconds` |
 
 进度权重之和必须为 1.0(前端按「已完成阶段权重 + 当前阶段权重 × 完成比」算百分比)。
+
+**`skip` 与 `complete` 是两种终态**,别让消费者把它们折算成同一个「成功」:前者是
+「本次什么都没做」(产物早已存在),后者才是「本次跑完了整条链路」。
 """
 from __future__ import annotations
 
@@ -94,3 +99,42 @@ def progress(stage_name: str, current: int, total: int, **fields: Any) -> None:
     """阶段内进度(如 OCR 的第 N/M 段);`total<=0` 时不发,避免前端除零。"""
     if total > 0:
         emit("progress", stage=stage_name, current=current, total=total, **fields)
+
+
+#: 异常类名 → 错误码。GUI 按错误码分类显示(输入/配置/环境/OCR/输出/校验),
+#: 从而不必去解析中文文案。**按类名而非 isinstance 匹配**:batch 会 import events,
+#: 这里反向 import 会形成循环;对应的真实异常类在测试里逐一钉住(改名会当场失败)。
+ERROR_CODE_BY_TYPE: dict[str, str] = {
+    "PandocMissingError": "missing_dependency",   # 环境缺失(pandoc 不在 PATH)
+    "VerifyError": "verify_failed",               # 产物校验未通过(--strict)
+    "MinerUError": "ocr_failed",
+    "PaddleOCRError": "ocr_failed",
+    "BackendError": "backend_failed",
+    "FileNotFoundError": "input_error",
+    "FileDataError": "input_error",               # PyMuPDF:文档损坏/打不开
+    "EmptyFileError": "input_error",
+    "IsADirectoryError": "input_error",
+    "NotADirectoryError": "input_error",
+    "PermissionError": "output_error",            # 写盘/文件被占用(读取侧走 PyMuPDF 自己的异常)
+    "OSError": "output_error",
+    "ValueError": "config_error",
+    "KeyError": "config_error",
+}
+
+
+def error_code(error: BaseException, default: str = "convert_failed") -> str:
+    """异常 → 事件里的 `code`(前端据此分类显示错误,不改异常体系本身)。
+
+    沿异常的 MRO 取第一个命中的类名(子类优先:`MinerUError` 归 OCR,退一步才是
+    `BackendError`);认不出来时返回调用方给的 `default`(如 `name_conflict`、
+    `convert_failed`),也就是「未知/意外」这一类。
+    """
+    for cls in type(error).__mro__:
+        code = ERROR_CODE_BY_TYPE.get(cls.__name__)
+        if code:
+            return code
+    # 最后手段:epub/pandoc.py 里两条 pandoc 执行失败是普通 RuntimeError(没有专属
+    # 异常类,而它的异常体系不在本次改动范围)——只认我们自己的文案,不加通用兜底。
+    if type(error).__name__ == "RuntimeError" and "pandoc" in str(error).lower():
+        return "pandoc_error"
+    return default

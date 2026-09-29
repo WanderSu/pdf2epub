@@ -53,6 +53,21 @@ def test_estimate_shards() -> None:
     assert estimate_shards(50, 0) == 1        # 非法上限 → 退回默认值
 
 
+@pytest.mark.parametrize("pages", [1, 2, 200, 201, 302, 401, 450, 1200])
+def test_preflight_shard_count_matches_the_backend_actual_split(pages: int) -> None:
+    """预检报的分片数必须等于后端真正切出来的 page_ranges 段数。
+
+    预检是给用户决定「要不要花云端额度」用的:如果它说 1 段、实际提 3 段(或反过来),
+    额度判断和分批决策都会错。这里直接把两边的口径钉在一起。
+    """
+    from backends.mineru_backend import MinerUAdapter
+
+    adapter = MinerUAdapter(token="fake-token", max_pages_per_task=200)
+    ranges = adapter._build_page_ranges(pages)
+    actual = len(ranges) if ranges else 1          # 不超过上限 → 整本一段,不写 page_ranges
+    assert actual == estimate_shards(pages, max_pages_per_task(CFG, "mineru"))
+
+
 def test_max_pages_per_task_fallback() -> None:
     assert max_pages_per_task(CFG, "mineru") == 200
     assert max_pages_per_task({}, "mineru") == 200

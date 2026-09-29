@@ -1,11 +1,14 @@
-"""MinerU 分片与续跑集成测试(v0.3.2 P0-2)。
+"""MinerU 分片与续跑集成测试(v0.3.2 P0-2 / v0.4.2 段级结果缓存)。
 
-目标:把「>200 页自动分片」「段序合并」「中断后复用已提交任务」「--no-resume」
-这些**只有真实云端才会暴露**的行为,搬到离线、可重复的测试里。
+目标:把「>200 页自动分片」「段序合并」「中断后复用已提交任务」「已完成段不重复 OCR」
+「只补失败/缺失的段」「--no-resume」这些**只有真实云端才会暴露**的行为,搬到离线、
+可重复的测试里。
 
 做法:用假云端替换 `mineru_backend.requests` —— 一个记录调用并吐出预设状态的
 假 HTTP 层(提交/上传/轮询/下载全走它,包括真的解一个真 zip),所以被测的是
-`MinerUAdapter` 的完整流程,而不是被 mock 掉的内部函数。
+`MinerUAdapter` 的完整流程,而不是被 mock 掉的内部函数。假云端有**条目级**旋钮
+(`stuck` / `fail_items`),可以演「一部分段完成、某段卡住或判死,之后云端恢复」,
+这是验证「重跑不重复计费」的关键。
 
 约定:测试里**不许出现真实网络调用**;需要「云端中断」时用 `timeout=0` 模拟。
 """
@@ -23,7 +26,7 @@ import requests
 
 import convert
 from backends import mineru_backend
-from backends.base import ConversionResult
+from backends.base import ConversionResult, TaskCache, file_fingerprint, is_retryable
 from backends.mineru_backend import MinerUAdapter, MinerUError
 from conftest import make_mixed_pdf, make_paged_pdf, write_png
 from page_result import page_marks
@@ -62,8 +65,15 @@ class FakeMinerUCloud:
 
     - `pending_polls`:前 N 次轮询返回 running(模拟排队/解析中)
     - `fail_batches`:前 N 个 batch 的条目直接 failed(模拟云端解析失败)
+    - `fail_batch_ids`:指定 batch id 全 failed(用于「第 2 段失败」这类脚本)
+    - `fail_items` / `fail_msg_items`:指定**条目**(data_id)失败及其错误信息
+    - `stuck`:指定条目永远 running(模拟云端迟迟出不来结果 → 轮询超时)
+    - `fail_downloads`:前 N 次结果下载返回 500(模拟「云端有结果,我们没接住」)
     - `fail_msg`:失败时返回的 err_msg
     - `stale`:所有轮询都返回空列表(模拟缓存里的 batch 已失效/无权限)
+
+    条目级的旋钮(stuck/fail_items)用**可变的 set**,测试可以中途清空它们来表示
+    「云端恢复了」,从而验证重跑只补缺失的段、不重复买已完成的段。
     """
 
     def __init__(self, *, pending_polls: int = 0, fail_batches: int = 0,
@@ -72,6 +82,11 @@ class FakeMinerUCloud:
         self.fail_batches = fail_batches
         self.fail_msg = fail_msg
         self.stale = stale
+        self.stuck: set[str] = set()
+        self.fail_items: set[str] = set()
+        self.fail_batch_ids: set[str] = set()
+        self.fail_msg_items: dict[str, str] = {}
+        self.fail_downloads = 0
         self.batches: dict[str, dict] = {}
         self.posts: list[dict] = []
         self.uploads: list[str] = []
@@ -100,6 +115,9 @@ class FakeMinerUCloud:
 
     def get(self, url: str, *, headers=None, stream=False, timeout=None) -> FakeResponse:
         if url.startswith("https://download.local/"):
+            if self.fail_downloads > 0:              # 云端有结果,但这次没接住
+                self.fail_downloads -= 1
+                return FakeResponse(status_code=500)
             _batch_id, data_id = url.rstrip("/").rsplit("/", 2)[-2:]
             return FakeResponse(content=self._zip_bytes(data_id))
         return self._batch_result(url.rstrip("/").rsplit("/", 1)[-1])
@@ -111,18 +129,22 @@ class FakeMinerUCloud:
         if batch is None or self.stale:
             return FakeResponse(payload={"code": 0, "data": {"extract_result": []}})
         pending = self.polls <= self.pending_polls
-        failing = int(batch_id.split("-")[1]) <= self.fail_batches
+        failing = (int(batch_id.split("-")[1]) <= self.fail_batches
+                   or batch_id in self.fail_batch_ids)
         items = []
         for entry in batch["entries"]:
+            key = entry.get("data_id") or entry["name"]
             item = {
                 "data_id": entry.get("data_id") or entry["name"],
                 "file_name": entry["name"],
                 "state": "running" if pending else "done",
             }
-            if not pending:
-                if failing:
+            if key in self.stuck:
+                item["state"] = "running"        # 永远不出结果(触发轮询超时)
+            elif not pending:
+                if key in self.fail_items or failing:
                     item["state"] = "failed"
-                    item["err_msg"] = self.fail_msg
+                    item["err_msg"] = self.fail_msg_items.get(key, self.fail_msg)
                 else:
                     item["full_zip_url"] = f"https://download.local/{batch_id}/{item['data_id']}"
             items.append(item)
@@ -130,13 +152,17 @@ class FakeMinerUCloud:
 
     @staticmethod
     def _zip_bytes(data_id: str) -> bytes:
-        """每个分段固定产出:full.md + images/fig.png(各段同名,用于测重名处理)。"""
+        """每个分段固定产出:full.md + images/fig.png,用于测跨段重名处理。
+
+        图片字节带上段标识 → 不同段里的同名图是**内容不同的两张图**,合并时必须
+        改名(加段前缀)并同步改引用,否则后一段的图会盖掉前一段的。
+        """
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w") as zf:
             zf.writestr(f"{data_id}/full.md",
                         f"# 分段 {data_id}\n\n这是 {data_id} 的正文段落,以句号结尾。\n\n"
                         f"![图](images/fig.png)\n")
-            zf.writestr(f"{data_id}/images/fig.png", b"\x89PNG-fake")
+            zf.writestr(f"{data_id}/images/fig.png", f"\x89PNG-fake-{data_id}".encode())
         return buf.getvalue()
 
 
@@ -444,3 +470,313 @@ def test_hybrid_resume_reuses_the_same_work_dir(tmp_path, monkeypatch) -> None:
     assert ocr.dirs == ["_scan_p3", "_scan_p3", "_scan_p6"]
     assert ocr.dirs[0] == ocr.dirs[1]                 # 同一区段续跑 → 同一目录(缓存命中)
     assert not list(work.glob("_scan_p*"))            # 成功后清理
+
+
+class FingerprintOCR:
+    """假 OCR:像真后端那样按**收到的 PDF 内容指纹**复用云端任务。
+
+    与 FlakyOCR 的差别是关键:FlakyOCR 只写一个不含指纹的 `.ocr_task.json`、从不
+    load,所以「临时纯图 PDF 每次渲染字节不同 → 指纹对不上 → 缓存永不命中」这个
+    真实缺陷在它身上测不出来。这里用真的 TaskCache。
+    """
+
+    name = "mineru"
+
+    def __init__(self, fail_next: bool = True) -> None:
+        self.fail_next = fail_next        # 只让第一次「新提交」中断一次
+        self.submits = 0
+        self.resumes = 0
+
+    def convert(self, pdf_path, work_dir) -> ConversionResult:
+        pdf_path, work_dir = Path(pdf_path), Path(work_dir)
+        work_dir.mkdir(parents=True, exist_ok=True)
+        cache = TaskCache(work_dir, self.name)
+        hit = cache.load(pdf_path, "original")
+        if hit:
+            self.resumes += 1
+        else:
+            self.submits += 1
+            cache.save(pdf_path, "original", batch_id=f"batch-{self.submits}")
+            if self.fail_next:
+                self.fail_next = False
+                raise RuntimeError("云端任务中断(模拟)")
+        images = work_dir / "images"
+        images.mkdir(parents=True, exist_ok=True)
+        write_png(images / "fig.png")
+        md = f"# OCR 段 {work_dir.name}\n\nOCR 正文段落,以句号结尾。\n"
+        (work_dir / "book.md").write_text(md, encoding="utf-8")
+        return ConversionResult(book_md=work_dir / "book.md", images_dir=images, backend=self.name)
+
+
+def test_hybrid_resume_hits_cache_with_real_fingerprint(tmp_path, monkeypatch) -> None:
+    """hybrid 续跑要真的命中云端缓存:临时纯图 PDF 必须字节稳定。
+
+    旧缺陷:PyMuPDF 每次 save 都写新的 /ID → 同一批页渲染两次字节不同 → 云端缓存的
+    内容指纹永不相等 → 中断后重跑重新上传整段、重复扣额度(此断言会是 3/0)。
+    """
+    pdf = make_mixed_pdf(tmp_path / "混合书.pdf", "TTSTTSTT")
+    work = tmp_path / "work"
+    ocr = FingerprintOCR()
+    real = convert.get_backend
+    monkeypatch.setattr(convert, "get_backend",
+                        lambda name, cfg: real("pymupdf", cfg) if name == "pymupdf" else ocr)
+    cfg = {"ocr_backend": "mineru", "pymupdf": {"write_images": True, "bold_fonts": []}}
+
+    with pytest.raises(RuntimeError, match="云端任务中断"):
+        convert.convert_auto(pdf, work, config=cfg)
+    assert (ocr.submits, ocr.resumes) == (1, 0)
+
+    convert.convert_auto(pdf, work, config=cfg)       # 续跑
+
+    # 第 3 页那一段复用已提交的任务(不重传),只有第 6 页是新提交
+    assert (ocr.submits, ocr.resumes) == (2, 1)
+
+
+# ---------------------------------------------------------------- 段级结果缓存(不重复计费)
+
+def _part_dirs(work: Path) -> list[str]:
+    """工作目录里已落盘的段(段标识即目录名)。"""
+    parts = work / "_parts"
+    return sorted(p.name for p in parts.iterdir()) if parts.is_dir() else []
+
+
+def test_timeout_salvages_finished_parts_and_resumes_the_same_batch(tmp_path, cloud) -> None:
+    """Case A:OCR 完成一部分后中断 —— 已完成段先落盘,重跑接着等同一个批次。
+
+    8 页 / 每段 2 页 → 4 段;第 3 段卡住导致轮询超时。其余 3 段必须已经在磁盘上
+    (它们已经计费了),重跑既不重新上传、也不重新 OCR。
+    """
+    pdf = make_paged_pdf(tmp_path / "书.pdf", pages=8)
+    work = tmp_path / "work"
+    cloud.stuck = {"part-3"}
+
+    with pytest.raises(MinerUError, match="轮询超时"):
+        _adapter(max_pages_per_task=2, timeout=1, poll_interval=0.05).convert(pdf, work)
+
+    assert _part_dirs(work) == ["1-2", "3-4", "7-8"]          # 目录名就是页码范围
+    assert (len(cloud.posts), len(cloud.uploads)) == (1, 4)
+    cached = json.loads((work / ".ocr_task.json").read_text(encoding="utf-8"))
+    assert cached["batch_id"] == "batch-1"        # 批次 id 留着,重跑接着等
+
+    cloud.stuck.clear()                           # 云端恢复
+    posts, uploads = len(cloud.posts), len(cloud.uploads)
+    result = _adapter(max_pages_per_task=2).convert(pdf, work)
+
+    assert (len(cloud.posts), len(cloud.uploads)) == (posts, uploads)   # 零提交、零上传
+    assert result.task_id == "batch-1"
+    md = result.book_md.read_text(encoding="utf-8")
+    assert page_marks(md) == [[1, 2], [3, 4], [5, 6], [7, 8]]
+    assert md.index("分段 part-1") < md.index("分段 part-2") < md.index("分段 part-3")
+
+
+def test_failed_shard_is_retried_alone_and_finished_shards_are_reused(tmp_path, cloud) -> None:
+    """Case C:某段云端判死 —— 已完成的段先抢救落盘,重跑只补那一段。"""
+    pdf = make_paged_pdf(tmp_path / "书.pdf", pages=8)
+    work = tmp_path / "work"
+    cloud.fail_items = {"part-2"}
+
+    with pytest.raises(MinerUError, match="3-4 仍缺结果"):
+        _adapter(max_pages_per_task=2).convert(pdf, work)
+
+    assert _part_dirs(work) == ["1-2", "5-6", "7-8"]          # 失败段的目录不会骗人
+    assert (len(cloud.posts), len(cloud.uploads)) == (1, 4)
+    assert not (work / ".ocr_task.json").exists()   # 死批次不能永远卡住重跑
+
+    cloud.fail_items.clear()                        # 云端恢复
+    result = _adapter(max_pages_per_task=2).convert(pdf, work)
+
+    assert len(cloud.posts) == 2                    # 只补提交失败的那一段
+    files = cloud.posts[1]["payload"]["files"]
+    assert [f["data_id"] for f in files] == ["part-2"]
+    assert [f["page_ranges"] for f in files] == ["3-4"]   # 页码区间必须保留
+    assert len(cloud.uploads) == 5                  # 只多上传 1 次
+    md = result.book_md.read_text(encoding="utf-8")
+    assert page_marks(md) == [[1, 2], [3, 4], [5, 6], [7, 8]]
+    assert "分段 part-2" in md
+
+
+def test_download_failure_keeps_the_batch_for_the_next_run(tmp_path, cloud) -> None:
+    """结果下载失败(网络/磁盘)不许丢掉批次 id。
+
+    这是「用户以为在恢复、其实又买了一次」最隐蔽的一条:云端早已把结果给出去了,
+    只是我们没接住。批次 id 一丢,重跑就变成重新上传 + 重新 OCR + 重复计费。
+    """
+    pdf = make_paged_pdf(tmp_path / "书.pdf", pages=2)
+    work = tmp_path / "work"
+    cloud.fail_downloads = 1
+
+    with pytest.raises(RuntimeError):            # 下载 500(requests.HTTPError 的替身)
+        _adapter().convert(pdf, work)
+
+    cached = json.loads((work / ".ocr_task.json").read_text(encoding="utf-8"))
+    assert cached["batch_id"] == "batch-1"       # 批次还活着
+    assert len(cloud.posts) == 1
+
+    result = _adapter().convert(pdf, work)       # 重跑:继续取同一个批次的结果
+
+    assert (len(cloud.posts), len(cloud.uploads)) == (1, 1)
+    assert "分段 书.pdf" in result.book_md.read_text(encoding="utf-8")
+
+
+def test_successful_run_is_fully_reused_on_rerun(tmp_path, cloud) -> None:
+    """Case D:完全成功后再跑一次(EPUB 阶段失败后的重试/换 CSS 重转/--force)不碰云端。"""
+    pdf = make_paged_pdf(tmp_path / "书.pdf", pages=3)
+    work = tmp_path / "work"
+    first = _adapter().convert(pdf, work)
+    md_first = first.book_md.read_text(encoding="utf-8")
+    assert (len(cloud.posts), len(cloud.uploads)) == (1, 1)
+
+    again = _adapter().convert(pdf, work)
+
+    assert (len(cloud.posts), len(cloud.uploads)) == (1, 1)
+    assert again.book_md.read_text(encoding="utf-8") == md_first
+    # 复用同一张图,不产生第二份文件(重跑产物逐字节一致)
+    assert [p.name for p in (work / "images").iterdir()] == ["fig.png"]
+
+
+def test_resume_false_ignores_the_part_cache(tmp_path, cloud) -> None:
+    """--no-resume:段结果缓存也要让路(强制重新提交是用户明示的)。"""
+    pdf = make_paged_pdf(tmp_path / "书.pdf", pages=3)
+    work = tmp_path / "work"
+    _adapter().convert(pdf, work)
+
+    result = _adapter(resume=False).convert(pdf, work)
+
+    assert (len(cloud.posts), len(cloud.uploads)) == (2, 2)
+    assert result.book_md.exists()
+
+
+def test_changed_source_invalidates_the_part_cache(tmp_path, cloud) -> None:
+    """源文件内容变了(指纹不同)→ 段缓存不命中,重新提交。"""
+    pdf = make_paged_pdf(tmp_path / "书.pdf", pages=3)
+    work = tmp_path / "work"
+    _adapter().convert(pdf, work)
+    make_paged_pdf(pdf, pages=4)                    # 同名文件,内容变了
+
+    _adapter().convert(pdf, work)
+
+    assert len(cloud.posts) == 2
+
+
+def test_part_cache_key_includes_ocr_params(tmp_path, cloud) -> None:
+    """OCR 参数变了(如 language)→ 旧结果不能复用。"""
+    pdf = make_paged_pdf(tmp_path / "书.pdf", pages=3)
+    work = tmp_path / "work"
+    _adapter().convert(pdf, work)
+
+    _adapter(language="en").convert(pdf, work)
+
+    assert len(cloud.posts) == 2
+
+
+# ---------------------------------------------------------------- 渲染与指纹
+
+def test_render_for_hybrid_is_byte_stable(tmp_path) -> None:
+    """临时纯图 PDF 必须字节稳定 —— 它正是云端续跑缓存的指纹来源。
+
+    这条用例守住 `out.save(..., no_new_id=True)`:PyMuPDF 默认每次保存都会写新的 /ID,
+    同一批页渲染两次字节不同 → 指纹永不相等 → hybrid 中断后重跑会重新上传整段。
+    """
+    pdf = make_mixed_pdf(tmp_path / "混合书.pdf", "TTSTTSTT")
+    a, b = tmp_path / "a.pdf", tmp_path / "b.pdf"
+
+    convert._render_pages_to_pdf(pdf, [2], a)
+    convert._render_pages_to_pdf(pdf, [2], b)
+
+    assert a.read_bytes() == b.read_bytes()
+    assert file_fingerprint(a) == file_fingerprint(b)
+
+
+def test_hybrid_render_stays_far_under_the_cloud_size_limit(tmp_path) -> None:
+    """扫描区段的临时 PDF 必须远小于云端 200MB 上限。
+
+    同样 20 页 150dpi:PNG 渲染实测 124MB(6.2MB/页 —— PyMuPDF 会把 PNG 位图原样
+    存进 PDF),一段 30 页以上的扫描区段就会顶破上限、云端拒收;JPEG q85 只有几 MB。
+    """
+    pdf = make_paged_pdf(tmp_path / "扫描书.pdf", pages=20)
+    out = tmp_path / "seg.pdf"
+    convert._render_pages_to_pdf(pdf, list(range(20)), out)
+
+    assert out.stat().st_size < 30 * 1024 * 1024
+
+
+# ---------------------------------------------------------------- 重试边界
+
+@pytest.mark.parametrize("status,retryable", [
+    (400, False), (401, False), (403, False), (404, False), (429, False),
+    (408, True), (500, True), (502, True),
+])
+def test_http_status_decides_whether_a_retry_is_worthwhile(status: int, retryable: bool) -> None:
+    """认证/参数/配额类错误不重试(扫描书每重试一次就多扣一次额度);5xx/408 才重试。"""
+    with pytest.raises(MinerUError) as excinfo:
+        MinerUAdapter._parse(FakeResponse(status_code=status, payload={"msg": "boom"}))
+
+    assert is_retryable(excinfo.value) is retryable
+
+
+def test_cloud_shard_failure_is_not_auto_retried(tmp_path, cloud) -> None:
+    """云端判死某段 → 不自动重试(重试就是再买一次同一本),但错误信息要说清下一步。"""
+    cloud.fail_items = {"书.pdf"}                   # 整本一个任务 → 匹配键就是文件名
+    cloud.fail_msg_items = {"书.pdf": "rate limit exceeded"}
+    pdf = make_paged_pdf(tmp_path / "书.pdf", pages=3)
+
+    with pytest.raises(MinerUError, match="rate limit exceeded") as excinfo:
+        _adapter().convert(pdf, tmp_path / "work")
+
+    assert is_retryable(excinfo.value) is False
+
+
+# ---------------------------------------------------------------- hybrid 段间复用(真实后端)
+
+def _hybrid_with_real_mineru(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """hybrid 流程 + **真实 MinerUAdapter** + 假云端(只有 HTTP 层是假的)。"""
+    pdf = make_mixed_pdf(tmp_path / "混合书.pdf", "TTSTTSTT")
+    work = tmp_path / "work"
+    adapter = MinerUAdapter(token="fake-token", poll_interval=0, timeout=30)
+    real = convert.get_backend
+    monkeypatch.setattr(convert, "get_backend",
+                        lambda name, cfg: real("pymupdf", cfg) if name == "pymupdf" else adapter)
+    cfg = {"ocr_backend": "mineru", "pymupdf": {"write_images": True, "bold_fonts": []}}
+    return pdf, work, cfg
+
+
+def test_hybrid_keeps_finished_segment_and_does_not_reocr_it(tmp_path, monkeypatch, cloud) -> None:
+    """Case B:前面区段成功、后面区段失败 → 重跑只补失败的那一段。
+
+    这是最贵的重复计费路径(整段扫描页重新上传 + 重新 OCR)。它同时依赖两件事:
+    段结果落盘、以及临时纯图 PDF 字节稳定(字节漂移会让第二次运行多提交一次)。
+    """
+    pdf, work, cfg = _hybrid_with_real_mineru(tmp_path, monkeypatch)
+    cloud.fail_batch_ids = {"batch-2"}              # 第 6 页起的那个区段失败
+
+    with pytest.raises(MinerUError):
+        convert.convert_auto(pdf, work, config=cfg)
+
+    assert _part_dirs(work / "_scan_p3")            # 第 3 页那段的云端结果留在磁盘上
+    assert not list(work.glob("_hybrid_scan_*.pdf"))     # 临时纯图 PDF 已清理
+    assert (work / "_scan_p6").is_dir()
+    assert not (work / "_scan_p6" / ".ocr_task.json").exists()   # 死批次不卡重跑
+    posts, uploads = len(cloud.posts), len(cloud.uploads)
+    assert (posts, uploads) == (2, 2)
+
+    cloud.fail_batch_ids.clear()                    # 云端恢复
+    result = convert.convert_auto(pdf, work, config=cfg)[0]
+
+    assert len(cloud.posts) == posts + 1            # 只补第 6 页那一段
+    assert len(cloud.uploads) == uploads + 1
+    md = result.book_md.read_text(encoding="utf-8")
+    assert page_marks(md) == [[1], [2], [3], [4], [5], [6], [7], [8]]
+    assert "分段 _hybrid_scan_p3" in md and "分段 _hybrid_scan_p6" in md
+
+
+def test_hybrid_rerun_after_success_touches_no_cloud(tmp_path, monkeypatch, cloud) -> None:
+    """hybrid 成功后再跑(换 CSS 重转 / --force)→ 两个区段都直接复用,零云端调用。"""
+    pdf, work, cfg = _hybrid_with_real_mineru(tmp_path, monkeypatch)
+    first = convert.convert_auto(pdf, work, config=cfg)[0]
+    assert (len(cloud.posts), len(cloud.uploads)) == (2, 2)
+
+    again = convert.convert_auto(pdf, work, config=cfg)[0]
+
+    assert (len(cloud.posts), len(cloud.uploads)) == (2, 2)     # 没有新提交、没有新上传
+    assert (page_marks(again.book_md.read_text(encoding="utf-8"))
+            == page_marks(first.book_md.read_text(encoding="utf-8")))

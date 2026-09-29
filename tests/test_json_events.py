@@ -86,6 +86,127 @@ def test_progress_with_zero_total_is_skipped() -> None:
     assert len(parse_json_lines(buf.getvalue())) == 1      # 只有 hello
 
 
+# ---------------------------------------------------------------- 错误码(前端分类显示用)
+
+def test_error_code_maps_real_exception_types() -> None:
+    """错误码由**真实异常类**决定:类名一改这里就红,前端不会静默退化成「未知错误」。"""
+    from backends.base import BackendError
+    from backends.mineru_backend import MinerUError
+    from backends.paddleocr_backend import PaddleOCRError
+    from batch import VerifyError
+    from epub.pandoc import PandocMissingError
+    import pymupdf
+
+    cases: list[tuple[BaseException, str]] = [
+        (PandocMissingError("未找到 pandoc"), "missing_dependency"),
+        (VerifyError("EPUB 校验未通过"), "verify_failed"),
+        (MinerUError("解析失败"), "ocr_failed"),
+        (PaddleOCRError("提交异常"), "ocr_failed"),
+        (BackendError("其他后端错误"), "backend_failed"),
+        (FileNotFoundError("文件不存在: a.pdf"), "input_error"),
+        (pymupdf.FileDataError("cannot open broken document"), "input_error"),
+        (pymupdf.EmptyFileError("empty file"), "input_error"),
+        (PermissionError("拒绝访问"), "output_error"),
+        (OSError("磁盘已满"), "output_error"),
+        (ValueError("未知清理项: nope"), "config_error"),
+        (RuntimeError("Pandoc 失败(exit=3): boom"), "pandoc_error"),
+        (RuntimeError("别的意外"), "convert_failed"),
+        (TypeError("意外类型"), "convert_failed"),
+    ]
+    for exc, want in cases:
+        assert events.error_code(exc) == want, f"{type(exc).__name__} → {events.error_code(exc)}"
+    # 认不出来时用调用方给的码(如 name_conflict),不被抹成 convert_failed
+    assert events.error_code(RuntimeError("别的意外"), default="name_conflict") == "name_conflict"
+
+
+def test_failed_conversion_reports_specific_code(tmp_path: Path, monkeypatch,
+                                                 capsys) -> None:
+    """后端认证失败 → 事件里的 code 必须是 ocr_failed(而不是笼统的 convert_failed)。"""
+    from backends.mineru_backend import MinerUError
+    import batch as batch_mod
+    from conftest import make_pdf
+
+    pdf = make_pdf(tmp_path / "扫描书.pdf")
+    monkeypatch.setattr(
+        batch_mod, "_process_pdf",
+        lambda *a, **k: (_ for _ in ()).throw(MinerUError("缺少 MinerU API Token", retryable=False)),
+    )
+    rc = cli_main([str(pdf), "-o", str(tmp_path / "out"), "--work", str(tmp_path / "work"),
+                   "--no-log", "--json-events"])
+    assert rc == 1
+    items = parse_json_lines(capsys.readouterr().out)
+    errs = events_of(items, "error")
+    assert len(errs) == 1 and errs[0]["code"] == "ocr_failed"
+
+
+def test_retry_is_reported_as_an_event(tmp_path: Path, monkeypatch) -> None:
+    """重试要发 `retry` 事件:界面才能把「卡住」与「正在重试」区分开。"""
+    import batch as batch_mod
+    from conftest import make_pdf
+
+    pdf = make_pdf(tmp_path / "会重试.pdf")
+    calls = {"n": 0}
+
+    def flaky(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("临时故障")     # 默认可重试
+        raise batch_mod.VerifyError("第二轮的确定性失败")
+
+    monkeypatch.setattr(batch_mod, "_process_pdf", flaky)
+    monkeypatch.setattr(batch_mod.time, "sleep", lambda *_: None)
+
+    buf = io.StringIO()
+    events.configure(stream=buf)
+    try:
+        result = batch_mod.process_one(pdf, config={"pymupdf": {}}, work_root=tmp_path / "work",
+                                       output_dir=tmp_path / "out", retries=2)
+    finally:
+        events.configure(False)
+
+    assert result.status == "failed"
+    items = parse_json_lines(buf.getvalue())
+    retries = events_of(items, "retry")
+    assert len(retries) == 1, [i["event"] for i in items]
+    assert retries[0]["attempt"] == 1 and retries[0]["retries"] == 2
+    assert retries[0]["wait"] == 2          # 2 ** 1 的退避
+    assert events_of(items, "error")[0]["code"] == "verify_failed"
+
+
+def test_skip_is_its_own_terminal_event(tmp_path: Path) -> None:
+    """已有产物 → `skip`(不是 `complete`):GUI 必须能把它显示成「已跳过」。"""
+    from batch import process_one
+    from conftest import make_pdf
+
+    pdf = make_pdf(tmp_path / "重复.pdf")
+    kw = dict(retries=0, config={"pymupdf": {"write_images": True, "bold_fonts": []}},
+              work_root=tmp_path / "work", output_dir=tmp_path / "out")
+    assert process_one(pdf, **kw).status == "done"
+
+    buf = io.StringIO()
+    events.configure(stream=buf)
+    try:
+        result = process_one(pdf, **kw)
+    finally:
+        events.configure(False)
+
+    assert result.status == "skipped"
+    items = parse_json_lines(buf.getvalue())
+    assert [i["event"] for i in items if i["event"] != "hello"] == ["skip"]
+    assert events_of(items, "complete") == []
+
+    # --force:用户明确要求重转时不能再 skip,而要真的跑完整条链路
+    buf2 = io.StringIO()
+    events.configure(stream=buf2)
+    try:
+        forced = process_one(pdf, force=True, **kw)
+    finally:
+        events.configure(False)
+    assert forced.status == "done"
+    names = [i["event"] for i in parse_json_lines(buf2.getvalue())]
+    assert "complete" in names and "skip" not in names
+
+
 # ---------------------------------------------------------------- CLI 端到端
 
 def test_cli_stdout_is_pure_json_and_logs_move_to_stderr(tmp_path: Path, capsys) -> None:
@@ -121,6 +242,83 @@ def test_cli_stdout_is_pure_json_and_logs_move_to_stderr(tmp_path: Path, capsys)
     # 检测结果事件落在 detect 阶段之内
     assert names.index("stage") < names.index("detect") < names.index("plan") < \
         names.index("complete")
+
+
+def test_cli_reports_config_errors_as_events(tmp_path: Path, capsys) -> None:
+    """配置错误也要发 error 事件(带码 config_error):桌面端据此显示「配置错误」,
+    而不是笼统的「转换失败」。
+
+    (与下面那条输入错误的用例分开写:`cli_main` 会把 sys.stdout 换成 stderr 且不还原,
+    同一个用例里再调一次,事件就不进 capsys 的 out 了。)
+    """
+    pdf = make_pdf(tmp_path / "本地书.pdf")
+    rc = cli_main([str(pdf), "--clean-disable", "no_such_key", "--json-events", "--no-log"])
+    assert rc == 2
+    errs = events_of(parse_json_lines(capsys.readouterr().out), "error")
+    assert errs and errs[0]["code"] == "config_error", errs
+
+
+def test_cli_reports_missing_input_as_error_event(tmp_path: Path, capsys) -> None:
+    """没有可处理的文件 → error 事件 + input_error(而不是静默 exit=2)。"""
+    rc = cli_main([str(tmp_path / "不存在.pdf"), "--json-events", "--no-log"])
+    assert rc == 2
+    errs = events_of(parse_json_lines(capsys.readouterr().out), "error")
+    assert errs and errs[0]["code"] == "input_error", errs
+    assert "没有找到可处理的文件" in errs[0]["message"]
+
+
+# ---------------------------------------------------------------- 预检 vs 实际后端(桌面端 Case E)
+
+
+def _preflight_plan(capsys, *extra: str) -> dict:
+    """跑一次预检(不产出文件)并取第一条计划。"""
+    from cli import main as cli_main_local
+    assert cli_main_local(["--dry-run", "--json", *extra]) == 0
+    return json.loads(capsys.readouterr().out.strip().splitlines()[-1])["files"][0]
+
+
+def test_preflight_backend_matches_auto_conversion(tmp_path: Path, capsys) -> None:
+    """auto:预检报的后端必须就是实际转换用到的后端(桌面端「印前检查」与
+    「实际转换」不能各说一套)。"""
+    pdf = make_pdf(tmp_path / "本地书.pdf", pages=3)
+    plan = _preflight_plan(capsys, str(pdf))
+    assert plan["backend"] == "pymupdf" and plan["kind"] == "pdf-text"
+
+    rc = cli_main([str(pdf), "-o", str(tmp_path / "out"), "--work", str(tmp_path / "work"),
+                   "--no-log", "--json-events"])
+    assert rc == 0
+    items = parse_json_lines(capsys.readouterr().out)
+    assert events_of(items, "plan")[0]["backend"] == plan["backend"]
+    assert events_of(items, "detect")[0]["type"] == "text"
+
+
+def test_preflight_backend_matches_backend_override(tmp_path: Path, capsys) -> None:
+    """`--backend pymupdf`(桌面端设置里的后端偏好):预检与实际转换都必须是它,
+    而且实际转换**不发 plan 事件**(壳按带 backend 的阶段事件显示徽标)——
+    两边对不上就会出现「UI 显示 local、实际用 cloud」。"""
+    pdf = make_pdf(tmp_path / "本地书.pdf", pages=3)
+    plan = _preflight_plan(capsys, "--backend", "pymupdf", str(pdf))
+    assert plan["backend"] == "pymupdf" and plan["kind"] == "pdf-text"
+
+    rc = cli_main([str(pdf), "-o", str(tmp_path / "out"), "--work", str(tmp_path / "work"),
+                   "--no-log", "--json-events", "--backend", "pymupdf"])
+    assert rc == 0
+    items = parse_json_lines(capsys.readouterr().out)
+    assert events_of(items, "plan") == [], "显式指定后端时不发 plan(避免与预检口径分叉)"
+    backends = {i["backend"] for i in events_of(items, "stage") if "backend" in i}
+    assert backends == {"pymupdf"}, backends
+
+
+def test_preflight_reports_cloud_override(tmp_path: Path, capsys) -> None:
+    """云端覆盖:预检如实显示 mineru,并全篇按需 OCR 页数计(不真跑,不消耗额度)。
+
+    (单独一条用例:`cli_main` 会把 sys.stdout 换成 stderr 不还原,预检的输出在那之后就
+    进不了 capsys。)
+    """
+    pdf = make_pdf(tmp_path / "本地书.pdf", pages=3)
+    plan = _preflight_plan(capsys, "--backend", "mineru", str(pdf))
+    assert plan["backend"] == "mineru" and plan["ocr_pages"] == 3
+    assert plan["kind"] == "pdf-scanned"      # 手动指定云端 = 不看文字层检测结果
 
 
 def test_cli_without_flag_keeps_plain_log(tmp_path: Path, capsys) -> None:

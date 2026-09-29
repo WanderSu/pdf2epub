@@ -45,14 +45,16 @@ CFG = {
 class FakeOCR:
     """假云端 OCR:按收到的纯图 PDF 页数产出 Markdown + 一张同名图片。
 
-    同名图片是为了覆盖「跨区段图片重名 → 加前缀并改引用」这条路径;
+    同名图片是为了覆盖「跨区段图片重名 → 加前缀并改引用」这条路径
+    (`vary_image=True` 时各次调用的图片字节不同,即真的两张不同的图);
     calls 记录每次收到的临时 PDF 名与页数,用来断言区段切分。
     """
 
     name = "fake-ocr"
 
-    def __init__(self, image_name: str = "ocr_img.png") -> None:
+    def __init__(self, image_name: str = "ocr_img.png", vary_image: bool = True) -> None:
         self.image_name = image_name
+        self.vary_image = vary_image
         self.calls: list[tuple[str, int]] = []
 
     def convert(self, pdf_path: str | Path, work_dir: str | Path) -> ConversionResult:
@@ -64,7 +66,9 @@ class FakeOCR:
             pages = doc.page_count
         images = work_dir / "images"
         images.mkdir(parents=True, exist_ok=True)
-        write_png(images / self.image_name)
+        # 图片尺寸随调用次数变化 → 同名不同内容的图(真实场景:两页各有一张不同的插图)
+        size = 16 + len(self.calls) if self.vary_image else 16
+        write_png(images / self.image_name, size=size)
 
         body = [
             f"# OCR 区段第 {i} 页\n\nOCR 识别出来的正文段落,以句号结尾。"
@@ -173,6 +177,32 @@ def test_ocr_images_merge_into_images_dir_and_refs_are_valid(tmp_path: Path,
     report = CleanReport()
     clean_markdown(md, images_dir=work / "images", report=report)
     assert [i for i in report.issues if "图片引用缺失" in i] == []
+
+
+IMAGES_NAME = "fig.png"
+
+
+def test_identical_ocr_images_are_shared_not_duplicated(tmp_path: Path) -> None:
+    """同名**同内容**的图 → 复用同一份,引用不改。
+
+    这条路径决定「hybrid 成功后再跑一次」的产物是否稳定:如果每次都把已有的图
+    改名前缀一遍(scan_p3_fig.png、scan_p6_fig.png…),重跑会不断产出前缀副本、
+    留下没人引用的垃圾图,book.md 也逐次变化。
+    """
+    work = tmp_path / "work"
+    dst = work / "images"
+    dst.mkdir(parents=True)
+
+    md = f"![插图](images/{IMAGES_NAME})\n"
+    for seg, page_no in (("_scan_p3", 3), ("_scan_p6", 6)):
+        src = work / seg / "images"
+        src.mkdir(parents=True, exist_ok=True)
+        write_png(src / IMAGES_NAME)                      # 两段产出逐字节相同的图
+
+        md = convert._absorb_images(src, dst, md, prefix=f"scan_p{page_no}_")
+
+    assert md == f"![插图](images/{IMAGES_NAME})\n"        # 引用保持原样
+    assert [p.name for p in dst.iterdir()] == [IMAGES_NAME]   # 只留一份
 
 
 # ---------------------------------------------------------------- 页单元合并(纯函数)
