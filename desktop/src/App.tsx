@@ -487,7 +487,7 @@ interface RecentEntry {
   at: number;
 }
 
-const APP_VERSION = "v0.4.1";
+const APP_VERSION = "v0.4.2";
 const RECENT_KEY = "pdf2epub.recent";
 const MAX_RECENT = 8;
 
