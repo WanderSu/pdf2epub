@@ -4,7 +4,12 @@
  * **为什么**:桌面端原先只能从 CLI 的**中文日志**里猜状态(几个正则),文案一改就
  * 静默失效;进度百分比也只能按「日志行到达 +5」估算,永远到不了 95%。引擎现在把
  * 阶段事件写成 **JSON Lines**(stdout),这里把它归约成队列行需要的状态:
- * 阶段、真实进度、页数、后端、分帖数(signatures)、校验结果。
+ * 阶段、真实进度、页数、后端、分帖数(signatures)、校验结果、错误分类。
+ *
+ * **三条不能混淆的边界**(状态机的主要职责):
+ *   - `skip` ≠ `complete`:前者是「本次什么都没做」(产物早已存在),后者才是跑完了;
+ *   - 失败要带 `code` → `errorKind()` 分类,界面不去解析错误文案;
+ *   - `retry` 是可见的中间态(正在重试),不是静默等待。
  *
  * 保持纯函数、不依赖 React/DOM —— 便于用 node 直接跑断言(见 scripts/verify-events.mjs),
  * GUI 之外也能验证「解析对了」。
@@ -35,7 +40,48 @@ const KIND_LABEL: Record<string, FileKind> = {
   text: "TXT", scanned: "SCN", hybrid: "HYB", markdown: "MD",
 };
 
+/** 后端名 → 徽标标签(`hybrid(mineru)` 取主干,用包含判断,别做全等比较)。 */
+export function backendLabel(name: string): string | undefined {
+  if (!name) return undefined;
+  const hit = Object.keys(BACKEND_LABEL).find(k => name.includes(k));
+  return hit ? BACKEND_LABEL[hit] : undefined;
+}
+
+// ── 错误分类 ────────────────────────────────────────────────────────────────
+//  引擎在 `error`/`skip` 事件里给出 `code`(见 src/events.py::error_code),
+//  GUI 只做「码 → 类别」的映射,**不去解析错误文案**(文案一改就静默失效)。
+//  类别是技术 token(与 TXT/SCN/HYB 同理),两种语言下都用英文。
+
+export type ErrorKind =
+  | "input" | "config" | "environment" | "pandoc" | "ocr" | "output" | "unknown";
+
+const ERROR_KIND: Record<string, ErrorKind> = {
+  input_error: "input",       // 源文件缺失/损坏
+  name_conflict: "input",     // 两个源文件会写进同一个产物路径
+  config_error: "config",     // 清理项/配置值非法
+  missing_dependency: "environment",  // pandoc 等外部依赖缺失
+  pandoc_error: "pandoc",
+  ocr_failed: "ocr",
+  backend_failed: "ocr",
+  verify_failed: "output",    // 产物校验未通过
+  output_error: "output",     // 写盘/占用
+  convert_failed: "unknown",
+};
+
+export const ERROR_KIND_LABEL: Record<ErrorKind, string> = {
+  input: "INPUT", config: "CONFIG", environment: "ENVIRONMENT", pandoc: "PANDOC",
+  ocr: "OCR", output: "OUTPUT", unknown: "UNKNOWN",
+};
+
+/** 错误码 → 类别;认不出来(老版引擎/新码)一律 unknown,但原文照旧显示。 */
+export function errorKind(code?: string): ErrorKind {
+  return (code && ERROR_KIND[code]) || "unknown";
+}
+
 export interface EngineEvent { event: string;[k: string]: unknown }
+
+/** 一次重试(引擎的 `retry` 事件):界面才能把「卡住」与「正在重试」区分开。 */
+export interface RetryInfo { attempt: number; total: number; message: string }
 
 /** 一条队列行的引擎侧状态(由事件流驱动)。 */
 export interface EventState {
@@ -50,6 +96,13 @@ export interface EventState {
   verify?: { errors: number; warnings: number; message: string };
   warning?: boolean;
   error?: string;
+  /** 错误的机器可读分类(src/events.py::error_code 下发) */
+  errorCode?: string;
+  /** 正在重试(第 attempt 次失败,共允许 total 次) */
+  retrying?: RetryInfo | null;
+  /** 终态一:本次**什么都没做**(产物早已存在)—— 不是「完成」 */
+  skipped?: boolean;
+  /** 终态二:本次跑完了整条链路 */
   done: boolean;
   /** 已展示过的最高进度:进度条**只许前进**,否则用户会以为回滚了 */
   peak?: number;
@@ -110,6 +163,8 @@ function rawProgress(st: EventState): number {
 }
 
 export function progressOf(st: EventState): number {
+  // 跳过(skip)同样是「满进度」:产物本来就在磁盘上,进度条留半截反而像出错。
+  // 「本次是否真的跑过」由 skipped 区分,不由进度条承担。
   if (st.done) return 100;
   const p = Math.max(st.peak ?? 0, rawProgress(st));
   return Math.max(0, Math.min(99, Math.round(p * 100)));
@@ -149,11 +204,10 @@ function applyEvent(state: EventState, ev: EngineEvent): EventState {
     }
     case "plan": {
       const backend = str(ev["backend"]);
-      const hit = Object.keys(BACKEND_LABEL).find(k => backend.includes(k));
       const shards = num(ev["shards"]);
       return {
         ...st,
-        backend: hit ? BACKEND_LABEL[hit] : st.backend,
+        backend: backendLabel(backend) ?? st.backend,
         pages: num(ev["pages"], st.pages ?? 0),
         signatures: shards > 1 ? { current: 0, total: shards } : st.signatures,
       };
@@ -163,12 +217,16 @@ function applyEvent(state: EventState, ev: EngineEvent): EventState {
       if (!key) return st;
       const state = str(ev["state"]);
       const isOcr = /mineru|paddle/i.test(str(ev["backend"]));
+      // 手动指定后端时引擎不发 `plan`(只有一条带 backend 的 extract 阶段)——
+      // 徽标也要跟着走,否则界面显示 auto、实际在跑云端 OCR。
+      const backend = backendLabel(str(ev["backend"])) ?? st.backend;
       if (state === "start") {
         st = markStages(st, key, "active", isOcr);
-        return { ...st, active: key, detail: undefined };
+        // 重新开跑(含重试后重跑)→ 清掉上一次的重试/跳过标记
+        return { ...st, active: key, detail: undefined, retrying: null, skipped: false, backend };
       }
       st = markStages(st, key, "done", isOcr);
-      return { ...st, active: st.active === key ? null : st.active, detail: undefined };
+      return { ...st, active: st.active === key ? null : st.active, detail: undefined, backend };
     }
     case "progress": {
       const key = ENGINE_STAGE[str(ev["stage"])];
@@ -195,12 +253,45 @@ function applyEvent(state: EventState, ev: EngineEvent): EventState {
       };
     case "warning":
       return { ...st, warning: true };
-    case "error":
-      return { ...st, error: str(ev["message"]) || "转换失败" };
-    case "skip":
+    case "retry":
+      // 第 attempt 次尝试失败、即将重跑:界面显示 RETRYING,而不是静默卡住
+      return {
+        ...st,
+        retrying: {
+          attempt: num(ev["attempt"], 1),
+          total: num(ev["retries"], 0),
+          message: str(ev["message"]),
+        },
+      };
+    case "error": {
+      // 失败要指到具体工序(✕ 落在哪一步),并带上机器可读的分类码
+      const failed = st.active ? markStages(st, st.active, "failed") : st;
+      return {
+        ...failed,
+        active: null,
+        detail: undefined,
+        retrying: null,
+        error: str(ev["message"]) || "转换失败",
+        errorCode: str(ev["code"]) || undefined,
+      };
+    }
+    case "skip": {
+      // **终态:本次什么都没做**(产物早已存在)。
+      // 与 `complete` 关键区别:工序一个都不算完成 —— 本次没有跑过它们。
+      return {
+        ...st,
+        skipped: true,
+        done: true,
+        active: null,
+        detail: undefined,
+        retrying: null,
+        error: undefined,
+        errorCode: undefined,
+      };
+    }
     case "complete": {
       const finished = STAGE_KEYS.reduce<EventState>((acc, key) => markStages(acc, key, "done"), st);
-      return { ...finished, active: null, detail: undefined, done: true };
+      return { ...finished, active: null, detail: undefined, done: true, skipped: false };
     }
     default:
       return st;

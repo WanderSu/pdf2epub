@@ -13,11 +13,14 @@ import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 // 引擎事件流(--json-events):状态与进度的唯一可信来源(见 src/events.ts)
 import {
+  ERROR_KIND_LABEL,
+  errorKind,
   initialEventState,
   freshStages,
   parseEventLine,
   progressOf,
   reduceEvent,
+  type ErrorKind,
   type EventState,
   type Signatures,
   type StageNode,
@@ -97,6 +100,8 @@ const T = {
       tail: "TAIL",
       pause: "PAUSE",
       noOutput: "— no output yet —",
+      skippedHint: "Already built — this run did nothing. Use RE-QUEUE to force a rebuild.",
+      retrying: (n: number) => `Attempt ${n} failed — retrying…`,
     },
     library: {
       head: "LIBRARY",
@@ -230,6 +235,8 @@ const T = {
       tail: "TAIL",
       pause: "PAUSE",
       noOutput: "— 暂无输出 —",
+      skippedHint: "已有产物,本次未重转;需要重转请点「重新入队」。",
+      retrying: (n: number) => `第 ${n} 次尝试失败 — 正在重试…`,
     },
     library: {
       head: "书目",
@@ -370,7 +377,13 @@ const CLEAN_GROUPS: Record<Lang, CleanGroup[]> = {
 // ── TYPES ─────────────────────────────────────────────────────────────────────
 
 type Screen = "convert" | "library" | "settings";
-type FileStatus = "pending" | "converting" | "done" | "failed" | "cancelled";
+/**
+ * 队列行的状态。**三个终态不能混**:
+ *   done    = 本次真的跑完了整条链路(引擎 `complete`)
+ *   skipped = 本次什么都没做,产物早已存在(引擎 `skip`)—— 不是「成功」
+ *   failed  = 失败(带分类码与原文)
+ */
+type FileStatus = "pending" | "converting" | "done" | "skipped" | "failed" | "cancelled";
 type Backend = "Local" | "MinerU" | "PaddleOCR" | "Auto";
 type FileType = "TXT" | "SCN" | "HYB" | "MD";
 type BackendPref = "auto" | "mineru" | "paddleocr";
@@ -392,6 +405,10 @@ interface QueueFile {
   log: string[];
   warning?: boolean;
   error?: string;
+  /** 错误的机器可读分类(引擎 error 事件 / convert_file 的 error_code) */
+  errorCode?: string;
+  /** 引擎正在重试(第 N 次尝试失败,即将重跑)—— 与「卡住不动」区分开 */
+  retrying?: { attempt: number; total: number } | null;
   epub?: string;
   date?: string;
   /** 引擎事件流状态(--json-events);进度与阶段由它驱动 */
@@ -614,14 +631,34 @@ const STATUS_STYLE: Record<FileStatus, string> = {
   pending: "text-[var(--muted-foreground)] border-[var(--border)]",
   converting: "text-[var(--primary)] border-[var(--primary)]",
   done: "text-[var(--ok)] border-[var(--ok)]",
+  // 跳过用信息色(不是成功色):产物在,但这次没干活
+  skipped: "text-[var(--info)] border-[var(--info)]",
   failed: "text-[var(--danger)] border-[var(--danger)]",
   cancelled: "text-[var(--warn)] border-[var(--warn)]",
 };
 
-function StatusChip({ status }: { status: FileStatus }) {
+/** 状态 chip:技术 token,两种语言下都用英文(RETRYING 是可见的中间态) */
+function StatusChip({ status, retrying }: { status: FileStatus; retrying?: boolean }) {
+  const isRetrying = retrying === true && status === "converting";
+  const label = isRetrying ? "RETRYING" : status === "converting" ? "CONVERTING" : status.toUpperCase();
+  const style = isRetrying ? STATUS_STYLE.cancelled : STATUS_STYLE[status];
   return (
-    <span className={`font-mono text-[8px] tracking-[0.08em] px-1.5 py-0.5 border ${STATUS_STYLE[status]}`}>
-      {status === "converting" ? "CONVERTING" : status.toUpperCase()}
+    <span className={`font-mono text-[8px] tracking-[0.08em] px-1.5 py-0.5 border ${style}`}>
+      {label}
+    </span>
+  );
+}
+
+/** 错误行:`分类码 + 引擎原文`。分类来自事件里的 code,界面不解析文案。 */
+function ErrorLine({ kind, message, lang }: { kind: ErrorKind; message: string; lang: Lang }) {
+  return (
+    <span className="flex items-baseline gap-2 min-w-0">
+      <span className="font-mono text-[9px] tracking-[0.06em] text-[var(--danger)] border border-[var(--danger)] px-1 py-px shrink-0">
+        {ERROR_KIND_LABEL[kind]}
+      </span>
+      <span className={`text-[10px] text-[var(--danger)] truncate ${lang === "zh" ? "cjk" : "font-mono"}`}>
+        {message}
+      </span>
     </span>
   );
 }
@@ -927,6 +964,7 @@ function ConvertScreen({
   const done = files.filter(f => f.status === "done").length;
   const active = files.filter(f => f.status === "converting").length;
   const failed = files.filter(f => f.status === "failed").length;
+  const skipped = files.filter(f => f.status === "skipped").length;
   const pending = files.filter(f => f.status === "pending").length;
   const total = files.length;
   const overallPct = total > 0 ? Math.round(files.reduce((s, f) => s + f.progress, 0) / (total * 100) * 100) : 0;
@@ -1103,7 +1141,7 @@ function ConvertScreen({
             <div className="flex items-end gap-8 py-4 border-b border-[var(--border)]">
               <div className="flex-1">
                 <div className="flex items-baseline gap-6 mb-3">
-                  {[{ label: "DONE", val: done, color: "var(--ok)" }, { label: "ACTIVE", val: active, color: "var(--primary)" }, { label: "FAILED", val: failed, color: "var(--danger)" }, { label: "PENDING", val: pending, color: "var(--muted-foreground)" }].map(({ label, val, color }) => (
+                  {[{ label: "DONE", val: done, color: "var(--ok)" }, { label: "SKIPPED", val: skipped, color: "var(--info)" }, { label: "ACTIVE", val: active, color: "var(--primary)" }, { label: "FAILED", val: failed, color: "var(--danger)" }, { label: "PENDING", val: pending, color: "var(--muted-foreground)" }].map(({ label, val, color }) => (
                     <div key={label} className="flex items-baseline gap-1.5">
                       <span className="font-mono text-[13px] font-medium tabular-nums" style={{ color }}>{val}</span>
                       <span className="font-mono text-[9px] tracking-[0.08em] text-[var(--muted-foreground)]">{label}</span>
@@ -1190,7 +1228,7 @@ function ConvertScreen({
                     <span className="font-mono text-[10px] text-[var(--muted-foreground)] tabular-nums text-right">{file.size}</span>
                     <span className="font-mono text-[10px] text-[var(--muted-foreground)] tabular-nums text-right">{file.pages || "—"}</span>
                     <BackendBadge backend={file.backend} />
-                    <StatusChip status={file.status} />
+                    <StatusChip status={file.status} retrying={!!file.retrying} />
                     <div className="flex justify-end">
                       {(file.status === "pending" || file.status === "converting") && (
                         <button onClick={e => { e.stopPropagation(); onCancel(file.id); }} className="font-mono text-[10px] text-[var(--muted-foreground)] hover:text-[var(--danger)] transition-colors" aria-label="cancel">✕</button>
@@ -1198,7 +1236,7 @@ function ConvertScreen({
                       {file.status === "failed" && (
                         <button onClick={e => { e.stopPropagation(); onRetry(file.id); }} className={`font-mono text-[9px] tracking-[0.06em] text-[var(--primary)] uppercase ${lang === "zh" ? "cjk font-sans" : ""}`}>{t.retry}</button>
                       )}
-                      {file.status === "done" && (
+                      {(file.status === "done" || file.status === "skipped") && (
                         <button onClick={e => { e.stopPropagation(); onRetry(file.id); }} className={`font-mono text-[9px] tracking-[0.06em] text-[var(--muted-foreground)] uppercase hover:text-[var(--foreground)] transition-colors ${lang === "zh" ? "cjk font-sans" : ""}`}>{t.requeue}</button>
                       )}
                     </div>
@@ -1207,7 +1245,7 @@ function ConvertScreen({
                   <div className={`border-b border-[var(--border)] overflow-hidden transition-all duration-[180ms] ${isExpanded ? "" : "py-1"}`}>
                     <div className="relative h-px bg-[var(--border)] mx-0 my-1 overflow-visible">
                       <div
-                        className={`absolute inset-y-0 left-0 transition-all duration-700 ${file.status === "failed" ? "bg-[var(--danger)]" : file.status === "cancelled" ? "bg-[var(--warn)]" : file.status === "done" ? "bg-[var(--ok)]" : "bg-[var(--primary)]"}`}
+                        className={`absolute inset-y-0 left-0 transition-all duration-700 ${file.status === "failed" ? "bg-[var(--danger)]" : file.status === "cancelled" ? "bg-[var(--warn)]" : file.status === "done" ? "bg-[var(--ok)]" : file.status === "skipped" ? "bg-[var(--info)]" : "bg-[var(--primary)]"}`}
                         style={{ width: `${file.progress}%`, height: "1px" }}
                       />
                       {file.status === "converting" && (
@@ -1220,7 +1258,16 @@ function ConvertScreen({
                         {isExpanded && file.log.length > 0 ? (
                           <pre className="font-mono text-[10px] leading-relaxed text-[var(--muted-foreground)] whitespace-pre-wrap">{file.log.slice(-12).join("\n")}</pre>
                         ) : file.error ? (
-                          <span className="font-mono text-[10px] text-[var(--danger)] truncate block">{file.error}</span>
+                          // 失败:分类码 + 引擎原文(不是笼统的 Conversion failed)
+                          <ErrorLine kind={errorKind(file.errorCode)} message={file.error} lang={lang} />
+                        ) : file.retrying ? (
+                          <span className={`text-[10px] text-[var(--warn)] truncate block ${lang === "zh" ? "cjk" : "font-mono"}`}>
+                            {t.retrying(file.retrying.attempt)}
+                          </span>
+                        ) : file.status === "skipped" ? (
+                          <span className={`text-[10px] text-[var(--info)] truncate block ${lang === "zh" ? "cjk" : "font-mono"}`}>
+                            {t.skippedHint}
+                          </span>
                         ) : file.lastLog ? (
                           <span className="font-mono text-[10px] text-[var(--muted-foreground)] truncate block">{file.lastLog}</span>
                         ) : null}
@@ -1923,6 +1970,9 @@ export default function App() {
             signatures: engine.signatures ?? f.signatures,
             warning: f.warning || engine.warning,
             error: engine.error ?? f.error,
+            // 错误分类与重试状态也只从事件来(界面不猜)
+            errorCode: engine.errorCode ?? f.errorCode,
+            retrying: engine.retrying ? { attempt: engine.retrying.attempt, total: engine.retrying.total } : null,
             legacy: false,
             lastLog: line,
           };
@@ -1978,11 +2028,17 @@ export default function App() {
   }, [screen, loadLibrary]);
 
   // ── 印前检查(CLI --dry-run --json) ──
-  const runPreflight = useCallback(async (paths: string[]) => {
+  //  `backend` 必须与真正转换时用的是同一个:否则会出现「预检显示本地、实际跑云端」。
+  const runPreflight = useCallback(async (paths: string[], backendOverride?: string) => {
     if (paths.length === 0) return;
     setBusyPreflight(true);
     try {
-      const raw = await invoke<string>("preflight", { filePaths: paths, cliPath: cliPath || null });
+      const backend = backendOverride ?? (backendPref === "auto" ? null : backendPref);
+      const raw = await invoke<string>("preflight", {
+        filePaths: paths,
+        cliPath: cliPath || null,
+        backend,
+      });
       const report = JSON.parse(raw) as PreflightReport;
       setPreflights(prev => {
         const next = { ...prev };
@@ -1990,16 +2046,17 @@ export default function App() {
         return next;
       });
       setBatchNotice(report);
-      // 预检结果直接落到队列行:转换前就能看到类型 / 页数 / 后端 / 折帖
+      // 预检结果落到队列行:转换前就能看到类型 / 页数 / 后端 / 折帖。
+      // 只填**引擎还没告诉过我们的**字段 —— 正在跑或已跑完的行以事件流为准。
       setFiles(prev => prev.map(f => {
         const plan = report.files.find(p => normPath(p.path) === normPath(f.path));
         if (!plan) return f;
         return {
           ...f,
           type: f.type ?? KIND_TO_TYPE[plan.kind],
-          backend: backendFromPlan(plan.backend),
-          pages: plan.pages || f.pages,
-          signatures: plan.shards > 1 ? { current: 0, total: plan.shards } : undefined,
+          backend: f.backend === "Auto" ? backendFromPlan(plan.backend) : f.backend,
+          pages: f.pages || plan.pages,
+          signatures: f.signatures ?? (plan.shards > 1 ? { current: 0, total: plan.shards } : undefined),
           cloudPages: plan.ocr_pages,
         };
       }));
@@ -2009,7 +2066,18 @@ export default function App() {
     } finally {
       setBusyPreflight(false);
     }
-  }, [cliPath]);
+  }, [cliPath, backendPref]);
+
+  // 后端偏好改了(设置里保存后) → 重跑预检,保证印前检查与转换用的是同一个后端。
+  // 预检只读检测,不产出文件、不消耗额度,重跑是安全的。
+  const backendRef = useRef(backendPref);
+  useEffect(() => {
+    if (backendRef.current === backendPref) return;
+    backendRef.current = backendPref;
+    if (screen !== "convert") return;
+    const paths = filesRef.current.map(f => f.path);
+    if (paths.length > 0) void runPreflight(paths);
+  }, [backendPref, screen, runPreflight]);
 
   // ── 空状态下的「最近文件」自动预检:避免一排未知「?」徽章 ──
   useEffect(() => {
@@ -2022,7 +2090,10 @@ export default function App() {
   }, [screen, files.length, recent, preflights, runPreflight]);
 
   // ── 转换 ──
-  const convertOne = useCallback(async (f: QueueFile, backendOverride?: string) => {
+  //  force=true 表示「用户明确要求重新转换」(重试 / 重新入队 / 改用 OCR):
+  //  必须把 --force 透传给 CLI,否则已有产物会让它直接 skip —— 界面看起来成功、
+  //  其实什么都没发生(retry ≠ new conversion 的根源)。
+  const convertOne = useCallback(async (f: QueueFile, backendOverride?: string, force = false) => {
     if (canceled.current.has(f.id)) return;
     canceled.current.delete(f.id);
     setFiles(prev => prev.map(x => x.id === f.id ? {
@@ -2030,6 +2101,8 @@ export default function App() {
       status: "converting" as FileStatus,
       progress: 5,
       error: undefined,
+      errorCode: undefined,
+      retrying: null,
       warning: false,
       legacy: false,
       log: [],
@@ -2038,7 +2111,13 @@ export default function App() {
       engine: initialEventState(),
     } : x));
     try {
-      const res = await invoke<{ success: boolean; epub: string | null; error: string | null }>("convert_file", {
+      const res = await invoke<{
+        success: boolean;
+        status: string;
+        epub: string | null;
+        error: string | null;
+        error_code: string | null;
+      }>("convert_file", {
         filePath: f.path,
         outputDir,
         backend: backendOverride ?? (backendPref === "auto" ? null : backendPref),
@@ -2047,37 +2126,49 @@ export default function App() {
         taskId: f.id,
         cleanDisable,
         strict: strictVerify,
+        force,
       });
       if (canceled.current.has(f.id)) return;
+      // 引擎终态 → 队列状态(completed / skipped / failed,三者互不冒充)
+      const status: FileStatus =
+        res.status === "skipped" ? "skipped" : res.status === "completed" ? "done" : "failed";
+      const finished = status === "done" || status === "skipped";
       setFiles(prev => prev.map(x => x.id === f.id ? {
         ...x,
-        status: res.success ? "done" : "failed",
-        progress: res.success ? 100 : 60,
+        status,
+        // 失败时保留真实进度(别再往上跳一个假数字)
+        progress: finished ? 100 : x.progress,
         epub: res.epub ?? undefined,
         error: res.error ?? undefined,
-        date: res.success ? new Date().toISOString().slice(0, 10) : x.date,
-        signatures: res.success ? undefined : x.signatures,
-        stages: res.success
+        errorCode: res.error_code ?? x.errorCode,
+        retrying: null,
+        date: finished ? new Date().toISOString().slice(0, 10) : x.date,
+        signatures: status === "done" ? undefined : x.signatures,
+        stages: finished
           ? x.stages.map(s => ({ ...s, state: "done" as StageState }))
           : x.stages.map(s => s.state === "active" ? { ...s, state: "failed" as StageState } : s),
         lastLog: res.error ?? undefined,
       } : x));
-      // 转换完成 → 把类型/后端/页数回写进书库(library.json),重启后仍在
-      if (res.success && res.epub) {
+      // 转换完成 → 把类型/后端/页数回写进书库(library.json),重启后仍在。
+      // 跳过时只在已知类型时补写(用于修正旧记录的未知元数据),不覆盖成 Auto。
+      if (res.epub && (status === "done" || (status === "skipped" && f.type))) {
         const latest = filesRef.current.find(v => v.id === f.id);
+        const backend = latest?.backend ?? f.backend;
         void invoke("library_set_meta", {
           path: res.epub,
           kind: latest?.type ?? f.type ?? null,
-          backend: latest?.backend ?? null,
+          backend: backend && backend !== "Auto" ? backend : null,
           pages: latest?.pages ?? 0,
         }).catch(() => { /* 记录尚未建立时忽略 */ });
       }
     } catch (err) {
       if (canceled.current.has(f.id)) return;
+      // 只有「启动不了 CLI / 任务异常」才走这里;转换失败本身由上面按 status 处理,
+      // 错误原文来自引擎事件(不是笼统的「Conversion failed」)
       setFiles(prev => prev.map(x => x.id === f.id ? {
         ...x,
         status: "failed" as FileStatus,
-        progress: 60,
+        retrying: null,
         error: String(err),
       } : x));
     }
@@ -2094,7 +2185,10 @@ export default function App() {
     });
   }, []);
 
-  const addFiles = useCallback(async (paths: string[]) => {
+  //  addFiles(force=true) 只用于「明确要求重转」的入口(书库 RE-CONVERT):
+  //  常规添加/拖放不加 force —— 已转过的书被跳过是**正确的续跑行为**,
+  //  界面会如实显示 SKIPPED(而不是假装成功)。
+  const addFiles = useCallback(async (paths: string[], force = false) => {
     const newFiles: QueueFile[] = paths.map((p, i) => ({
       id: `${Date.now()}-${i}`,
       path: p,
@@ -2111,10 +2205,10 @@ export default function App() {
     setFiles(prev => [...prev, ...newFiles]);
     rememberRecent(paths);
     setScreen("convert");
-    // 先印前检查(检测类型/页数/折帖/云端页数),再串行转换
+    // 先印前检查(检测类型/页数/折帖/云端页数,后端与转换一致),再串行转换
     void runPreflight(paths);
     for (const f of newFiles) {
-      await convertOne(f);
+      await convertOne(f, undefined, force);
     }
   }, [convertOne, rememberRecent, runPreflight]);
 
@@ -2155,16 +2249,21 @@ export default function App() {
 
   const retryFile = useCallback((id: string) => {
     const f = files.find(x => x.id === id);
-    if (f) void convertOne(f);
+    // 重试 = 用户明确要求重跑 → force(失败留下的半成品/已有产物都不能让它变 skip)
+    if (f) void convertOne(f, undefined, true);
   }, [files, convertOne]);
 
   const retryFailed = useCallback(async () => {
     for (const f of files) {
-      if (f.status === "failed") await convertOne(f);
+      if (f.status === "failed") await convertOne(f, undefined, true);
     }
   }, [files, convertOne]);
 
-  const clearDone = useCallback(() => setFiles(prev => prev.filter(f => f.status !== "done")), []);
+  // 清除终态行:done 与 skipped 都是「不需要再动」的行
+  const clearDone = useCallback(
+    () => setFiles(prev => prev.filter(f => f.status !== "done" && f.status !== "skipped")),
+    [],
+  );
 
   const cancelAll = useCallback(() => {
     setFiles(prev => prev.map(f =>
@@ -2178,10 +2277,14 @@ export default function App() {
     }
   }, [files]);
 
+  // 「使用 OCR」= 明确要求用云端 OCR 重转:预检与转换都要切到 mineru,并强制重跑
+  // (否则本地产物已经存在 → CLI 判「已完成」跳过,点了等于没点)
   const useOcrFor = useCallback((id: string) => {
     const f = files.find(x => x.id === id);
-    if (f) void convertOne(f, "mineru");
-  }, [files, convertOne]);
+    if (!f) return;
+    void runPreflight([f.path], "mineru");
+    void convertOne(f, "mineru", true);
+  }, [files, convertOne, runPreflight]);
 
   // ── 外观 / 语言(Segment 与 页眉 按钮共用)──
   const handleLang = (l: Lang) => setLang(l);
@@ -2243,10 +2346,12 @@ export default function App() {
     }
   }, [outputDir]);
 
+  // 书库「重新转换」= 用户明确要求重转 → force(否则已有 EPUB 会让它直接 skip,
+  // 界面看起来跑了一遍,其实什么都没发生)
   const reconvert = useCallback((path: string) => {
     const f = files.find(x => x.path === path);
-    if (f) void convertOne(f);
-    else void addFiles([path]);
+    if (f) void convertOne(f, undefined, true);
+    else void addFiles([path], true);
   }, [files, convertOne, addFiles]);
 
   const convertingCount = files.filter(f => f.status === "converting").length;

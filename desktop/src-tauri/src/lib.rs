@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -89,13 +89,84 @@ fn resolve_cli_path() -> String {
 
 #[derive(serde::Serialize)]
 struct ConvertResult {
+    /// 产物是否可用(completed / skipped 都为 true)—— 兼容旧字段
     success: bool,
+    /// 引擎终态:**completed / skipped / failed**(GUI 据此区分「跑了」与「早就有产物」)
+    status: String,
     epub: Option<String>,
     summary: Option<String>,
     error: Option<String>,
+    /// 引擎下发的机器可读错误码(src/events.py::error_code),GUI 按它分类显示
+    error_code: Option<String>,
 }
 
-/// 转换一个文件:调用 ebook-converter CLI,stdout 逐行推送进度事件
+/// 从 CLI 的 **事件流**(stdout 的 JSON Lines)里读终态。
+///
+/// 为什么不看人类日志:文案一改就静默失效。这里只认 `skip` / `complete` / `error`
+/// 三类终态事件;没有 error 却非零退出(如配置错误,CLI 直接 exit=2)由调用方用
+/// stderr 末行兜底说明原因。
+#[derive(Default, Debug)]
+struct EngineOutcome {
+    skipped: bool,
+    completed: bool,
+    error_code: Option<String>,
+    error_message: Option<String>,
+    /// 见过任何事件 → 引擎支持事件流(否则是老版 CLI,只能按退出码兜底)
+    saw_event: bool,
+}
+
+impl EngineOutcome {
+    /// 观察一行 stdout:非 JSON / 非事件行(人类日志)直接忽略。
+    fn observe(&mut self, line: &str) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            return;
+        };
+        let Some(event) = v.get("event").and_then(|e| e.as_str()) else {
+            return;
+        };
+        self.saw_event = true;
+        match event {
+            "skip" => self.skipped = true,
+            "complete" => self.completed = true,
+            "error" => {
+                self.error_message = v
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .map(|s| s.to_string());
+                self.error_code = v.get("code").and_then(|c| c.as_str()).map(|s| s.to_string());
+            }
+            _ => {}
+        }
+    }
+
+    /// 终态判定:引擎报了错就是失败;否则 skip 优先于 complete(同一份流不会两者兼有)。
+    fn status(&self, exit_ok: bool) -> &'static str {
+        if !exit_ok || self.error_message.is_some() {
+            "failed"
+        } else if self.skipped {
+            "skipped"
+        } else {
+            "completed"
+        }
+    }
+}
+
+/// 失败原因:优先用引擎的 error 事件,其次 stderr 末行,最后才退回退出码。
+fn failure_message(outcome: &EngineOutcome, stderr_tail: &str, exit_desc: &str) -> String {
+    if let Some(m) = outcome.error_message.as_ref().filter(|m| !m.trim().is_empty()) {
+        return m.clone();
+    }
+    let tail = stderr_tail.trim();
+    if !tail.is_empty() {
+        return tail.to_string();
+    }
+    format!("转换失败({exit_desc})")
+}
+
+/// 转换一个文件:调用 ebook-converter CLI,stdout 逐行推送进度事件。
+///
+/// `force=true` = 用户明确要求重转(重试 / 重新入队 / 改用 OCR):必须真的重跑,
+/// 不能被「已有产物」判成已完成而 skip。
 #[tauri::command]
 async fn convert_file(
     app: AppHandle,
@@ -107,6 +178,7 @@ async fn convert_file(
     task_id: Option<String>,
     clean_disable: Option<Vec<String>>,
     strict: Option<bool>,
+    force: Option<bool>,
 ) -> Result<ConvertResult, String> {
     let state: State<CliConfig> = app.state();
     let cli = match cli_path {
@@ -149,6 +221,10 @@ async fn convert_file(
     if strict.unwrap_or(false) {
         cmd.arg("--strict");
     }
+    // 用户明确要求重转 → --force(否则 CLI 会因「已有产物」直接 skip,界面却像成功)
+    if force.unwrap_or(false) {
+        cmd.arg("--force");
+    }
 
     let app2 = app.clone();
     let fp_for_stream = file_path.clone();
@@ -174,8 +250,17 @@ async fn convert_file(
         // 子进程会阻塞,转换会莫名卡死 —— 长书的日志足以写满。
         let stderr = child.stderr.take().unwrap();
         let app_log = app2.clone();
+        // stderr 末行:引擎没发 error 事件时(配置/参数错误时 CLI 直接 exit=2),
+        // 它是唯一能说明原因的文字 —— 别让界面只显示「转换失败(exit=2)」
+        let stderr_tail = Arc::new(Mutex::new(String::new()));
+        let tail_shared = Arc::clone(&stderr_tail);
         let log_thread = std::thread::spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(|l| l.ok()) {
+                if !line.trim().is_empty() {
+                    if let Ok(mut t) = tail_shared.lock() {
+                        *t = line.clone();
+                    }
+                }
                 let _ = app_log.emit(
                     "conv://progress",
                     serde_json::json!({ "file": fp_for_log, "line": line, "channel": "log" }),
@@ -183,9 +268,11 @@ async fn convert_file(
             }
         });
 
+        let mut outcome = EngineOutcome::default();
         let mut last_line = String::new();
         for line in BufReader::new(stdout).lines().map_while(|l| l.ok()) {
             let channel = if line.trim_start().starts_with('{') { "event" } else { "log" };
+            outcome.observe(&line);
             let _ = app2.emit(
                 "conv://progress",
                 serde_json::json!({ "file": fp_for_stream, "line": line, "channel": channel }),
@@ -201,38 +288,66 @@ async fn convert_file(
             }
         };
         tasks.procs.lock().unwrap().remove(&task_key);
-        if status.success() {
-            Ok(last_line)
-        } else {
-            Err(format!("转换失败(exit={status})"))
-        }
+        let tail = stderr_tail.lock().map(|t| t.clone()).unwrap_or_default();
+        Ok((outcome, tail, status, last_line))
     })
     .await
     .map_err(|e| format!("任务异常: {e}"))??;
     // 兜底清理(异常路径也不会留下悬挂的 pid)
     app.state::<RunningTasks>().procs.lock().unwrap().remove(&task_key_outer);
 
-    let _ = app.emit("conv://done", "ok");
+    let (outcome, stderr_tail, status, summary) = result;
+    let terminal = outcome.status(status.success());
+    let _ = app.emit("conv://done", terminal);
+    if terminal == "failed" {
+        // 失败不是交付物:不推断 EPUB 路径、不入库(旧实现无条件报 success=true)
+        return Ok(ConvertResult {
+            success: false,
+            status: terminal.into(),
+            epub: None,
+            summary: Some(summary),
+            error: Some(failure_message(&outcome, &stderr_tail, &format!("exit={status}"))),
+            error_code: outcome.error_code,
+        });
+    }
     let epub = infer_epub_path(&file_path, &output_dir, started);
+    // 「进程正常退出」≠「本次真的产出了 EPUB」:引擎说完成却没有新产物 → 如实报失败
+    if epub.is_none() && terminal == "completed" {
+        return Ok(ConvertResult {
+            success: false,
+            status: "failed".into(),
+            epub: None,
+            summary: Some(summary),
+            error: Some("引擎报告转换完成,但输出目录中没有找到 EPUB".into()),
+            error_code: Some("output_error".into()),
+        });
+    }
     if let Some(ep) = &epub {
         upsert_library(ep); // 转换产物自动入库
     }
     Ok(ConvertResult {
         success: true,
+        status: terminal.into(),
         epub,
-        summary: Some(result),
+        summary: Some(summary),
         error: None,
+        error_code: None,
     })
 }
 
 /// 预检(dry-run):检测类型 / 页数 / 计划后端 / 分片 / 当日云端额度,
 /// **不产出任何文件、不消耗 OCR 额度**。返回 CLI 的 JSON 文本,前端解析后
 /// 填「类型检测预览」与「印前检查」区域(转换前就能看到将要发生什么)。
+///
+/// `backend` 必须与真正转换时用的**同一个**(默认跟设置里的后端偏好一致):
+/// 否则会出现「预检显示本地、实际跑云端 OCR」。`--backend <x>` 与转换命令同源
+/// (`--backend auto` 等价于不传)。
 #[tauri::command]
 async fn preflight(
     app: AppHandle,
     file_paths: Vec<String>,
     cli_path: Option<String>,
+    backend: Option<String>,
 ) -> Result<String, String> {
     if file_paths.is_empty() {
         return Err("没有待预检的文件".into());
@@ -254,7 +369,11 @@ async fn preflight(
             cmd.current_dir(dir);
         }
     }
-    cmd.arg("--dry-run").arg("--json").args(&file_paths);
+    cmd.arg("--dry-run").arg("--json");
+    if let Some(b) = backend.filter(|b| !b.trim().is_empty() && b != "auto") {
+        cmd.arg("--backend").arg(b);
+    }
+    cmd.args(&file_paths);
 
     let cli_for_msg = cli.clone();
     let output = tauri::async_runtime::spawn_blocking(move || cmd.output())
@@ -1042,6 +1161,73 @@ mod tests {
     fn apikey_merge_rejects_broken_json() {
         assert!(merge_apikey("not json", "MinerU", "x").is_err());
         assert!(merge_apikey("[1,2]", "MinerU", "x").is_err());
+    }
+
+    // ---------- 引擎终态判定(skip ≠ completed,错误带码) ----------
+    //  这几条对应 GUI 验收的 Case A/B/C:壳层若不区分,界面就只能「看起来成功」。
+
+    #[test]
+    fn skip_is_not_completed() {
+        let mut o = EngineOutcome::default();
+        o.observe(r#"{"event":"hello","stages":[{"name":"detect","weight":0.05}]}"#);
+        o.observe(r#"{"event":"skip","file":"书.pdf","epub":"书.epub"}"#);
+        assert_eq!(o.status(true), "skipped");
+        assert!(o.skipped && !o.completed && o.error_message.is_none());
+    }
+
+    #[test]
+    fn complete_is_completed() {
+        let mut o = EngineOutcome::default();
+        for line in [
+            r#"{"event":"stage","name":"detect","state":"start"}"#,
+            r#"{"event":"progress","stage":"extract","current":1,"total":2}"#,
+            r#"{"event":"verify","errors":0,"warnings":0,"message":""}"#,
+            r#"{"event":"complete","file":"书.pdf","epub":"书.epub","backend":"pymupdf","pdf_type":"text","seconds":1.5}"#,
+        ] {
+            o.observe(line);
+        }
+        assert_eq!(o.status(true), "completed");
+        assert!(!o.skipped);
+    }
+
+    #[test]
+    fn error_event_carries_code_and_beats_exit_code() {
+        let mut o = EngineOutcome::default();
+        o.observe(r#"{"event":"error","code":"ocr_failed","message":"缺少 MinerU API Token:请设置环境变量","file":"扫描书.pdf"}"#);
+        assert_eq!(o.status(true), "failed", "引擎报了错就是失败,不看退出码");
+        assert_eq!(o.error_code.as_deref(), Some("ocr_failed"));
+        assert!(o.error_message.as_deref().unwrap_or_default().contains("Token"));
+    }
+
+    #[test]
+    fn non_terminal_lines_do_not_decide_the_outcome() {
+        // 阶段/进度事件、中文日志、空行都不是终态:没有终态事件 → 由退出码决定
+        let mut o = EngineOutcome::default();
+        for line in [
+            "",
+            "   ",
+            "[detect] type=text, text_ratio=100% (3/3 页有文字层)",
+            r#"{"event":"stage","name":"extract","state":"done","backend":"pymupdf"}"#,
+            r#"{"not":"an event"}"#,
+        ] {
+            o.observe(line);
+        }
+        assert!(o.error_message.is_none() && !o.skipped && !o.completed);
+        assert_eq!(o.status(true), "completed");
+        assert_eq!(o.status(false), "failed");
+    }
+
+    #[test]
+    fn failure_message_prefers_engine_then_stderr() {
+        let mut o = EngineOutcome::default();
+        o.observe(r#"{"event":"error","code":"verify_failed","message":"EPUB 校验未通过"}"#);
+        assert_eq!(failure_message(&o, "别的日志", "exit=exit code 1"), "EPUB 校验未通过");
+
+        // 没有 error 事件(如配置错误直接 exit=2)→ 用 stderr 末行,别只报退出码
+        let empty = EngineOutcome::default();
+        assert_eq!(failure_message(&empty, "  参数错误: 未知清理项: nope  ", "exit code 2"),
+                   "参数错误: 未知清理项: nope");
+        assert_eq!(failure_message(&empty, "", "exit code 2"), "转换失败(exit code 2)");
     }
 
     #[test]
