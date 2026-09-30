@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import filecmp
 import shutil
 from pathlib import Path
 
@@ -18,7 +19,12 @@ import pymupdf
 import yaml
 
 from backends import get_backend
-from backends.base import Backend, ConversionResult, normalize_image_refs
+from backends.base import (
+    PARTS_DIR,
+    Backend,
+    ConversionResult,
+    normalize_image_refs,
+)
 from detector.pdf_detector import PDFDetector, PDFType
 from markdown.bold import annotate_bold
 from page_result import (
@@ -208,16 +214,16 @@ def _ocr_run(
     try:
         scan = ocr.convert(tmp_pdf, run_work)
         md = scan.book_md.read_text(encoding="utf-8")
-        md = _absorb_images(run_work / IMAGES_DIR, images_abs, md,
-                            prefix=f"scan_p{page_no}_")
+        # 图片目录以 ConversionResult 声明的为准(不假设后端把图放在哪个子目录)
+        images_src = Path(scan.images_dir) if scan.images_dir else run_work / IMAGES_DIR
+        md = _absorb_images(images_src, images_abs, md, prefix=f"scan_p{page_no}_")
     except Exception:
-        # OCR 失败:保留 run_work —— 里面的 .ocr_task.json 记录着已提交的云端
-        # 任务,重跑时可直接续跑(不重新上传、不重复扣额度)
+        # OCR 失败:保留 run_work —— 里面的 .ocr_task.json / _parts/ 记录着已提交
+        # 与已取回的云端结果,重跑时可直接续跑(不重新上传、不重复扣额度)
         tmp_pdf.unlink(missing_ok=True)
         raise
     tmp_pdf.unlink(missing_ok=True)
-    shutil.rmtree(run_work, ignore_errors=True)
-
+    _keep_only_parts(run_work)
     return PageResult(
         pages=tuple(p + 1 for p in run),   # 0-indexed → 1-indexed 原始页码
         source="ocr",
@@ -226,8 +232,35 @@ def _ocr_run(
     )
 
 
+def _keep_only_parts(run_work: Path) -> None:
+    """区段成功后只清临时产物,保留 `_parts/`(该区段云端结果的落盘缓存)。
+
+    留着它是有意的:后续区段失败或用户重跑时,这一段直接复用 —— 不再渲染、不再上传、
+    不再 OCR、不再计费(见 backends/base.py 的 PartStore)。临时中间目录名以 `_` 开头,
+    `work/` 里一眼能看出哪些是缓存、哪些是垃圾。没有东西要留时目录本身也删掉(不留空壳)。
+    """
+    if not run_work.is_dir():
+        return
+    for child in run_work.iterdir():
+        if child.name == PARTS_DIR:
+            continue
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink(missing_ok=True)
+    try:
+        run_work.rmdir()
+    except OSError:
+        pass          # 还留着 _parts/,目录继续存在
+
+
 def _absorb_images(src_dir: Path, dst_dir: Path, md: str, *, prefix: str) -> str:
-    """把 OCR 子目录的图片并入统一 images/;重名时加前缀并同步改引用。"""
+    """把 OCR 子目录的图片并入统一 images/,并保持「同一输入 → 同一文件名」。
+
+    - 目标不存在 → 移过去,引用不变
+    - 目标已存在且内容相同 → 删掉这份重复的,引用保持原样(重跑产物稳定、不产生垃圾图)
+    - 目标已存在但内容不同(跨区段重名) → 加区段前缀并同步改引用
+    """
     if not src_dir.is_dir():
         return md
     for img in sorted(src_dir.iterdir()):
@@ -235,6 +268,9 @@ def _absorb_images(src_dir: Path, dst_dir: Path, md: str, *, prefix: str) -> str
             continue
         target = dst_dir / img.name
         if target.exists():
+            if filecmp.cmp(img, target, shallow=False):
+                img.unlink(missing_ok=True)      # 同一张图,复用已有的那份
+                continue
             new_name = f"{prefix}{img.name}"
             img.replace(dst_dir / new_name)
             md = _rename_image_refs(md, img.name, new_name)
@@ -250,17 +286,28 @@ def _rename_image_refs(md: str, old_name: str, new_name: str) -> str:
     return md
 
 
-def _render_pages_to_pdf(src_pdf: Path, page_idxs: list[int], out_pdf: Path) -> None:
-    """把指定页渲染为纯图 PDF(无文字层),用于 OCR。"""
+def _render_pages_to_pdf(src_pdf: Path, page_idxs: list[int], out_pdf: Path,
+                         dpi: int = 150, jpg_quality: int = 85) -> None:
+    """把指定页渲染为纯图 PDF(无文字层),用于 OCR。
+
+    **用 JPEG 不用 PNG**:同样 150dpi 渲染,PNG 版本实测每页约 6.2MB(20 页就 124MB),
+    JPEG q85 约 0.16MB/页 —— 一段 30 页以上的扫描区段 PNG 版会直接顶破云端的
+    200MB 上限(提交被拒或上传超时),本地也要多写几百 MB。质量 85 与降级路径
+    (`mineru_backend._render_to_image_pdf`)一致,文字清晰度实测足够 OCR。
+    """
     src = pymupdf.open(src_pdf)
     out = pymupdf.open()
     try:
         for idx in page_idxs:
             page = src[idx]
-            pix = page.get_pixmap(dpi=150)
+            pix = page.get_pixmap(dpi=dpi)
             new_page = out.new_page(width=page.rect.width, height=page.rect.height)
-            new_page.insert_image(new_page.rect, stream=pix.tobytes("png"))
-        out.save(out_pdf)
+            new_page.insert_image(new_page.rect,
+                                  stream=pix.tobytes("jpeg", jpg_quality=jpg_quality))
+        # no_new_id:PyMuPDF 每次保存都会写一个新的 /ID,同一批页渲染两次字节并不相同。
+        # 而云端续跑缓存(.ocr_task.json)是按**收到的 PDF 内容指纹**命中的 —— 字节不稳定
+        # 意味着指纹永不相等,hybrid 中断后重跑会重新上传整段、重复扣云端额度。
+        out.save(out_pdf, no_new_id=True)
     finally:
         src.close()
         out.close()

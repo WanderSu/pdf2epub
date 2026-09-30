@@ -82,10 +82,13 @@ def main(argv: list[str] | None = None) -> int:
         config = load_config(config_file())
         clean_options = resolve_options(config, args.clean_disable)
     except ValueError as e:
+        # 配置类失败也发事件:桌面端据此显示「配置错误」而不是笼统的「转换失败」
         print(f"参数错误: {e}", file=sys.stderr)
+        events.emit("error", code="config_error", message=f"参数错误: {e}")
         return 2
     except FileNotFoundError as e:
         print(f"配置缺失: {e}", file=sys.stderr)
+        events.emit("error", code="config_error", message=f"配置缺失: {e}")
         return 2
     if args.no_resume:
         for name in ("mineru", "paddleocr"):
@@ -149,6 +152,10 @@ def main(argv: list[str] | None = None) -> int:
         lang=args.lang,
     )
     if not results:
+        # 没有可处理的文件(路径不存在 / 扩展名不支持)→ 也是「输入错误」,
+        # 让桌面端能显示原因,而不是只说「失败」
+        events.emit("error", code="input_error",
+                    message="没有找到可处理的文件:路径不存在或扩展名不受支持(支持 .pdf / .md)")
         return 2
 
     failed = [r for r in results if r.status == "failed"]
