@@ -7,6 +7,10 @@
   3. 下载 JSONL 结果:每页 markdown.text + markdown.images{相对路径: URL}
   4. 拼接为统一 work/book.md,图片按相对路径下载到 work/images/
 
+**脚注**:云端 `markdown_ignore_labels` 默认忽略 `footnote`,不显式传这个字段时
+脚注会整批不出现在返回的 Markdown 里;这里默认传「官方默认值 − footnote」,
+让脚注随正文一起返回(详见 `DEFAULT_MARKDOWN_IGNORE_LABELS`)。
+
 **续跑的两层缓存**:`.ocr_task.json` 记「已提交但没取回结果」的 jobId(重跑继续轮询
 同一个 job,不重新上传);`_parts/whole/` 记**已经拿到的结果**(云端任务成功即已计费,
 之后清理/EPUB 阶段失败后的重试、用户手动重跑都直接复用它,完全不碰云端)。
@@ -37,6 +41,24 @@ from paths import load_api_key
 
 JOBS_URL = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
 MODEL = "PaddleOCR-VL-1.6"
+
+#: 提交给云端的版面标签过滤(`optionalPayload.markdownIgnoreLabels`)。
+#:
+#: **为什么要显式传**:PaddleOCR-VL 的 `markdown_ignore_labels` 默认值是
+#: ``['number','footnote','header','header_image','footer','footer_image','aside_text']``
+#: —— 也就是说**脚注(`footnote`)默认被丢掉**,而我们此前没有传这个字段,于是
+#: 脚注整批不会出现在返回的 Markdown 里(问题不在解析,在这里)。
+#:
+#: 默认值 = 官方默认值 **去掉 `footnote`**:页眉页脚/页码/边注这些仍然过滤
+#: (保留会把 `number`/`header`/`footer` 之类的噪声全部带进正文),只让脚注留下来。
+DEFAULT_MARKDOWN_IGNORE_LABELS = (
+    "number",
+    "header",
+    "header_image",
+    "footer",
+    "footer_image",
+    "aside_text",
+)
 
 DEFAULT_TIMEOUT = 600      # 轮询总超时(秒)
 POLL_INTERVAL = 6          # 轮询间隔(秒)
@@ -71,6 +93,7 @@ class PaddleOCRAdapter(Backend):
         use_chart_recognition: bool = False,
         use_doc_orientation_classify: bool = False,
         use_doc_unwarping: bool = False,
+        markdown_ignore_labels: list[str] | tuple[str, ...] | None = None,
         timeout: int = DEFAULT_TIMEOUT,
         poll_interval: int = POLL_INTERVAL,
         resume: bool = True,
@@ -89,6 +112,11 @@ class PaddleOCRAdapter(Backend):
         self.use_chart_recognition = use_chart_recognition
         self.use_doc_orientation_classify = use_doc_orientation_classify
         self.use_doc_unwarping = use_doc_unwarping
+        # None → 用默认值(保留脚注);显式传 [] 表示「什么都不过滤」
+        self.markdown_ignore_labels = list(
+            DEFAULT_MARKDOWN_IGNORE_LABELS if markdown_ignore_labels is None
+            else markdown_ignore_labels
+        )
         self.timeout = timeout
         self.poll_interval = poll_interval
         self.resume = resume
@@ -98,12 +126,17 @@ class PaddleOCRAdapter(Backend):
         return {"Authorization": f"Bearer {self.token}"}
 
     def _params_fp(self) -> str:
-        """OCR 参数指纹:换模型/开关后不能复用旧结果。"""
+        """OCR 参数指纹:换模型/开关/标签过滤后不能复用旧结果。
+
+        `markdown_ignore_labels` **必须进指纹**:「忽略 footnote」与「保留 footnote」
+        是两次不同的 OCR,复用旧结果会让配置改动看起来没生效(拿到的仍是旧文本)。
+        """
         return params_fingerprint({
             "model": MODEL,
             "chart": self.use_chart_recognition,
             "orientation": self.use_doc_orientation_classify,
             "unwarp": self.use_doc_unwarping,
+            "ignore_labels": self.markdown_ignore_labels,
         })
 
     # ---------- 核心流程 ----------
@@ -212,6 +245,9 @@ class PaddleOCRAdapter(Backend):
             "useDocOrientationClassify": self.use_doc_orientation_classify,
             "useDocUnwarping": self.use_doc_unwarping,
             "useChartRecognition": self.use_chart_recognition,
+            # 云端默认会忽略 footnote(脚注整批消失);显式给出过滤列表,保留脚注。
+            # 字段名/取值形态取自官方 API(optionalPayload.markdownIgnoreLabels)。
+            "markdownIgnoreLabels": self.markdown_ignore_labels,
         }
         data = {
             "model": MODEL,

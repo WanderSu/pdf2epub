@@ -209,3 +209,46 @@ def test_changed_params_invalidate_the_part_cache(tmp_path, fake) -> None:
     _adapter(use_doc_unwarping=True).convert(pdf, work)
 
     assert len(fake.posts) == 2
+
+
+# ---------------------------------------------------------------- 脚注标签过滤
+
+def _optional_payload(fake: FakePaddle) -> dict:
+    return json.loads(fake.posts[0]["data"]["optionalPayload"])
+
+
+def test_submit_keeps_footnotes_by_default(tmp_path, fake) -> None:
+    """云端默认会忽略 footnote → 必须显式传 markdownIgnoreLabels 把脚注留下来。
+
+    传的是「官方默认值 − footnote」:页眉页脚/页码/边注仍被过滤(否则噪声全进正文),
+    只有脚注不再被丢。
+    """
+    _adapter().convert(make_pdf(tmp_path / "扫描书.pdf", pages=2), tmp_path / "work")
+
+    labels = _optional_payload(fake).get("markdownIgnoreLabels")
+    assert labels is not None, "没有传 markdownIgnoreLabels 时云端会按默认值丢掉脚注"
+    assert "footnote" not in labels
+    assert {"header", "footer", "number", "aside_text"} <= set(labels)
+
+
+def test_submit_honours_configured_labels(tmp_path, fake) -> None:
+    """配置里给的过滤列表原样上送(含显式 [] = 什么都不过滤)。"""
+    _adapter(markdown_ignore_labels=[]).convert(
+        make_pdf(tmp_path / "扫描书.pdf", pages=2), tmp_path / "work")
+
+    assert _optional_payload(fake)["markdownIgnoreLabels"] == []
+
+
+def test_changed_labels_invalidate_the_part_cache(tmp_path, fake) -> None:
+    """「忽略 footnote」与「保留 footnote」是两次不同的 OCR,不能共用段缓存。"""
+    pdf = make_pdf(tmp_path / "扫描书.pdf", pages=2)
+    work = tmp_path / "work"
+    _adapter().convert(pdf, work)
+
+    _adapter(markdown_ignore_labels=["footnote"]).convert(pdf, work)
+
+    assert len(fake.posts) == 2
+
+    # 标签一致时仍然复用(不因指纹里多了个字段就次次重跑)
+    _adapter(markdown_ignore_labels=["footnote"]).convert(pdf, work)
+    assert len(fake.posts) == 2

@@ -32,7 +32,7 @@ GOLDEN_MAP: dict[str, list[str]] = {
     "running_heads": ["running_heads", "code_fence_protected"],
     #   正例:重复 3 次被删;反例:只出现 2 次的短行保留、代码块里重复的 end 保留
     "join_lines": ["join_lines", "poetry_preserved", "poetry_quoted", "poetry_modern",
-                   "page_markers", "ordered_list_toc"],
+                   "page_markers", "ordered_list_toc", "footnotes"],
     #   正例:断行拼接(含「短行散文」那对)、跨页码注释的拼接(page_markers)
     #   反例:代码块/表格不拼、诗行不拼且加硬换行、标题/列表/引用跨注释不拼
     #   (page_markers)、有序列表条目与页码行不被粘进相邻行(ordered_list_toc 取自
@@ -40,6 +40,8 @@ GOLDEN_MAP: dict[str, list[str]] = {
     #   (hard break 也挂在 join_lines 开关下:它是「怎么处理换行」的同一件事)
     #   poetry_modern:13-18 字的现代诗行 —— 曾经只判「不拼接」而不加硬换行,
     #   pandoc 把软换行渲染成空格,诗在阅读器里照样挤成一行(硬换行门槛与不拼接门槛必须一致)
+    #   footnotes:脚注定义块整体受保护 —— 反例里正文行不以句末标点结尾、脚注定义紧跟其后,
+    #   修复前这两条定义会被拼进正文段(pandoc 认不出脚注,清理后的产物脚注数 0)
     "ocr_spaces": ["ocr_spaces", "code_fence_protected"],
     #   正例:Py Mu PDF → PyMuPDF;反例:正常英文短语、代码块里的注释不被合并
     "cjk_spaces": ["cjk_spaces", "should_not_touch", "code_fence_protected", "page_markers"],

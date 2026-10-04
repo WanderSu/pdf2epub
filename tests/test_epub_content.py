@@ -233,6 +233,47 @@ def test_footnotes_survive_into_the_epub(tmp_path: Path) -> None:
     assert verify_epub(epub).stats["footnote_sections"] >= 1
 
 
+def test_cleaned_footnotes_survive_into_the_epub(tmp_path: Path) -> None:
+    """清理器 → Pandoc → EPUB 全链路:脚注必须仍是 **EPUB 原生脚注**。
+
+    样本刻意取最容易出事的形状:正文行不以句末标点结尾、脚注定义紧跟其后。
+    修复前 `join_lines` 会把定义拼进正文段 —— 清理后源里连 `[^1]:` 都没有了,
+    内容对照校验看不见,只有在这里(产物侧)才能发现整批注释降级成正文文字。
+    """
+    import re
+    import zipfile
+
+    from epub.pandoc import build_epub as pandoc_build_epub
+    from markdown.cleaner import CleanOptions, clean_markdown
+
+    src = tmp_path / "src"
+    src.mkdir(parents=True, exist_ok=True)
+    raw = ("# 脚注样本\n\n"
+           "这种方法的效果在实验中得到了验证,而且重复了三次以上[^1]\n\n"
+           "[^1]: 第一条脚注,内容是中文,长度足够长\n"
+           "[^2]: 第二条脚注,内容也是中文,同样足够长\n\n"
+           "结论段落正文正文正文正文正文[^2],以句号结尾。\n")
+    cleaned = clean_markdown(raw, options=CleanOptions())
+    assert markdown_footnote_defs(cleaned) == 2          # 定义没被吃掉
+
+    book_md = src / "book.md"
+    book_md.write_text(cleaned, encoding="utf-8")
+    # 走生产路径(pandoc 副本归一化 + 项目 CSS + 元数据),不用测试夹具拼 md
+    epub = pandoc_build_epub(book_md, src, tmp_path / "output",
+                             title="脚注样本", out_name="脚注样本")
+
+    report = verify_content(book_md, epub)
+    assert report.issues == [], [i.message for i in report.issues]
+    assert report.stats["content_md_footnotes"] == 2
+    assert report.stats["content_epub_footnotes"] == 2
+
+    with zipfile.ZipFile(epub) as zf:
+        xhtml = " ".join(zf.read(n).decode("utf-8") for n in zf.namelist()
+                         if n.endswith(".xhtml"))
+    assert len(re.findall(r'epub:type="footnote"', xhtml)) == 2
+    assert "第一条脚注" in xhtml and "第二条脚注" in xhtml
+
+
 def test_lost_links_warn(tmp_path: Path) -> None:
     """链接全丢只告警(产物里的链接含 pandoc 自动生成的脚注回链,数量不可直接比)。"""
     src = tmp_path / "src"

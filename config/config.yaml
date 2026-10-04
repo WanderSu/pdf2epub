@@ -52,3 +52,15 @@ paddleocr:
   use_doc_orientation_classify: false
   use_doc_unwarping: false
   resume: true              # 中断后复用已提交的云端任务,不重新上传
+  # 版面标签过滤(云端 optionalPayload.markdownIgnoreLabels)。
+  # 官方默认值是 [number, footnote, header, header_image, footer, footer_image,
+  # aside_text] —— 其中 footnote 会把脚注整批丢掉,所以这里显式去掉 footnote:
+  # 页眉页脚/页码/边注照旧过滤,只让脚注留在 Markdown 里。
+  # 改成 [] 表示什么都不过滤(噪声会明显变多,一般不需要)。
+  markdown_ignore_labels:
+    - number
+    - header
+    - header_image
+    - footer
+    - footer_image
+    - aside_text

@@ -26,7 +26,8 @@ import requests
 
 import convert
 from backends import mineru_backend
-from backends.base import ConversionResult, TaskCache, file_fingerprint, is_retryable
+from backends.base import (ConversionResult, PartStore, TaskCache, file_fingerprint,
+                           is_retryable)
 from backends.mineru_backend import MinerUAdapter, MinerUError
 from conftest import make_mixed_pdf, make_paged_pdf, write_png
 from page_result import page_marks
@@ -91,6 +92,8 @@ class FakeMinerUCloud:
         self.posts: list[dict] = []
         self.uploads: list[str] = []
         self.polls = 0
+        #: data_id → 页脚脚注文本(有值时结果包里会带上 content_list.json)
+        self.footnotes: dict[str, str] = {}
 
     # --- requests 的替身 ---
     def post(self, url: str, *, headers=None, json=None, timeout=None) -> FakeResponse:
@@ -150,12 +153,15 @@ class FakeMinerUCloud:
             items.append(item)
         return FakeResponse(payload={"code": 0, "data": {"extract_result": items}})
 
-    @staticmethod
-    def _zip_bytes(data_id: str) -> bytes:
+    def _zip_bytes(self, data_id: str) -> bytes:
         """每个分段固定产出:full.md + images/fig.png,用于测跨段重名处理。
 
         图片字节带上段标识 → 不同段里的同名图是**内容不同的两张图**,合并时必须
         改名(加段前缀)并同步改引用,否则后一段的图会盖掉前一段的。
+
+        `footnotes[data_id]` 有值时额外产出结构化结果 `*_content_list.json`:
+        **full.md 里没有页脚脚注,脚注只在结构化结果里** —— 这是真实 MinerU 的行为
+        (page_footnote 属 discarded blocks),用来验证后端的补回逻辑。
         """
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w") as zf:
@@ -163,6 +169,16 @@ class FakeMinerUCloud:
                         f"# 分段 {data_id}\n\n这是 {data_id} 的正文段落,以句号结尾。\n\n"
                         f"![图](images/fig.png)\n")
             zf.writestr(f"{data_id}/images/fig.png", f"\x89PNG-fake-{data_id}".encode())
+            note = self.footnotes.get(data_id)
+            if note:
+                blocks = [
+                    {"type": "text", "text": f"这是 {data_id} 的正文段落,以句号结尾。",
+                     "page_idx": 0},
+                    {"type": "page_footnote", "text": note, "page_idx": 0},
+                    {"type": "page_number", "text": "1", "page_idx": 0},
+                ]
+                zf.writestr(f"{data_id}/{data_id}_content_list.json",
+                            json.dumps(blocks, ensure_ascii=False))
         return buf.getvalue()
 
 
@@ -263,6 +279,78 @@ def test_single_task_keeps_no_page_markers(tmp_path, cloud) -> None:
     assert len(cloud.uploads) == 1
     assert page_marks(result.book_md.read_text(encoding="utf-8")) == []
     assert result.stats["parts"] == 1
+
+
+# ---------------------------------------------------------------- 页脚脚注补回
+
+def test_page_footnote_from_structured_result_is_recovered(tmp_path, cloud) -> None:
+    """`full.md` 不含 page_footnote(真实 MinerU 行为)→ 合并时从结构化结果补回。
+
+    补回位置是**该页最后一块内容之后**,而不是丢到文末;页码之类的 discarded blocks
+    不补(那是页面装饰,markdown 侧本来就要过滤掉)。
+    """
+    cloud.footnotes["书.pdf"] = "① 这是测试脚注:内容不能丢。"
+    pdf = make_paged_pdf(tmp_path / "书.pdf", pages=3)
+
+    result = _adapter().convert(pdf, tmp_path / "work")
+
+    md = result.book_md.read_text(encoding="utf-8")
+    assert "这是测试脚注" in md
+    assert md.index("正文段落,以句号结尾。") < md.index("这是测试脚注")
+    assert result.stats["recovered_footnotes"] == 1
+    assert "\n1\n" not in md                       # page_number 不被补进正文
+    # 结构化结果随段缓存落盘:否则下次续跑合并时补不回来
+    assert list((tmp_path / "work" / "_parts").rglob("content_list.json"))
+
+    # 新进程只看得到磁盘:再跑一次(命中段缓存、不重新提交云端任务)脚注依然补得回
+    again = _adapter().convert(pdf, tmp_path / "work")
+
+    assert len(cloud.posts) == 1
+    assert "这是测试脚注" in again.book_md.read_text(encoding="utf-8")
+    assert again.stats["recovered_footnotes"] == 1
+
+
+def test_cached_part_without_structured_result_still_merges(tmp_path, cloud) -> None:
+    """本次改动之前落的段缓存没有 content_list.json:照常复用合并,只是补不回脚注。
+
+    不能因为缺一个附带文件就把整段判成失效 —— 那会让用户为一个附带文件重新
+    上传、重新 OCR、重复计费。
+    """
+    cloud.footnotes["书.pdf"] = "① 旧结果里的脚注。"
+    pdf = make_paged_pdf(tmp_path / "书.pdf", pages=3)
+    work = tmp_path / "work"
+    _adapter().convert(pdf, work)
+    for path in (work / "_parts").rglob("content_list.json"):
+        path.unlink()
+
+    result = _adapter().convert(pdf, work)
+
+    assert len(cloud.posts) == 1                   # 没有重新提交云端任务
+    assert "旧结果里的脚注" not in result.book_md.read_text(encoding="utf-8")
+
+
+def test_failed_extra_file_write_leaves_no_usable_cache(tmp_path, monkeypatch) -> None:
+    """附带文件写失败时 meta 还没写 → 这段不算命中,绝不留下「有 meta 却没内容」的假缓存。
+
+    代价是这一段要重新 OCR;反过来(先写 meta 再写文件)就会出现「缓存命中但脚注
+    永久缺失」的错误状态,比多花一次额度更糟。
+    """
+    import shutil
+
+    store = PartStore(tmp_path / "work", "mineru", "源指纹", resume=True)
+    src = tmp_path / "content_list.json"
+    src.write_text("[]", encoding="utf-8")
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("磁盘满")
+
+    monkeypatch.setattr(shutil, "copy2", boom)
+
+    with pytest.raises(RuntimeError, match="磁盘满"):
+        store.save("1-1", "params", "# 正文", extra_files={"content_list.json": src})
+
+    assert not (store.dir_for("1-1") / ".part.json").exists()
+    assert store.has_result("1-1", "params") is False
 
 
 # ---------------------------------------------------------------- 续跑

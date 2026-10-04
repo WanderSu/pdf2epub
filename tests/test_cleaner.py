@@ -321,6 +321,80 @@ def test_page_number_rule_keeps_years_and_long_numbers() -> None:
     assert "3.14" in out
 
 
+# ---------------------------------------------------------------- 脚注保护
+
+#: 正文行**不以句末标点结尾** + 脚注定义紧跟其后 —— OCR 产物最常见的形态,
+#: 也是修复前必然被 `join_lines` 拼进正文的形状(定义语法就此消失)。
+FOOTNOTE_HAZARD = ("这种方法的效果在实验中得到了验证,而且重复了三次以上[^1]\n\n"
+                   "[^1]: 第一条脚注,内容是中文,长度足够长\n"
+                   "[^2]: 第二条脚注,内容也是中文,同样足够长\n\n"
+                   "结论段落正文正文正文正文正文[^2],以句号结尾。\n")
+
+
+def test_footnote_definitions_not_joined_into_body() -> None:
+    """脚注定义是块结构,不得被拼进上一段(修复前定义会整条消失)。"""
+    out = clean(FOOTNOTE_HAZARD)
+    assert "[^1]: 第一条脚注,内容是中文,长度足够长" in out
+    assert "[^2]: 第二条脚注,内容也是中文,同样足够长" in out
+    assert "三次以上[^1][^1]:" not in out
+    assert "长度足够长[^2]:" not in out
+    assert out.count("[^") == 4          # 2 处引用 + 2 条定义
+
+
+@pytest.mark.parametrize("md", [
+    "正文正文正文正文正文[^1]\n\n[^1]: 脚注内容\n",                        # 单个
+    "正文正文正文正文正文[^1]正文正文正文正文[^2]\n\n[^1]: 第一条脚注\n[^2]: 第二条脚注\n",  # 多个
+    "正文正文正文正文正文[^1]\n\n[^1]: 第一行\n    第二行\n    第三行\n",   # 跨多行
+    "正文正文正文正文正文[^1]\n\n[^1]: 这是 *强调*,以及 `代码`。\n",        # 脚注内含 Markdown
+    "正文正文正文正文正文[^1]\n\n[^1]: 中文标点,。!?;:【注意】\n",          # 中文标点
+])
+def test_footnote_cases_survive_cleaning(md: str) -> None:
+    """五类脚注样本:清理前后引用与定义都在,且定义块逐字节不变。"""
+    out = clean(md)
+    assert out == md.rstrip("\n")
+
+
+def test_footnote_multiline_indent_kept() -> None:
+    """跨行脚注的续行缩进必须保留(pandoc 靠缩进判定脚注内容;strip 掉就散架)。"""
+    out = clean("正文正文正文正文正文[^1]\n\n[^1]: 第一行\n    第二行\n    第三行\n")
+    assert "[^1]: 第一行\n    第二行\n    第三行" in out
+    assert "第一行  \n" not in out      # 不得被诗行规则补上硬换行
+
+
+def test_footnote_content_is_not_rewritten() -> None:
+    """脚注块整体不改写:与代码块同一取舍(宁可留空格噪声,不改语义)。
+
+    规则链跑在掩码文本上,所以中文空格修正等规则不会打进脚注 —— 脚注里
+    `Py Mu PDF` 之类的 OCR 空格会留着,这是刻意的保守选择。
+    """
+    md = "正文正文正文正文正文[^1]\n\n[^1]: 脚注 里 的 空格 与 Py Mu PDF 保持原样\n"
+    assert clean(md) == md.rstrip("\n")
+
+
+def test_inline_footnote_ref_untouched() -> None:
+    """行内的 `[^1]` 引用不是块结构,正文照常清理。"""
+    out = clean("正文 中文 之间 有空格[^1]。\n")
+    assert out == "正文中文之间有空格[^1]。"
+
+
+def test_footnote_syntax_inside_code_fence_untouched() -> None:
+    """代码块里的 `[^1]: …` 是示例文本,既不当脚注也不被改写。"""
+    md = "```text\n[^1]: 代码里的示例\n    缩进续行\n```\n\n正文正文正文正文正文[^1]。\n"
+    assert clean(md) == md.rstrip("\n")
+
+
+def test_footnote_syntax_inside_inline_code_untouched() -> None:
+    """行内代码里的脚注语法不参与掩码(否则还原顺序会留下未还原的占位符)。"""
+    md = "正文正文正文正文正文[^1]。\n\n[^1]: 见 `x = 1` 与 `[^2]: 不是脚注` 的说明。\n"
+    assert clean(md) == md.rstrip("\n")
+
+
+def test_underindented_footnote_continuation_is_normal_text() -> None:
+    """缩进不足 4 空格的续行 pandoc 本来就不认作脚注内容,按普通文本处理。"""
+    out = clean("正文正文正文正文正文[^1]。\n\n[^1]: 第一行\n  第二行没有足够缩进\n")
+    assert out.startswith("正文正文正文正文正文[^1]。\n\n[^1]: 第一行\n")
+
+
 # ---------------------------------------------------------------- 开关与配置
 
 def test_clean_keys_cover_all_option_fields() -> None:
