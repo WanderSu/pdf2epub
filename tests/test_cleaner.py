@@ -209,10 +209,10 @@ def test_input_with_nul_byte_is_not_fatal() -> None:
 
 def test_paragraph_joined_across_page_marker() -> None:
     """被页边界断开的正文必须拼回去 —— 页码注释不是段落边界。"""
-    md = ("<!-- page 12 -->\n正文前半句写到这里\n\n"
+    md = ("<!-- page 12 -->\n正文前半句一直写到了这一行的末尾为止,还没写完\n\n"
           "<!-- page 13 -->\n后半句在下一页接上,并以句号结尾。\n")
     out = clean(md)
-    assert "正文前半句写到这里后半句在下一页接上,并以句号结尾。" in out
+    assert "正文前半句一直写到了这一行的末尾为止,还没写完后半句在下一页接上,并以句号结尾。" in out
 
 
 def test_page_markers_preserved() -> None:
@@ -280,24 +280,39 @@ def _line(n: int) -> str:
 
 
 def test_verse_threshold_is_verse_max_chars() -> None:
-    """两行都在 VERSE_MAX_CHARS 以内 → 诗行(不拼接 + 硬换行);超出 → 正常拼接。
+    """两行都在 VERSE_MAX_CHARS 以内 → 诗行(不拼接 + 硬换行);排满一行 → 正常拼接。
 
     「不拼接」与「补硬换行」必须用同一个门槛:两者错开时,13-18 字的诗行
     会既不拼接、又拿不到硬换行,在阅读器里照样挤成一行。
+
+    注意 `VERSE_MAX_CHARS`(18)与 `JOIN_MIN_CHARS`(20)之间有一条窄缝(19 字):
+    这种长度既不算诗行、也够不着「排满一行」,按保守处理**不拼接**(宁可少拼)。
     """
-    from markdown.cleaner import VERSE_MAX_CHARS
+    from markdown.cleaner import JOIN_MIN_CHARS, VERSE_MAX_CHARS
 
     inside = clean(f"{_line(VERSE_MAX_CHARS)}\n{_line(VERSE_MAX_CHARS)}\n")
     assert inside == f"{_line(VERSE_MAX_CHARS)}  \n{_line(VERSE_MAX_CHARS)}"
 
-    outside = clean(f"{_line(VERSE_MAX_CHARS + 1)}\n{_line(VERSE_MAX_CHARS + 1)}\n")
-    assert outside == _line(VERSE_MAX_CHARS + 1) + _line(VERSE_MAX_CHARS + 1)
+    outside = clean(f"{_line(JOIN_MIN_CHARS + 1)}\n{_line(JOIN_MIN_CHARS + 1)}\n")
+    assert outside == _line(JOIN_MIN_CHARS + 1) + _line(JOIN_MIN_CHARS + 1)
+
+    gap = clean(f"{_line(VERSE_MAX_CHARS + 1)}\n{_line(VERSE_MAX_CHARS + 1)}\n")
+    assert gap == f"{_line(VERSE_MAX_CHARS + 1)}\n{_line(VERSE_MAX_CHARS + 1)}"
 
 
-def test_short_lines_with_end_punctuation_are_joined() -> None:
-    """短行散文断行:下一行以句末标点结尾 → 是正常断行,拼接,不当诗。"""
+def test_body_line_is_joined_to_its_continuation() -> None:
+    """排满一行的正文断行照旧拼接(这是 join_lines 存在的理由)。"""
+    out = clean("他走进屋子看了看四周,桌上放着一封没有署名的信\n纸上只有一句话:明天中午老地方见。\n")
+    assert out == "他走进屋子看了看四周,桌上放着一封没有署名的信纸上只有一句话:明天中午老地方见。"
+
+
+def test_short_line_with_end_punctuation_is_not_joined() -> None:
+    """短行(不足排满一行)不再被当作被断开的正文 —— 它更像版式行(标题/字段)。
+
+    这是本次专项收紧的取舍:真实扫描书里被误拼的正是 11-19 字的短行。
+    """
     out = clean("他走进屋子看看\n桌上放着一封信。\n")
-    assert out == "他走进屋子看看桌上放着一封信。"
+    assert out == "他走进屋子看看\n桌上放着一封信。"
 
 
 def test_two_short_lines_without_punctuation_treated_as_verse() -> None:
@@ -393,6 +408,99 @@ def test_underindented_footnote_continuation_is_normal_text() -> None:
     """缩进不足 4 空格的续行 pandoc 本来就不认作脚注内容,按普通文本处理。"""
     out = clean("正文正文正文正文正文[^1]。\n\n[^1]: 第一行\n  第二行没有足够缩进\n")
     assert out.startswith("正文正文正文正文正文[^1]。\n\n[^1]: 第一行\n")
+
+
+# ---------------------------------------------------------------- 反误伤:刻意换行与结构行
+
+def test_unpunctuated_line_breaks_are_kept() -> None:
+    """没有句末标点 ≠ 断行:刻意换行的短行不得被自动合并(诗歌/自由分行/逐行内容)。
+
+    修复前这类行会因「上一行没有句末标点」被拼成一行;现在只加硬换行保住分行。
+    """
+    cases = [
+        ("春风吹过山岗\n河水流向远方\n", "春风吹过山岗  \n河水流向远方"),        # 两行都短
+        ("这是第一行\n这是第二行\n这是第三行\n", "这是第一行  \n这是第二行  \n这是第三行"),
+        ("第一项\n第二项\n第三项\n", "第一项  \n第二项  \n第三项"),
+        ("两个黄鹂鸣翠柳\n一行白鹭上青天\n", "两个黄鹂鸣翠柳  \n一行白鹭上青天"),  # 七言
+    ]
+    for md, expected in cases:
+        assert clean(md) == expected, md
+
+
+def test_catalog_entries_are_not_merged() -> None:
+    """目录条目是独立条目:长度超过诗行门槛(18 字)也不得被拼成一行。
+
+    取自真实书籍目录形态(`一 历史的回顾 …… 1`);修复前三条会粘成
+    `第一章…/1第二章…/15第三章…/32`,在阅读器里整页目录变成一行。
+    """
+    md = ("一 历史的回顾 …… 1\n二 反对英国的殖民统治 …… 8\n三 武装斗争 …… 32\n")
+    out = clean(md)
+    assert out.startswith("一 历史的回顾 …… 1")
+    assert "\n二 反对英国的殖民统治 …… 8" in out
+    assert "\n三 武装斗争 …… 32" in out
+    assert "1二 反对" not in out
+
+
+def test_catalog_entry_does_not_swallow_previous_body_line() -> None:
+    """正文行(无句末标点)后面紧跟目录条目时,条目不得被吞进正文。"""
+    md = "这一段正文被断开了,前半句写到这里\n\n一 历史的回顾 …… 1\n"
+    out = clean(md)
+    assert "\n\n一 历史的回顾 …… 1" in out
+    assert "写到这里一 历史的回顾" not in out
+
+
+def test_note_lines_are_not_merged_into_the_next_paragraph() -> None:
+    """注释行(圈码序号开头)是独立段落:没有句末标点时也不得被下一段粘走。"""
+    md = "① 参见前揭书第三二页\n\n这一段正文足够长,会被跨空行拼接规则看上。\n"
+    out = clean(md)
+    assert out.startswith("① 参见前揭书第三二页")
+    assert "第三二页这一段" not in out
+
+
+def test_note_lines_are_not_treated_as_running_heads() -> None:
+    """重复出现的注释行(`① 同上`)是有内容的行,不是页眉页脚装饰。"""
+    md = "\n\n".join(["① 同上"] * 4 + ["正文段落,以句号结尾。"])
+    out = clean(md)
+    assert out.count("① 同上") == 4
+
+
+def test_note_block_keeps_one_note_per_line() -> None:
+    """连续排布的注释(`① …`/`② …`)保持一行一条(靠硬换行,而不是被拼成一段)。"""
+    md = ("① 列宁:《告犹太工人书》,《列宁全集》第八卷第四六三页。\n"
+          "② 列宁:《崩得在党内的地位》,《列宁全集》第七卷第八四页。\n")
+    out = clean(md)
+    assert "第四六三页。  \n②" in out
+
+
+def test_heading_keeps_internal_spaces() -> None:
+    """标题行里的空格是序号与标题的分隔,不得被中文空格修正删掉。"""
+    assert clean("# 第一章 测试\n") == "# 第一章 测试"
+    assert clean("## 一 历史的回顾\n") == "# 一 历史的回顾"
+
+
+def test_layout_lines_keep_field_spaces() -> None:
+    """独立成段的版式行(版权页字段)里的空格是字段分隔,不得删除。
+
+    真实扫描书实测:全篇只有版权页这几行的空格被删 —— 删完
+    `人民出版社出版 新華書店发行` 就粘成一个词。
+    """
+    md = ("人民出版社出版 新華書店发行\n\n"
+          "787×1092毫米32开本 2.25印张 43.000字\n\n"
+          "书号 3001·1505 定价 0.15 元\n")
+    assert clean(md) == md.rstrip("\n")
+
+
+def test_body_lines_still_get_space_cleanup() -> None:
+    """反例的另一半:正文行照旧做空格修正(长行、或以标点收尾的行)。"""
+    assert clean("这是 中文 排版 空格修正的例子。\n") == "这是中文排版空格修正的例子。"
+    assert clean("这是一行足够长的中文正文,里面 插了 位置奇怪的 空格。\n") \
+        == "这是一行足够长的中文正文,里面插了位置奇怪的空格。"
+
+
+def test_real_page_break_is_still_joined() -> None:
+    """反误伤不能把主功能一起收掉:排满一行的真正跨页断行仍要拼接。"""
+    md = "上一段在这里被断开了,前半句一直写到了这一行末尾为止\n\n下一行继续,并以句号结尾。\n"
+    assert clean(md) == "上一段在这里被断开了,前半句一直写到了这一行末尾为止下一行继续,并以句号结尾。"
 
 
 # ---------------------------------------------------------------- 开关与配置
