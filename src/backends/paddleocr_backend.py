@@ -11,6 +11,14 @@
 脚注会整批不出现在返回的 Markdown 里;这里默认传「官方默认值 − footnote」,
 让脚注随正文一起返回(详见 `DEFAULT_MARKDOWN_IGNORE_LABELS`)。
 
+**结构化结果 → 原生脚注**:结果 JSONL 每页都带
+`result.layoutParsingResults[i].prunedResult.parsing_res_list[]`
+(`block_label` / `block_bbox` / `block_content`),其中 `block_label == "footnote"`
+就是页底脚注。这份结构化结果会归一化成与 MinerU `content_list.json` **同形**的块
+(`type` / `text` / `page_idx` / `bbox`,bbox 归一化到 0-1000),随段缓存一起落盘,
+再交给 `markdown.footnotes` 这套**同一个脚注引擎**做配对与渲染 —— 两个后端不各写
+一套匹配逻辑(详见 `structured_blocks()` 与 `_with_footnotes()`)。
+
 **续跑的两层缓存**:`.ocr_task.json` 记「已提交但没取回结果」的 jobId(重跑继续轮询
 同一个 job,不重新上传);`_parts/whole/` 记**已经拿到的结果**(云端任务成功即已计费,
 之后清理/EPUB 阶段失败后的重试、用户手动重跑都直接复用它,完全不碰云端)。
@@ -38,6 +46,9 @@ from .base import (
     params_fingerprint,
 )
 from paths import load_api_key
+from markdown.footnotes import (PAGE_BREAK_TYPE, load_content_list,
+                                reconstruct_footnotes)
+import events
 
 JOBS_URL = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
 MODEL = "PaddleOCR-VL-1.6"
@@ -75,6 +86,78 @@ STATE_LABELS = {
     "done": "完成",
     "failed": "失败",
 }
+
+#: 段缓存里附带的结构化结果文件名 —— 与 MinerU 同名同形,因此脚注层、合并逻辑、
+#: 校验都共用一套(合并阶段读的就是这份「归一化块」)。
+CONTENT_LIST_FILE = "content_list.json"
+
+#: 云端 `block_label` 里代表**页底脚注**的取值 → 统一脚注层的 `page_footnote`
+FOOTNOTE_BLOCK_LABELS = ("footnote",)
+
+#: bbox 归一化尺度:PaddleOCR 给的是页面像素坐标,统一脚注层按 MinerU 的
+#: 0-1000 约定理解 `bbox`(同一页内排序、页底判断都基于它)。
+BBOX_SCALE = 1000.0
+
+
+def _normalized_bbox(bbox, size) -> list[float] | None:
+    """页面像素坐标 → 0-1000 归一化;拿不到页面尺寸就原样返回(同源比较仍然单调)。"""
+    if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+        return None
+    try:
+        values = [float(v) for v in bbox[:4]]
+    except (TypeError, ValueError):
+        return None
+    if not size:
+        return values
+    try:
+        width, height = float(size[0]), float(size[1])
+    except (TypeError, ValueError, IndexError):
+        return values
+    if width <= 0 or height <= 0:
+        return values
+    return [round(values[0] / width * BBOX_SCALE, 1), round(values[1] / height * BBOX_SCALE, 1),
+            round(values[2] / width * BBOX_SCALE, 1), round(values[3] / height * BBOX_SCALE, 1)]
+
+
+def structured_blocks(page: dict, page_idx: int, size=None) -> list[dict]:
+    """把一页的云端结果归一化成与 MinerU `content_list.json` **同形**的块。
+
+    `layoutParsingResults[i].prunedResult.parsing_res_list[]` 里每块带
+    `block_label` / `block_bbox` / `block_content`:`footnote` 映射成统一脚注层的
+    `page_footnote`,其余块一律当成 `text`(它们只用来给正文引用定页)。
+
+    这里**只做形状转换**,不做任何脚注匹配 —— 匹配规则、置信度、fallback 全在
+    `markdown.footnotes` 里,与 MinerU 走的是同一条路。
+    """
+    blocks: list[dict] = []
+    for block in (page.get("prunedResult") or {}).get("parsing_res_list") or []:
+        if not isinstance(block, dict):
+            continue
+        text = (block.get("block_content") or "").strip()
+        if not text:
+            continue
+        label = str(block.get("block_label") or "")
+        blocks.append({
+            "type": "page_footnote" if label in FOOTNOTE_BLOCK_LABELS else "text",
+            "text": text,
+            "page_idx": page_idx,
+            "bbox": _normalized_bbox(block.get("block_bbox"), size),
+            "label": label,                                   # 原始标签,排查用
+        })
+    return blocks
+
+
+def reconstruct_footnotes_in(md_text: str, blocks: list[dict]) -> tuple[str, dict]:
+    """把 PaddleOCR 的 Markdown + 归一化块交给**统一脚注引擎**,返回 (新 Markdown, 统计)。
+
+    与 MinerU 用的是同一个入口(`markdown.footnotes.reconstruct_footnotes`):
+    配对规则、置信度、fallback、编号全在那里,两个后端不各写一套。「Markdown 里本来
+    就带着脚注文本」这件事也由引擎统一处理(`strip_note_lines`),适配器不做特殊分支。
+    """
+    if not md_text or not blocks:
+        return md_text, {}
+    result = reconstruct_footnotes(md_text, blocks)
+    return result.md, result.stats
 
 
 class PaddleOCRError(BackendError):
@@ -173,15 +256,56 @@ class PaddleOCRAdapter(Backend):
 
         result = self._poll(job_id)
         print("[paddleocr] 解析完成, 下载结果...")
-        conv = self._download_result(result, work_dir, job_id)
-        # 结果落盘:此后任何重跑都不再提交云端任务
+        conv, blocks = self._download_result(result, work_dir, job_id)
+        # 结果落盘:此后任何重跑都不再提交云端任务。结构化结果(归一化块)一并落盘 ——
+        # 脚注重建在**合并/复用时**做,所以缓存里存的是未加脚注的原始 Markdown。
+        extra = self._save_structured(work_dir, blocks)
         store.save(
             self.PART_ID, params_fp,
             conv.book_md.read_text(encoding="utf-8", errors="replace"),
             images_src=work_dir / "images", model=MODEL,
+            extra_files=extra,
         )
+        for path in (extra or {}).values():                 # 临时文件已复制进段缓存
+            Path(path).unlink(missing_ok=True)
+        # 脚注:读回缓存里的结构化结果,交给统一脚注引擎(与复用路径同一个函数)
+        md_text, fn_stats = self._with_footnotes(store)
+        conv.book_md.write_text(md_text, encoding="utf-8")
+        conv.stats.update(fn_stats)
         cache.clear()
         return conv
+
+    def _save_structured(self, work_dir: Path, blocks: list[dict]) -> dict[str, Path] | None:
+        """把归一化块写成随段缓存的附带文件(没有结构化结果就不产生文件)。"""
+        if not blocks:
+            return None
+        path = work_dir / f"_paddleocr_{CONTENT_LIST_FILE}"
+        path.write_text(json.dumps(blocks, ensure_ascii=False), encoding="utf-8")
+        return {CONTENT_LIST_FILE: path}
+
+    def _with_footnotes(self, store: PartStore) -> tuple[str, dict]:
+        """读段缓存里的 Markdown + 结构化结果 → 重建脚注,返回 (Markdown, 统计)。
+
+        老缓存(本改动之前落的段)里没有 `content_list.json` —— 那段重建不出脚注,
+        但**不因此判定缓存失效**:为一个附带文件让整本重新上传、重新计费不划算。
+        """
+        md_text = store.md_path(self.PART_ID).read_text(encoding="utf-8", errors="replace")
+        path = store.dir_for(self.PART_ID) / CONTENT_LIST_FILE
+        if not path.is_file():
+            return md_text, {}
+        md_text, stats = reconstruct_footnotes_in(md_text, load_content_list(path))
+        if stats.get("notes"):
+            print(f"[paddleocr] 脚注: 结构化结果 {stats['notes']} 条 → "
+                  f"关联 {stats['linked']} 条 (high {stats['high']} / "
+                  f"medium {stats['medium']}),未匹配 {stats['unmatched']} 条保留为普通文本")
+        if stats.get("unmatched"):
+            # 不静默:没配上的脚注内容仍在,只是没变成可点击脚注(与 MinerU 侧一致)
+            events.emit("warning", code="footnotes_unmatched",
+                        message=f"{stats['unmatched']} 条脚注未能确认对应的正文引用,"
+                                f"已保留为普通文本(不做错误链接)")
+        return md_text, ({"footnotes_total": stats["notes"],
+                          "footnotes_linked": stats["linked"],
+                          "footnotes_unmatched": stats["unmatched"]} if stats else {})
 
     def _restore_result(self, store: PartStore, work_dir: Path,
                         params_fp: str) -> ConversionResult | None:
@@ -207,6 +331,9 @@ class PaddleOCRAdapter(Backend):
                         target.write_bytes(img.read_bytes())
 
         book_md = work_dir / "book.md"
+        # 脚注重建在复用时做(缓存里存的是未加脚注的原始 Markdown)→ 规则改进了,
+        # 老缓存不用重新 OCR 也能得到新结果
+        md_text, fn_stats = self._with_footnotes(store)
         book_md.write_text(md_text, encoding="utf-8")
         return ConversionResult(
             book_md=book_md,
@@ -215,7 +342,7 @@ class PaddleOCRAdapter(Backend):
             task_id=None,
             stats={"chars": len(md_text),
                    "images": sum(1 for _ in images_abs.iterdir()),
-                   "model": MODEL, "total_pages": None, "cached": True},
+                   "model": MODEL, "total_pages": None, "cached": True, **fn_stats},
         )
 
     def _probe(self, job_id: str) -> dict | None:
@@ -300,8 +427,13 @@ class PaddleOCRAdapter(Backend):
         # 超时可重试:jobId 还在缓存里,重跑继续轮询同一个任务,不重新上传
         raise PaddleOCRError(f"轮询超时({self.timeout}s), jobId={job_id}")
 
-    def _download_result(self, data: dict, work_dir: Path, job_id: str) -> ConversionResult:
-        """下载 JSONL 结果,拼接 markdown 并保存图片。"""
+    def _download_result(self, data: dict, work_dir: Path, job_id: str
+                         ) -> tuple[ConversionResult, list[dict]]:
+        """下载 JSONL 结果:拼接 markdown、保存图片、归一化结构化块。
+
+        结构化块(`parsing_res_list` → 统一块)是脚注重建的唯一数据源,和 MinerU 用
+        `content_list.json` 是同一份东西。
+        """
         jsonl_url = (data.get("resultUrl") or {}).get("jsonUrl")
         if not jsonl_url:
             raise PaddleOCRError("结果中缺少 jsonUrl")
@@ -320,7 +452,10 @@ class PaddleOCRAdapter(Backend):
         images_abs.mkdir(parents=True, exist_ok=True)
 
         pages_md: list[str] = []
+        page_indices: list[int] = []                    # 每页的 page_idx(与 pages_md 同步)
         img_count = 0
+        blocks: list[dict] = []                         # 归一化结构化块(脚注数据源)
+        page_idx = 0
         for line in resp.text.splitlines():
             line = line.strip()
             if not line:
@@ -329,7 +464,14 @@ class PaddleOCRAdapter(Backend):
                 result = json.loads(line)["result"]
             except (json.JSONDecodeError, KeyError):
                 continue
-            for res in result.get("layoutParsingResults", []):
+            sizes = [p for p in (result.get("dataInfo") or {}).get("pages") or []
+                     if isinstance(p, dict)]
+            for i, res in enumerate(result.get("layoutParsingResults", [])):
+                # 结构化块(页底脚注只有这里有):归一化成 unified 块交给脚注引擎
+                size = ((sizes[i].get("width"), sizes[i].get("height"))
+                        if i < len(sizes) else None)
+                blocks.extend(structured_blocks(res, page_idx, size))
+                page_idx += 1
                 md_part = (res.get("markdown") or {}).get("text", "")
                 # 图片:{相对路径: URL} → 下载到统一的 work/images/(取文件名)
                 img_map = (res.get("markdown") or {}).get("images") or {}
@@ -354,17 +496,29 @@ class PaddleOCRAdapter(Backend):
                     r'(["(\s])imgs/', r"\1images/", md_part
                 )
                 if md_part.strip():
-                    pages_md.append(md_part.strip())
+                    # 先按页归一化图片引用,再拼接 —— 这样每页在最终 Markdown 里的
+                    # 起始偏移就是准的(拼接后再改文本会让偏移整体错位)
+                    pages_md.append(normalize_image_refs(md_part.strip(), images_abs))
+                    page_indices.append(page_idx - 1)
 
-        md_text = "\n\n".join(pages_md)
-        md_text = normalize_image_refs(md_text, images_abs)
+        # 逐页拼接,同时记下每页的起始偏移 → 作为「页边界」块交给脚注层,
+        # 页归属不再靠文本对齐去猜(重复页眉/页脚会把它带偏)
+        md_text = ""
+        for page, part in zip(page_indices, pages_md):
+            if md_text:
+                md_text += "\n\n"
+            blocks.append({"type": PAGE_BREAK_TYPE, "page_idx": page, "offset": len(md_text)})
+            md_text += part
 
         book_md = work_dir / "book.md"
         book_md.write_text(md_text, encoding="utf-8")
-        return ConversionResult(
-            book_md=book_md,
-            images_dir=images_abs,
-            backend=self.name,
-            task_id=job_id,
-            stats={"chars": len(md_text), "images": img_count, "model": MODEL},
+        return (
+            ConversionResult(
+                book_md=book_md,
+                images_dir=images_abs,
+                backend=self.name,
+                task_id=job_id,
+                stats={"chars": len(md_text), "images": img_count, "model": MODEL},
+            ),
+            blocks,
         )

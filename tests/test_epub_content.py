@@ -383,6 +383,24 @@ def test_verify_output_without_source_stays_structure_only(tmp_path: Path) -> No
     assert not any(i.code.startswith("content_") for i in result.issues)
 
 
+def test_markdown_math_count_ignores_footnote_markers() -> None:
+    """行内公式计数必须按 pandoc 的定界规则:OCR 把脚注标记包成的 `$ ^{①} $` 不是公式。
+
+    不按规则数,一本脚注多的书会被判「公式全部丢失」(标记被当成公式,而 EPUB 里
+    当然没有对应的 MathML)—— 真实书(PaddleOCR,1957 年 8 页)上就踩到了。
+    """
+    md = ("正文末的注释标记 $ ^{⑧} $ 不是公式。\n\n"
+          "行内公式 $E = mc^2$ 是公式。\n\n"
+          "$$\n\\int_0^1 x dx\n$$\n")
+
+    assert markdown_math_count(md) == 2
+
+
+def test_markdown_math_count_counts_valid_inline_math() -> None:
+    assert markdown_math_count("正文 $x^{2}$ 与 $a_1$ 两处。") == 2
+    assert markdown_math_count("OCR 的空格形态 $ x $ 不算(pandoc 不认)。") == 0
+
+
 # ---------------------------------------------------------------- 脚注回链(pandoc 不写)
 
 def _epub_xhtml(path: Path) -> str:
