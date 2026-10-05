@@ -3,7 +3,7 @@
 原则:修复结构,不改写正文;不用 LLM 重写。
 当前实现:
   - 统一换行符(CRLF → LF)
-  - 围栏代码块 / 行内代码 / 脚注定义块**掩码**:规则链全程不触碰它们,结束时逐字节还原
+  - 围栏代码块 / 行内代码 / 脚注定义块 / 行间数学块**掩码**:规则链全程不触碰它们,结束时逐字节还原
   - 页码残留剔除(独立纯数字行 1-3 位)
   - 页眉页脚重复行剔除(跨页反复出现的短行,扫描书收益最大)
   - 跨页断行连接(被页码/页脚/页码注释隔断或非标点结尾的连续段落)
@@ -19,7 +19,7 @@
 新增启发式规则的共同原则:**默认保守 + 可单独关闭 + 配「不该改的例子」测试**。
 不确定的改动一律不做(宁可留下噪声,也不破坏正文)。
 
-两条结构性前提(改动清理器前先读):
+结构性前提(改动清理器前先读):
 
 1. **代码块不可改写**。所有规则都是「按行改写正文」的启发式,一旦打到围栏代码块或
    行内代码上就是语义损坏;因此规则链跑在掩码文本上,代码原文只在最后还原。
@@ -29,6 +29,12 @@
    但 pandoc 认的是这个语法:一旦被拼进正文段、被补硬换行、或者续行的缩进被 strip,
    整条脚注就降级成正文里的普通文字(且**源里不再有 `[^1]:`**,内容对照校验看不见)。
    与代码块同理,靠规则各自「跳过」是拦不住的,所以整体掩码。
+4. **行间数学块(`$$ … $$` / `\\[ … \\]`)同样是不可改写的结构**。拼接规则会把多行公式
+   压成一行、并与紧随其后的正文粘成同一个段落(实测产物里 `<math display="block">…`
+   与后一句正文进了同一个 `<p>`);诗行规则还会把 `$$` 这种 2 字符短行当诗行补硬换行,
+   而 pandoc 不会把数学块里的行尾两空格渲染成 `<br>` → 内容校验据此给**正常产物**报
+   「硬换行减少」的假警告(违反「正常产物零提示」)。与代码块同理整体掩码,判据见
+   `MATH_DELIMITERS`。
 """
 from __future__ import annotations
 
@@ -204,7 +210,7 @@ INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
 #: 占位符里用的哨兵字符:不可能出现在正常 Markdown 文本里
 SENTINEL = "\x00"
 #: 还原后仍残留的占位符(说明有规则改写了它 —— 那意味着受保护内容可能已损坏)
-MASK_LEFTOVER_RE = re.compile(rf"{SENTINEL}[fcn]\d+{SENTINEL}")
+MASK_LEFTOVER_RE = re.compile(rf"{SENTINEL}[fcnm]\d+{SENTINEL}")
 
 #: 脚注定义行:`[^label]: 内容`(最多 3 个前导空格,与 pandoc 的块级缩进一致)
 FOOTNOTE_DEF_RE = re.compile(r"^ {0,3}\[\^[^\]\s]+\]:")
@@ -217,9 +223,41 @@ def _is_footnote_cont(line: str) -> bool:
     return bool(line.strip()) and bool(FOOTNOTE_CONT_INDENT_RE.match(line))
 
 
+#: 行间数学(display math)的定界符。**单独成行的** `$$` / `\[` 与配对收尾行之间的内容是
+#: 数学,不是正文:
+#:   - `_join_broken_lines` 会把 `\begin{aligned}` 这类多行公式压成一行,并与紧随其后的
+#:     正文粘成一个段落(实测产物里 `<math display="block">…</math>` 与后一句正文进了
+#:     同一个 `<p>`);
+#:   - `_mark_verse_lines` 把 `$$` 这种 2 字符短行当诗行补硬换行,而 pandoc 不会把数学块
+#:     里的行尾两空格渲染成 `<br>` → 内容校验据此给**正常产物**报「硬换行减少」的假警告。
+#: 与代码块 / 脚注定义块同一套机制(整体掩码),不为每条规则各加一次「跳过」。
+MATH_DELIMITERS = ("$$", "\\[")
+
+
+def _math_opener(s: str) -> str | None:
+    """该行是否**以**数学定界符开头;返回定界符,否则 None。"""
+    for delim in MATH_DELIMITERS:
+        if s.startswith(delim):
+            return delim
+    return None
+
+
+def _math_closer(delim: str) -> str:
+    """与开头定界符配对的收尾定界符(`$$` → `$$`,`\\[` → `\\]`)。"""
+    return "$$" if delim == "$$" else "\\]"
+
+
+def _math_single_line(s: str, delim: str) -> bool:
+    """同一行内既开又闭(`$$ … $$` / `\\[ … \\]`)且中间非空 —— 整行就是数学块。
+
+    中间非空是必需的:`$$` 单独成行时是**多行**块的开启行,不能当单行块吃掉。
+    """
+    return len(s) > len(delim) + len(_math_closer(delim)) and s.endswith(_math_closer(delim))
+
+
 def _mask_token(blocks: list[tuple[str, str]], kind: str, text: str,
                 wrapper: str = "") -> str:
-    """登记一块受保护原文并返回占位符(kind: f=围栏代码 / c=行内代码 / n=脚注)。
+    """登记一块受保护原文并返回占位符(kind: f=围栏代码 / c=行内代码 / n=脚注 / m=行间数学)。
 
     wrapper 用 `<` 把占位符包成「markdown 块结构」:拼接规则既不会吃掉它,
     也不会把相邻正文拼进它。
@@ -312,11 +350,53 @@ def _mask_footnotes(md: str, blocks: list[tuple[str, str]]) -> str:
     return "\n".join(out)
 
 
+def _mask_math(md: str, blocks: list[tuple[str, str]]) -> str:
+    """把行间数学块整体掩码(判据见 ``MATH_DELIMITERS``)。
+
+    与脚注定义块同理:数学不是正文,但它在清理规则眼里就是一串普通行 ——
+    拼接规则会跨行压平公式、并与后面的正文粘成一个段落;诗行规则会给 `$$` 补硬换行。
+    掩码后这类行只剩一个 `<…>` 占位符(markdown 块结构),拼接/诗行/空格/页眉规则
+    全都自动跳过它,**且不会把相邻正文拼进来**。
+
+    只保护**明确闭合**的块:同一行内既开又闭的单行块,或「定界行在行首 + 后方存在
+    配对收尾行」的多行块。找不到收尾定界行时**不掩码** —— 一个孤立的 `$$`(例如正文里
+    字面出现的美元符号)若把后面整本书都拖进掩码区,那些页会静默失去清理;宁可漏保护
+    一处,也不要让清理器形同失效。原文逐字节保留,末尾统一还原。
+    """
+    lines = md.split("\n")
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        s = lines[i].strip()
+        delim = _math_opener(s)
+        if delim is None:
+            out.append(lines[i])
+            i += 1
+            continue
+        if _math_single_line(s, delim):
+            out.append(_mask_token(blocks, "m", lines[i], wrapper="<"))
+            i += 1
+            continue
+        closer = _math_closer(delim)
+        j = i + 1
+        while j < len(lines) and not lines[j].strip().endswith(closer):
+            j += 1
+        if j >= len(lines):
+            out.append(lines[i])
+            i += 1
+            continue
+        out.append(_mask_token(blocks, "m", "\n".join(lines[i:j + 1]), wrapper="<"))
+        i = j + 1
+    return "\n".join(out)
+
+
 def _unmask_protected(md: str, blocks: list[tuple[str, str]]) -> str:
-    """还原受保护原文(脚注块 / 围栏代码 / 行内代码)。还原不完整即报错,不静默丢内容。
+    """还原受保护原文(脚注块 / 行间数学块 / 围栏代码 / 行内代码)。还原不完整即报错,不静默丢内容。
 
     **逆序还原**:脚注块里可能嵌着行内代码占位符,先还原脚注、再还原代码 ——
     顺序反了会留下未还原的占位符,进而被误判成「有规则改写了受保护内容」。
+    (掩码登记顺序 代码 → 脚注 → 数学,逆序即 数学 → 脚注 → 代码:数学块里可能嵌着
+    行内代码占位符,同样必须在代码之前还原。)
 
     只检查**占位符形状**而不是「文本里有没有哨兵字符」:输入文件本身带 NUL 时
     不该让整本书转换失败(那是上游的问题,不是清理器的)。
@@ -514,6 +594,11 @@ def clean_markdown(
     # 1.6 脚注定义块掩码:同理由,且必须与代码块同一套机制 —— 脚注被拼进正文后
     #     pandoc 就再也认不出它,内容对照校验也查不出来(源里没有 `[^1]:` 可对了)
     md = _mask_footnotes(md, code_blocks)
+
+    # 1.7 行间数学块掩码:同理由 —— `$$` 定界行会被当成短行补硬换行(pandoc 不渲染,
+    #     内容校验据此给正常产物报「硬换行减少」的假警告),多行公式还会被拼接规则压平、
+    #     与紧随其后的正文粘成同一个段落
+    md = _mask_math(md, code_blocks)
 
     # 2. 剔除页码残留:独立纯数字行(1-3 位,前后可有空白)
     if options.page_numbers:
