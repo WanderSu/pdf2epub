@@ -14,9 +14,9 @@ from pathlib import Path
 
 import pytest
 
-from markdown.footnotes import (HIGH, MEDIUM, block_page_spans, load_content_list,
-                                match_footnotes, reconstruct_footnotes, scan_refs,
-                                structured_footnotes)
+from markdown.footnotes import (HIGH, MEDIUM, PAGE_BREAK_TYPE, block_page_spans,
+                                load_content_list, match_footnotes,
+                                reconstruct_footnotes, scan_refs, structured_footnotes)
 
 BODY = "这一行正文足够长,用来让内容块与 Markdown 对齐成功。"
 
@@ -129,6 +129,52 @@ def test_note_without_any_reference_stays_plain_text() -> None:
 
 
 # ---------------------------------------------------------------- marker 形态
+
+def test_explicit_page_boundaries_beat_text_alignment() -> None:
+    """有页边界(适配器写的 `page_break`)时按偏移定页:重复文本(页眉/页脚)带不偏。
+
+    这里刻意让两个块的首 24 字相同(真实书里每页的刊名/页眉都长这样):只靠文本对齐,
+    第二个块会命中第一次出现的位置,引用随之被算到错误的页上。
+    """
+    head = "社会科学战线·2007年第4期·辩证法问题研究"
+    page0 = f"{head}\n\n{BODY}第一页的引用①。"
+    page1 = f"{head}\n\n{BODY}第二页的引用①。"
+    md = f"{page0}\n\n{page1}\n"
+    blocks = [
+        text_block(head, 0), text_block(f"{BODY}第一页的引用①。", 0),
+        note_block("① 第一页的注释。", 0),
+        text_block(head, 1), text_block(f"{BODY}第二页的引用①。", 1),
+        note_block("① 第二页的注释。", 1),
+        {"type": PAGE_BREAK_TYPE, "page_idx": 0, "offset": 0},
+        {"type": PAGE_BREAK_TYPE, "page_idx": 1, "offset": len(page0) + 2},
+    ]
+
+    res = reconstruct_footnotes(md, blocks)
+
+    assert res.stats["linked"] == 2 and res.stats[HIGH] == 2
+    assert "第一页的引用[^1]。" in res.md and "第二页的引用[^2]。" in res.md
+    assert res.md.index("[^1]: 第一页的注释。") < res.md.index("第二页的引用")
+    assert res.md.index("[^2]: 第二页的注释。") > res.md.index("第二页的引用")
+
+
+def test_note_lines_already_present_are_not_duplicated() -> None:
+    """有些源的 Markdown 自带脚注原文(PaddleOCR)→ 重建后只能剩一份。"""
+    body = f"{BODY}引用在这里①。"
+    md = f"{body}\n\n① 第一条注释。\n"
+    blocks = [text_block(body, 0), note_block("① 第一条注释。", 0)]
+
+    res = reconstruct_footnotes(md, blocks)
+
+    assert res.stats["linked"] == 1
+    assert res.md.count("第一条注释") == 1                      # 不能一份原文 + 一份定义
+    assert "引用在这里[^1]。" in res.md and "[^1]: 第一条注释。" in res.md
+
+
+def test_marker_run_in_a_note_line_is_not_a_reference() -> None:
+    """OCR 会把连续注释并成一行(`⑥⑦同上書第64頁。`)—— 里面每个 marker 都不是引用。"""
+    md = f"{BODY}正文引用⑥在这里。\n\n⑥⑦同上書第64頁。\n"
+    assert [r.marker for r in scan_refs(md, [])] == ["⑥"]
+
 
 def test_ocr_superscript_variant_is_recognised() -> None:
     """PaddleOCR 会把 marker 包成行内公式:`$ ^{①} $`。"""
