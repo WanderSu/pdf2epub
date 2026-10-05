@@ -14,9 +14,11 @@
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
+import zipfile
 from pathlib import Path
 
 from paths import book_css
@@ -138,6 +140,77 @@ def infer_title(book_md: Path, fallback: str | None = None) -> str:
     return fallback or book_md.parent.name
 
 
+#: 脚注块(pandoc 生成:`<aside epub:type="footnote" … id="fn1">…</aside>`)
+FOOTNOTE_ASIDE_RE = re.compile(
+    r'(<aside\b[^>]*epub:type="footnote"[^>]*>)(.*?)</aside>', re.S)
+#: 脚注块上的 id(回链要指回 `fnref<后缀>`)
+FOOTNOTE_ID_RE = re.compile(r'\bid="([^"]+)"')
+
+
+def add_footnote_backlinks(epub_path: str | Path) -> int:
+    """给脚注块补「回到正文引用处」的回链,返回补了几条。
+
+    **为什么需要这一步**:pandoc 3.x 的 epub3 writer 只写正文侧的引用
+    (`<a href="#fn1" class="footnote-ref" id="fnref1" epub:type="noteref">`),
+    **不写**脚注侧的 `doc-backlink`(用最小样本实测过,与本项目代码无关)。
+    没有回链时「返回正文」只能靠阅读器自己的返回键,规范推荐的回链形式是脚注里带
+    `<a href="#fnref1" role="doc-backlink">`。
+
+    **只在产物里确实有脚注时才动文件**:没有脚注的书连 zip 都不重写(零风险)。
+    重写时 `mimetype` 必须仍是第一个条目且不压缩(EPUB 规范要求,否则严格阅读器报废)。
+    """
+    path = Path(epub_path)
+    try:
+        with zipfile.ZipFile(path) as zf:
+            items = [(i, zf.read(i.filename)) for i in zf.infolist()]
+    except (zipfile.BadZipFile, OSError):
+        return 0
+
+    changed = 0
+    new_items: list[tuple[zipfile.ZipInfo, bytes]] = []
+    for info, data in items:
+        name = info.filename
+        if not name.endswith((".xhtml", ".html", ".htm")) or b"footnote" not in data:
+            new_items.append((info, data))
+            continue
+        text = data.decode("utf-8", errors="replace")
+
+        def fix(match: re.Match) -> str:
+            nonlocal changed
+            tag, body = match.group(1), match.group(2)
+            found = FOOTNOTE_ID_RE.search(tag)
+            if found is None:                                # 没有 id 就没法指回来
+                return match.group(0)
+            anchor = found.group(1)
+            ref_id = (f"fnref{anchor[len('fn'):]}" if anchor.startswith("fn")
+                      else f"fnref-{anchor}")
+            if f'href="#{ref_id}"' in body:                  # 已经有回链:不重复补
+                return match.group(0)
+            back = (f' <a href="#{ref_id}" class="footnote-back" '
+                    f'role="doc-backlink">\u21a9</a>')
+            if "</p>" in body:
+                head, _, tail = body.rpartition("</p>")
+                body = f"{head}{back}</p>{tail}"
+            else:
+                body = f"{body}{back}"
+            changed += 1
+            return f"{tag}{body}</aside>"
+
+        new_items.append((info, FOOTNOTE_ASIDE_RE.sub(fix, text).encode("utf-8")))
+
+    if not changed:
+        return 0
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as out:
+        for info, data in new_items:
+            if info.filename == "mimetype":                  # 必须第一且不压缩
+                out.writestr(zipfile.ZipInfo("mimetype"), data, zipfile.ZIP_STORED)
+            else:
+                out.writestr(info.filename, data, zipfile.ZIP_DEFLATED)
+    os.replace(tmp, path)
+    return changed
+
+
 def build_epub(
     book_md: str | Path,
     work_dir: str | Path,
@@ -215,4 +288,6 @@ def build_epub(
     # 当成功结果交给上层(is_done 只认容器完整性,空文件会在这里就暴露)。
     if not epub.exists() or epub.stat().st_size == 0:
         raise RuntimeError(f"Pandoc 返回成功但没有写出 EPUB(产物缺失或为空): {epub}")
+    # 脚注回链:pandoc 的 epub3 writer 不写 doc-backlink,产物侧补上(没有脚注就不动文件)
+    add_footnote_backlinks(epub)
     return epub
