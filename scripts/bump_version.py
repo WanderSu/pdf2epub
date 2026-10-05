@@ -5,8 +5,9 @@
     uv run python scripts/bump_version.py 0.2.4          # 写入
     uv run python scripts/bump_version.py --check        # 只检查是否一致
 
-同步目标(6 处):
+同步目标(7 处):
   - pyproject.toml               (Python 包版本)
+  - uv.lock                      (锁文件里的包版本;漏同步 → 下一次 `uv run` 改脏工作区)
   - desktop/src-tauri/tauri.conf.json (壳:安装包/窗口版本)
   - desktop/src-tauri/Cargo.toml (Rust crate 版本)
   - desktop/src/App.tsx          (界面左下角显示的 APP_VERSION)
@@ -21,11 +22,18 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-#: (相对路径, 版本号正则, 替换模板)。模板用 {v} 占位。
+#: (相对路径, 版本号正则, 替换模板)。模板用 {v} 占位;跨行匹配的模式同时给出
+#: ``nl`` 命名组,模板里用 {nl} 复现原文的换行风格(CRLF / LF),不往文件里混进另一种行尾。
 TARGETS: tuple[tuple[str, str, str], ...] = (
     ("pyproject.toml",
      r'(?m)^version\s*=\s*"([^"]+)"',
      'version = "{v}"'),
+    # uv.lock 里的 pdf2epub 包版本。uv 会按 pyproject 重写这条记录,所以只同步
+    # pyproject 时,下一次 `uv run` 就把工作区改脏了(依赖包的版本号不归我们管,
+    # 用 `name = "pdf2epub"` 定位,不能拿 `^version = ` 通配)。
+    ("uv.lock",
+     r'(?ms)^\[\[package\]\](?P<nl>\r?\n)name = "pdf2epub"(?P=nl)version = "(?P<v>[^"]+)"',
+     '[[package]]{nl}name = "pdf2epub"{nl}version = "{v}"'),
     ("desktop/src-tauri/tauri.conf.json",
      r'"version"\s*:\s*"([^"]+)"',
      '"version": "{v}"'),
@@ -47,6 +55,11 @@ TARGETS: tuple[tuple[str, str, str], ...] = (
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
 
 
+def _matched_version(m: re.Match[str]) -> str:
+    """取匹配到的版本号:优先命名组 ``v``(跨行模式用),否则第一个捕获组。"""
+    return m.group("v") if "v" in m.groupdict() else m.group(1)
+
+
 def read_versions(root: Path = PROJECT_ROOT) -> dict[str, str]:
     """读取各处的当前版本号(文件缺失 → 值为 "<缺失>")。"""
     versions: dict[str, str] = {}
@@ -56,7 +69,7 @@ def read_versions(root: Path = PROJECT_ROOT) -> dict[str, str]:
             versions[rel] = "<缺失>"
             continue
         m = re.search(pattern, path.read_text(encoding="utf-8"))
-        versions[rel] = m.group(1) if m else "<未找到>"
+        versions[rel] = _matched_version(m) if m else "<未找到>"
     return versions
 
 
@@ -80,11 +93,12 @@ def write_versions(new: str, root: Path = PROJECT_ROOT) -> dict[str, tuple[str, 
         m = re.search(pattern, text)
         if m is None:
             raise ValueError(f"在 {rel} 中找不到版本号(正则不匹配,文件结构变了?)")
-        old = m.group(1)
+        old = _matched_version(m)
         if old == new:
             changes[rel] = (old, new)
             continue
-        updated = text[:m.start()] + template.format(v=new) + text[m.end():]
+        updated = text[:m.start()] + template.format(
+            v=new, nl=(m.groupdict().get("nl") or "\n")) + text[m.end():]
         path.write_bytes(updated.encode("utf-8"))
         changes[rel] = (old, new)
     return changes

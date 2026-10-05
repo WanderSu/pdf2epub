@@ -176,7 +176,7 @@ OCR 或 PDF 提取出来的 Markdown 往往不能直接拿来阅读，因此转�
 下载最新的 Windows 压缩包，例如：
 
 ```text
-pdf2epub-v0.4.2-win-x64.zip
+pdf2epub-v0.4.3-win-x64.zip
 ```
 
 文件名中的版本号会随版本更新。解压后运行：

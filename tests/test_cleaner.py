@@ -503,6 +503,73 @@ def test_real_page_break_is_still_joined() -> None:
     assert clean(md) == "上一段在这里被断开了,前半句一直写到了这一行末尾为止下一行继续,并以句号结尾。"
 
 
+# ---------------------------------------------------------------- 行间数学块
+
+def test_math_block_is_protected_verbatim() -> None:
+    """`$$` 定界行与块内容不得被改写(不加硬换行、不被拼走)。
+
+    修复前 `$$` 会被 `_is_verse_line` 当成 2 字符短行(长度 ≤ VERSE_MAX_CHARS 且无句末
+    标点)而补上行尾硬换行 —— 但 pandoc 不会把数学块里的行尾空格渲染成 `<br>`,内容
+    校验据此给**正常产物**报「硬换行减少」的假警告。单行块与 `\\[ … \\]` 同理。
+    """
+    block = "$$\na^2+b^2=c^2\n$$\n"
+    assert clean(block) == block.rstrip("\n")
+
+    single = "$$E = mc^2$$\n"
+    assert clean(single) == single.rstrip("\n")
+
+    bracket = "\\[\nE = mc^2\n\\]\n"
+    assert clean(bracket) == bracket.rstrip("\n")
+
+
+def test_math_block_is_not_joined_with_following_paragraph() -> None:
+    """多行数学块不得被压平,也不得与紧随其后的正文粘成同一段(幂等)。
+
+    修复前 `_join_broken_lines` 会把 `\\begin{aligned}` 这类 ≥20 字的行一路拼下去,
+    产物里 `<math display="block">…</math>` 与后一句正文进了同一个 `<p>`。
+    """
+    md = r"""$$
+\begin{aligned}
+(a+b)^2 &= a^2 + 2ab + b^2 \\
+(a-b)^2 &= a^2 - 2ab + b^2
+\end{aligned}
+$$
+
+这里是正文,应当与公式分开成段。
+"""
+    out = clean(md)
+    assert out == md.rstrip("\n")
+    assert out.count("\n") == md.rstrip("\n").count("\n")   # 行数不变:没有被压平
+    assert "\n\n这里是正文" in out                           # 公式与正文仍是两个结构
+    assert "\\end{aligned}$$这里是正文" not in out
+    assert clean(out) == out                               # 幂等(硬换行不会叠加)
+
+
+def test_text_around_math_block_is_still_cleaned() -> None:
+    """掩码只覆盖数学块本身:块前后的正文照旧走空格/断行清理。"""
+    md = "$$\nE = mc^2\n$$\n\n前面一段 中文 空格 要修正。\n"
+    out = clean(md)
+    assert "$$\nE = mc^2\n$$" in out
+    assert "前面一段中文空格要修正。" in out
+
+
+def test_unclosed_math_delimiter_is_left_alone() -> None:
+    """孤立 `$$`(找不到配对收尾行)不掩码 —— 否则后面整本书会静默失去清理。
+
+    这是「不该改」的反例:宁可漏保护一处数学,也不能让清理器形同失效。
+    两种形态都要覆盖:定界符在行中、定界符在行首但全篇没有收尾行。
+    """
+    inline = "价格写作 $$ 符号,这句话只是字面出现的美元符号。\n\n这一段 中文 空格 照旧要修正。\n"
+    out = clean(inline)
+    assert "$$ 符号" in out
+    assert "这一段中文空格照旧要修正。" in out          # 后面的正文照旧被清理
+
+    orphan = "$$ dollar\n\n另一段 中文 空格 也要修正。\n"
+    out2 = clean(orphan)
+    assert out2.startswith("$$ dollar")                 # 孤立定界行原样保留
+    assert "另一段中文空格也要修正。" in out2
+
+
 # ---------------------------------------------------------------- 开关与配置
 
 def test_clean_keys_cover_all_option_fields() -> None:
