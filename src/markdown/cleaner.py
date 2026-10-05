@@ -3,7 +3,7 @@
 原则:修复结构,不改写正文;不用 LLM 重写。
 当前实现:
   - 统一换行符(CRLF → LF)
-  - 围栏代码块 / 行内代码**掩码**:规则链全程不触碰代码,结束时逐字节还原
+  - 围栏代码块 / 行内代码 / 脚注定义块**掩码**:规则链全程不触碰它们,结束时逐字节还原
   - 页码残留剔除(独立纯数字行 1-3 位)
   - 页眉页脚重复行剔除(跨页反复出现的短行,扫描书收益最大)
   - 跨页断行连接(被页码/页脚/页码注释隔断或非标点结尾的连续段落)
@@ -25,6 +25,10 @@
    行内代码上就是语义损坏;因此规则链跑在掩码文本上,代码原文只在最后还原。
 2. **页码注释(`<!-- page N -->`)不是内容**,它标记页边界。它既不该被拼接吃掉,
    也不该把「被页边界断开的段落」切断 —— 否则跨页连接这条规则在真实产物上完全失效。
+3. **脚注定义块(`[^1]: …`)是不可改写的结构**。它在清理器眼里只是一行普通文本,
+   但 pandoc 认的是这个语法:一旦被拼进正文段、被补硬换行、或者续行的缩进被 strip,
+   整条脚注就降级成正文里的普通文字(且**源里不再有 `[^1]:`**,内容对照校验看不见)。
+   与代码块同理,靠规则各自「跳过」是拦不住的,所以整体掩码。
 """
 from __future__ import annotations
 
@@ -96,8 +100,30 @@ FENCE_MARK = "```"
 INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
 #: 占位符里用的哨兵字符:不可能出现在正常 Markdown 文本里
 SENTINEL = "\x00"
-#: 还原后仍残留的占位符(说明有规则改写了它 —— 那意味着代码块内容可能已损坏)
-MASK_LEFTOVER_RE = re.compile(rf"{SENTINEL}[fc]\d+{SENTINEL}")
+#: 还原后仍残留的占位符(说明有规则改写了它 —— 那意味着受保护内容可能已损坏)
+MASK_LEFTOVER_RE = re.compile(rf"{SENTINEL}[fcn]\d+{SENTINEL}")
+
+#: 脚注定义行:`[^label]: 内容`(最多 3 个前导空格,与 pandoc 的块级缩进一致)
+FOOTNOTE_DEF_RE = re.compile(r"^ {0,3}\[\^[^\]\s]+\]:")
+#: 脚注续行的缩进(**pandoc 只把缩进 ≥4 空格/tab 的行算作脚注内容**)
+FOOTNOTE_CONT_INDENT_RE = re.compile(r"^(?: {4,}|\t)")
+
+
+def _is_footnote_cont(line: str) -> bool:
+    """该行是否属于上一条脚注定义的续行(缩进足够且非空)。"""
+    return bool(line.strip()) and bool(FOOTNOTE_CONT_INDENT_RE.match(line))
+
+
+def _mask_token(blocks: list[tuple[str, str]], kind: str, text: str,
+                wrapper: str = "") -> str:
+    """登记一块受保护原文并返回占位符(kind: f=围栏代码 / c=行内代码 / n=脚注)。
+
+    wrapper 用 `<` 把占位符包成「markdown 块结构」:拼接规则既不会吃掉它,
+    也不会把相邻正文拼进它。
+    """
+    ph = f"{wrapper}{SENTINEL}{kind}{len(blocks)}{SENTINEL}{wrapper}"
+    blocks.append((ph, text))
+    return ph
 
 
 def _mask_code(md: str) -> tuple[str, list[tuple[str, str]]]:
@@ -122,9 +148,7 @@ def _mask_code(md: str) -> tuple[str, list[tuple[str, str]]]:
 
     def token(kind: str, text: str, wrapper: str = "") -> str:
         """登记一块原文并返回占位符(返回值即插入文本的字符串)。"""
-        ph = f"{wrapper}{SENTINEL}{kind}{len(blocks)}{SENTINEL}{wrapper}"
-        blocks.append((ph, text))
-        return ph
+        return _mask_token(blocks, kind, text, wrapper)
 
     i = 0
     while i < len(lines):
@@ -143,16 +167,61 @@ def _mask_code(md: str) -> tuple[str, list[tuple[str, str]]]:
     return masked, blocks
 
 
-def _unmask_code(md: str, blocks: list[tuple[str, str]]) -> str:
-    """还原代码块原文。还原不完整说明有规则改写了占位符 —— 报错,不静默丢内容。
+def _mask_footnotes(md: str, blocks: list[tuple[str, str]]) -> str:
+    """把脚注定义块(定义行 + 缩进续行)整体掩码,保证清理规则不改写它们。
+
+    为什么必须保护:`[^1]: …` 在清理规则眼里就是一行普通文本 ——
+      - `_join_broken_lines` 会把紧跟正文的脚注定义**拼进上一段**(上一行没有句末
+        标点时必然发生,而 OCR 产物的行尾恰恰常常没有句点):定义语法就此消失;
+      - 多条定义连排时,后一条会被拼进前一条的内容里(pandoc 里引用变成未定义);
+      - 续行的缩进会被 strip、短脚注会被 `_mark_verse_lines` 补上硬换行。
+
+    实测后果:同一份 Markdown 清理前 `footnote_refs=2`,清理后 `footnote_refs=0` ——
+    脚注整批降级成正文流文字;而内容对照校验查不出来(源里已经没有 `[^1]:` 可对了)。
+
+    保护范围与 pandoc 的脚注语法一致(定义行 + 缩进 ≥4 空格的续行),不含空行分隔
+    的下一段正文(缩进不足的行 pandoc 本来也不算脚注内容)。
+    """
+    lines = md.split("\n")
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        if not FOOTNOTE_DEF_RE.match(lines[i]):
+            out.append(lines[i])
+            i += 1
+            continue
+        j = i + 1
+        while j < len(lines):
+            if _is_footnote_cont(lines[j]):
+                j += 1
+                continue
+            if not lines[j].strip():
+                # 空行后仍跟着缩进续行时,空行属于这条脚注(多段脚注)
+                k = j
+                while k < len(lines) and not lines[k].strip():
+                    k += 1
+                if k < len(lines) and _is_footnote_cont(lines[k]):
+                    j = k
+                    continue
+            break
+        out.append(_mask_token(blocks, "n", "\n".join(lines[i:j]), wrapper="<"))
+        i = j
+    return "\n".join(out)
+
+
+def _unmask_protected(md: str, blocks: list[tuple[str, str]]) -> str:
+    """还原受保护原文(脚注块 / 围栏代码 / 行内代码)。还原不完整即报错,不静默丢内容。
+
+    **逆序还原**:脚注块里可能嵌着行内代码占位符,先还原脚注、再还原代码 ——
+    顺序反了会留下未还原的占位符,进而被误判成「有规则改写了受保护内容」。
 
     只检查**占位符形状**而不是「文本里有没有哨兵字符」:输入文件本身带 NUL 时
     不该让整本书转换失败(那是上游的问题,不是清理器的)。
     """
-    for placeholder, original in blocks:
+    for placeholder, original in reversed(blocks):
         md = md.replace(placeholder, original)
     if MASK_LEFTOVER_RE.search(md):
-        raise RuntimeError("清理器占位符还原失败(有规则改写了代码块占位符)")
+        raise RuntimeError("清理器占位符还原失败(有规则改写了受保护内容)")
     return md
 
 
@@ -325,6 +394,10 @@ def clean_markdown(
     # 1.5 代码掩码:围栏代码块与行内代码对下面所有规则免疫(规则链只跑在正文上)
     md, code_blocks = _mask_code(md)
 
+    # 1.6 脚注定义块掩码:同理由,且必须与代码块同一套机制 —— 脚注被拼进正文后
+    #     pandoc 就再也认不出它,内容对照校验也查不出来(源里没有 `[^1]:` 可对了)
+    md = _mask_footnotes(md, code_blocks)
+
     # 2. 剔除页码残留:独立纯数字行(1-3 位,前后可有空白)
     if options.page_numbers:
         md = re.sub(r"(?m)^[ \t]*\d{1,3}[ \t]*$\n?", "", md)
@@ -375,8 +448,8 @@ def clean_markdown(
     if options.join_lines:
         md = _mark_verse_lines(md, report)
 
-    # 10.8 还原代码块(必须排在所有规则之后:代码块原文逐字节回写)
-    md = _unmask_code(md, code_blocks)
+    # 10.8 还原受保护内容(必须排在所有规则之后:原文逐字节回写)
+    md = _unmask_protected(md, code_blocks)
 
     # 11. 图片引用存在性校验
     if options.images and images_dir is not None and images_dir.is_dir():

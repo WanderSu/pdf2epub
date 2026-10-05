@@ -798,6 +798,12 @@ cd desktop/src-tauri && cargo test    # Rust 测试
 cd desktop && npm run build           # 前端类型检查与构建
 ```
 
+测试默认完全离线(不调云端)。需要验证真实云端 OCR(会消耗额度)时显式开启：
+
+```bash
+PDF2EPUB_LIVE_OCR=1 uv run pytest tests/test_live_ocr_footnotes.py -q
+```
+
 项目中的设计思路和一些技术取舍可以参考：
 
 [IDEA.md](IDEA.md)

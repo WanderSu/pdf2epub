@@ -231,8 +231,14 @@ class PartStore:
         return self.dir_for(part_id)
 
     def save(self, part_id: str, params_fp: str, md_text: str,
-             images_src: str | Path | None = None, **extra) -> Path:
-        """落盘一段结果(先写内容,最后写 meta)。"""
+             images_src: str | Path | None = None, *,
+             extra_files: dict[str, str | Path] | None = None, **extra) -> Path:
+        """落盘一段结果(先写内容与附带文件,最后写 meta)。
+
+        extra_files:随段一起缓存的**结构化结果**(如 MinerU 的 content_list.json)。
+        它们必须在 meta 之前写好 —— meta 只是「这一段可用」的标记,写它的时候
+        磁盘上的内容必须已经齐全。
+        """
         part_dir = self.dir_for(part_id)
         part_dir.mkdir(parents=True, exist_ok=True)
         self.md_path(part_id).write_text(md_text, encoding="utf-8")
@@ -244,6 +250,10 @@ class PartStore:
                 for img in sorted(src.iterdir()):
                     if img.is_file():
                         shutil.copy2(img, dst / img.name)
+        for name, extra_src in (extra_files or {}).items():
+            extra_path = Path(extra_src)
+            if extra_path.is_file():
+                shutil.copy2(extra_path, part_dir / Path(name).name)
         meta = {**self._key(part_id, params_fp), "created_at": int(time.time()), **extra}
         (part_dir / PART_META_FILE).write_text(
             json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
