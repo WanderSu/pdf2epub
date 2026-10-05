@@ -96,6 +96,12 @@ When cloud OCR is used, the page images of your PDF are sent to the service you 
 
 Books longer than a single cloud task are split automatically and merged back in the original order.
 
+### Footnotes
+
+Footnotes in scanned books (notes printed at the bottom of a page) come from the OCR structured result. The tool links a marker in the body text to its note and writes real **native EPUB footnotes**: the marker jumps to the note, and the note links back to the text.
+
+A link is only created when the evidence is solid: same page (or the page right after), matching marker, and matching counts on both sides. A footnote that cannot be confirmed is left in place as plain text and the body marker stays untouched — better a missing link than a wrong one.
+
 ### Resuming after an interruption
 
 Submitted OCR tasks are recorded.

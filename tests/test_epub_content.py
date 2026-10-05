@@ -381,3 +381,65 @@ def test_verify_output_without_source_stays_structure_only(tmp_path: Path) -> No
 
     assert result.ok
     assert not any(i.code.startswith("content_") for i in result.issues)
+
+
+# ---------------------------------------------------------------- 脚注回链(pandoc 不写)
+
+def _epub_xhtml(path: Path) -> str:
+    import zipfile
+
+    with zipfile.ZipFile(path) as zf:
+        return "\n".join(zf.read(n).decode("utf-8", errors="replace")
+                         for n in zf.namelist() if n.endswith(".xhtml"))
+
+
+def test_footnote_backlinks_are_added_without_breaking_the_epub(tmp_path: Path) -> None:
+    """产物侧补 doc-backlink(引用侧 pandoc 只写 noteref);补完容器仍合法。"""
+    from epub.pandoc import add_footnote_backlinks
+
+    src = tmp_path / "src"
+    epub = build_epub(src, tmp_path / "fn.epub", title="样本书", with_image=False,
+                      with_math=False, body="正文末尾有注释[^1]。\n\n[^1]: 脚注内容,足够长。\n")
+
+    # 基线:conftest 的样本直接用 pandoc 生成,没有回链 —— pandoc 的 epub3 writer
+    # 本来就不写 doc-backlink(与项目代码无关)
+    assert "doc-backlink" not in _epub_xhtml(epub)
+
+    assert add_footnote_backlinks(epub) == 1
+
+    xhtml = _epub_xhtml(epub)
+    assert 'href="#fnref1" class="footnote-back"' in xhtml
+    assert 'role="doc-backlink"' in xhtml
+    # 引用还在(补回链不能动正文侧),容器校验也照样通过
+    assert 'href="#fn1"' in xhtml and "noteref" in xhtml
+    assert verify_epub(epub).ok
+
+
+def test_epub_without_footnotes_is_left_alone(tmp_path: Path) -> None:
+    """没有脚注的书 → 连 zip 都不重写(字节不变,零风险)。"""
+    from epub.pandoc import add_footnote_backlinks
+
+    src = tmp_path / "src"
+    epub = build_epub(src, tmp_path / "plain.epub", title="样本书")
+    before = epub.read_bytes()
+
+    assert add_footnote_backlinks(epub) == 0
+    assert epub.read_bytes() == before
+
+
+def test_backlink_injection_is_idempotent_and_keeps_mimetype_first(tmp_path: Path) -> None:
+    """补两次不能补出两条回链;重写 zip 时 mimetype 仍必须是第一个且不压缩。"""
+    import zipfile
+
+    from epub.pandoc import add_footnote_backlinks
+
+    src = tmp_path / "src"
+    epub = build_epub(src, tmp_path / "fn.epub", title="样本书", with_image=False,
+                      with_math=False, body="注释[^1]。\n\n[^1]: 脚注。\n")
+
+    assert add_footnote_backlinks(epub) == 1
+    assert add_footnote_backlinks(epub) == 0                    # 已有回链:不再重复补
+    assert _epub_xhtml(epub).count("doc-backlink") == 1
+    with zipfile.ZipFile(epub) as zf:
+        first = zf.infolist()[0]
+    assert first.filename == "mimetype" and first.compress_type == zipfile.ZIP_STORED

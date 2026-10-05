@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -80,7 +81,7 @@ def test_paddleocr_keeps_page_footnote(tmp_path: Path) -> None:
 
 
 def test_mineru_recovers_page_footnote(tmp_path: Path) -> None:
-    """MinerU:`full.md` 不含 page_footnote → 由结构化结果补回(=内容不能丢)。"""
+    """MinerU:`full.md` 不含 page_footnote → 由结构化结果重建(且要真变成 Pandoc 脚注)。"""
     if not _has_token("MinerU"):
         pytest.skip("未配置 MinerU Token")
 
@@ -93,8 +94,11 @@ def test_mineru_recovers_page_footnote(tmp_path: Path) -> None:
     md = result.book_md.read_text(encoding="utf-8")
     part_md = next((work / "_parts").rglob("full.md")).read_text(encoding="utf-8")
 
-    assert "这是测试脚注" in md, f"脚注既不在 full.md 也没被补回: {md!r}"
+    assert "这是测试脚注" in md, f"脚注既不在 full.md 也没被重建: {md!r}"
     if "这是测试脚注" not in part_md:
-        # 结构化结果确实存在,且补回计数对得上
-        assert result.stats["recovered_footnotes"] >= 1
+        # 结构化结果确实存在,且计数对得上
+        assert result.stats["footnotes_total"] >= 1
         assert list((work / "_parts").rglob(CONTENT_LIST_FILE))
+    if result.stats.get("footnotes_linked"):
+        # 引用与脚注对上了才会变成 Pandoc footnote:正文有 `[^n]`,文末有定义
+        assert re.search(r"\[\^\d+\]: .*这是测试脚注", md), md

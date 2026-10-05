@@ -161,19 +161,21 @@ class FakeMinerUCloud:
 
         `footnotes[data_id]` 有值时额外产出结构化结果 `*_content_list.json`:
         **full.md 里没有页脚脚注,脚注只在结构化结果里** —— 这是真实 MinerU 的行为
-        (page_footnote 属 discarded blocks),用来验证后端的补回逻辑。
+        (page_footnote 属 discarded blocks)。同时正文里带一个 `①` 引用标记,
+        用来验证「引用 ↔ 脚注」配对后生成的是 Pandoc footnote(而不是普通文本)。
         """
+        note = self.footnotes.get(data_id)
+        body = f"这是 {data_id} 的正文段落,以句号结尾。"
+        if note:
+            body += "这里有一个引用①。"
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w") as zf:
             zf.writestr(f"{data_id}/full.md",
-                        f"# 分段 {data_id}\n\n这是 {data_id} 的正文段落,以句号结尾。\n\n"
-                        f"![图](images/fig.png)\n")
+                        f"# 分段 {data_id}\n\n{body}\n\n![图](images/fig.png)\n")
             zf.writestr(f"{data_id}/images/fig.png", f"\x89PNG-fake-{data_id}".encode())
-            note = self.footnotes.get(data_id)
             if note:
                 blocks = [
-                    {"type": "text", "text": f"这是 {data_id} 的正文段落,以句号结尾。",
-                     "page_idx": 0},
+                    {"type": "text", "text": body, "page_idx": 0},
                     {"type": "page_footnote", "text": note, "page_idx": 0},
                     {"type": "page_number", "text": "1", "page_idx": 0},
                 ]
@@ -284,10 +286,11 @@ def test_single_task_keeps_no_page_markers(tmp_path, cloud) -> None:
 # ---------------------------------------------------------------- 页脚脚注补回
 
 def test_page_footnote_from_structured_result_is_recovered(tmp_path, cloud) -> None:
-    """`full.md` 不含 page_footnote(真实 MinerU 行为)→ 合并时从结构化结果补回。
+    """`full.md` 不含 page_footnote(真实 MinerU 行为)→ 合并时从结构化结果重建脚注。
 
-    补回位置是**该页最后一块内容之后**,而不是丢到文末;页码之类的 discarded blocks
-    不补(那是页面装饰,markdown 侧本来就要过滤掉)。
+    正文里的 `①` 与结构化结果里的 `①` 注释能对上(同页、marker 一致)→ 生成 Pandoc
+    footnote(`正文[^1]` + `[^1]: …`),而不是把注释当普通文本堆在页脚;页码之类的
+    discarded blocks 不补(那是页面装饰,markdown 侧本来就要过滤掉)。
     """
     cloud.footnotes["书.pdf"] = "① 这是测试脚注:内容不能丢。"
     pdf = make_paged_pdf(tmp_path / "书.pdf", pages=3)
@@ -295,19 +298,22 @@ def test_page_footnote_from_structured_result_is_recovered(tmp_path, cloud) -> N
     result = _adapter().convert(pdf, tmp_path / "work")
 
     md = result.book_md.read_text(encoding="utf-8")
-    assert "这是测试脚注" in md
-    assert md.index("正文段落,以句号结尾。") < md.index("这是测试脚注")
-    assert result.stats["recovered_footnotes"] == 1
+    assert "引用[^1]。" in md                       # 正文 marker → Pandoc footnote 引用
+    assert "[^1]: 这是测试脚注:内容不能丢。" in md   # 注释 → Pandoc footnote 定义
+    assert md.index("引用[^1]。") < md.index("[^1]: 这是测试脚注")
+    assert result.stats["footnotes_total"] == 1
+    assert result.stats["footnotes_linked"] == 1
+    assert result.stats["footnotes_unmatched"] == 0
     assert "\n1\n" not in md                       # page_number 不被补进正文
-    # 结构化结果随段缓存落盘:否则下次续跑合并时补不回来
+    # 结构化结果随段缓存落盘:否则下次续跑合并时重建不了
     assert list((tmp_path / "work" / "_parts").rglob("content_list.json"))
 
-    # 新进程只看得到磁盘:再跑一次(命中段缓存、不重新提交云端任务)脚注依然补得回
+    # 新进程只看得到磁盘:再跑一次(命中段缓存、不重新提交云端任务)脚注依然重建得出来
     again = _adapter().convert(pdf, tmp_path / "work")
 
     assert len(cloud.posts) == 1
-    assert "这是测试脚注" in again.book_md.read_text(encoding="utf-8")
-    assert again.stats["recovered_footnotes"] == 1
+    assert again.book_md.read_text(encoding="utf-8") == md
+    assert again.stats["footnotes_linked"] == 1
 
 
 def test_cached_part_without_structured_result_still_merges(tmp_path, cloud) -> None:

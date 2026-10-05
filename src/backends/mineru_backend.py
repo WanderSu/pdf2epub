@@ -23,9 +23,7 @@
 from __future__ import annotations
 
 import filecmp
-import json
 import os
-import re
 import shutil
 import time
 import zipfile
@@ -49,6 +47,7 @@ from .base import (
 )
 from page_result import page_marker_from_range
 from paths import load_api_key
+from markdown.footnotes import load_content_list, reconstruct_footnotes
 import events
 
 DEFAULT_BASE_URL = "https://mineru.net/api/v4"
@@ -593,11 +592,14 @@ class MinerUAdapter(Backend):
 
         parts_md: list[str] = []
         img_count = 0
-        footnote_count = 0
+        next_id = 1
+        totals = {"notes": 0, "linked": 0, "high": 0, "medium": 0, "unmatched": 0,
+                  "orphan_refs": 0}
         for part in parts:
             md_text = store.md_path(part.part_id).read_text(encoding="utf-8", errors="replace")
-            md_text, notes = _recover_part_footnotes(store, part, md_text)
-            footnote_count += notes
+            md_text, stats, next_id = _reconstruct_part_footnotes(store, part, md_text, next_id)
+            for key in totals:
+                totals[key] += int(stats.get(key, 0))
             md_text, n = _copy_part_images(
                 store.images_dir(part.part_id), images_abs, md_text, prefix=f"p{part.idx}_"
             )
@@ -611,6 +613,16 @@ class MinerUAdapter(Backend):
         book_md = work_dir / "book.md"
         book_md.write_text(merged, encoding="utf-8")
 
+        if totals["notes"]:
+            print(f"[mineru] 脚注: 结构化结果 {totals['notes']} 条 → "
+                  f"关联 {totals['linked']} 条 (high {totals['high']} / medium {totals['medium']}),"
+                  f"未匹配 {totals['unmatched']} 条保留为普通文本")
+        if totals["unmatched"]:
+            # 不静默:没配上的脚注内容仍在,只是没有变成可点击脚注
+            events.emit("warning", code="footnotes_unmatched",
+                        message=f"{totals['unmatched']} 条脚注未能确认对应的正文引用,"
+                                f"已保留为普通文本(不做错误链接)")
+
         return ConversionResult(
             book_md=book_md,
             images_dir=images_abs,
@@ -622,7 +634,10 @@ class MinerUAdapter(Backend):
                 "model": self.model_version,
                 "parts": len(parts),
                 "total_pages": total_pages,
-                "recovered_footnotes": footnote_count,
+                "footnotes_total": totals["notes"],
+                "footnotes_linked": totals["linked"],
+                "footnotes_unmatched": totals["unmatched"],
+                "footnotes_orphan_refs": totals["orphan_refs"],
             },
         )
 
@@ -632,70 +647,12 @@ def _item_key(item: dict) -> str:
     return item.get("data_id") or item.get("file_name") or ""
 
 
-# ---------- 结构化结果 → 页脚脚注补回 ----------
+# ---------- 结构化结果 → 脚注重建 ----------
 
-#: 段缓存里附带的 MinerU 结构化结果文件名(结果包里的 `*_content_list.json`)
+#: 段缓存里附带的 MinerU 结构化结果文件名(结果包里的 `*_content_list.json`)。
+#: `full.md` **不含** `page_footnote`(它属于 discarded blocks,markdown 渲染只走
+#: 正文块),所以脚注只能靠结构化结果补 —— 见 `markdown.footnotes`。
 CONTENT_LIST_FILE = "content_list.json"
-
-#: markdown 渲染不会输出、但内容不该丢的块类型。
-#:
-#: `page_footnote`(页脚脚注)属于 **discarded blocks**:markdown 渲染只走
-#: `para_blocks`,所以 `full.md` 里**一个字都没有**(实测:同一份结果包里脚注文本
-#: 只存在于 `content_list.json`)。页眉/页脚/页码/边注**刻意不在此列** —— 它们在
-#: markdown 侧本来就要过滤掉(与 PaddleOCR 的 `markdownIgnoreLabels` 默认值一致),
-#: 补回来只是噪声。
-RECOVER_BLOCK_TYPES = ("page_footnote",)
-
-#: 对齐用的锚点长度:取每个内容块去空白后的前 N 个字符,去 Markdown 里找位置。
-#: MinerU 的 markdown 与 content_list 出自同一批块(文本一致,只是换行、空格与
-#: 标题 `##` 标记不同),去空白后前缀匹配足够稳;锚点取短一点,才能容忍 markdown
-#: 在句子中间插空行(实测产物就有这种断行)。
-ANCHOR_CHARS = 12
-
-
-def content_list_text(block: dict) -> str:
-    """取 content_list 块的纯文本:v1 是扁平 `text`,v2 是 `content.*_content[]`。"""
-    text = block.get("text")
-    if isinstance(text, str) and text.strip():
-        return text.strip()
-    content = block.get("content")
-    if isinstance(content, dict):
-        parts: list[str] = []
-        for value in content.values():
-            if isinstance(value, list):
-                for item in value:
-                    if isinstance(item, dict) and isinstance(item.get("content"), str):
-                        parts.append(item["content"])
-        return "".join(parts).strip()
-    return ""
-
-
-def load_content_list(path: str | Path) -> list[dict]:
-    """读结构化结果(v1 平铺列表 / v2 按页分组两种形态都吃);坏了就当没有。"""
-    try:
-        data = json.loads(Path(path).read_text(encoding="utf-8", errors="replace"))
-    except (OSError, ValueError):
-        return []
-    if not isinstance(data, list):
-        return []
-    if data and all(isinstance(page, list) for page in data):      # v2:[[块…], …]
-        return [block for page in data for block in page if isinstance(block, dict)]
-    return [block for block in data if isinstance(block, dict)]
-
-
-#: 空行(段落边界):兼容 LF 与 CRLF 两种产物形态(云端 full.md 常见 CRLF,
-#: 只找 `"\n\n"` 会让所有锚点都落空,脚注全被兜到文末)
-BLANK_LINE_RE = re.compile(r"\r?\n[ \t]*\r?\n")
-
-
-def _paragraph_end(md: str, index: int) -> int:
-    """index 所在段落的结束位置(下一个空行的起始处;没有则是正文末尾)。
-
-    末尾要把行尾空白去掉再算位置,否则在「文件以换行结尾」的产物上加插一段会多出
-    一个空行。
-    """
-    match = BLANK_LINE_RE.search(md, index)
-    return match.start() if match else len(md.rstrip())
 
 
 def _content_list_files(extract_dir: Path) -> dict[str, Path]:
@@ -707,76 +664,24 @@ def _content_list_files(extract_dir: Path) -> dict[str, Path]:
     return {}
 
 
-def _recover_part_footnotes(store: PartStore, part: OcrPart, md_text: str) -> tuple[str, int]:
-    """用段缓存里的结构化结果补回页脚脚注(没有结构化结果就原样返回)。
+def _reconstruct_part_footnotes(store: PartStore, part: OcrPart, md_text: str,
+                                next_id: int) -> tuple[str, dict, int]:
+    """用段缓存里的结构化结果重建脚注(没有结构化结果就原样返回)。
 
-    老缓存(本次改动之前落的段)里没有 `content_list.json` —— 那段补不回脚注,
+    重建 = 配对(引用 ↔ 脚注,可验证的证据才配对)+ 渲染成 Pandoc footnote;
+    配对不成立时脚注仍以普通文本留在原处(内容不丢,也不误链)。规则见
+    `markdown.footnotes` 的模块说明。
+
+    老段缓存(带附带文件之前的段)里没有 `content_list.json` —— 那段重建不了,
     但**不因此判定缓存失效**:为一个附带文件让整段重新上传、重新计费不划算。
+
+    返回 `(新 Markdown, 统计, 下一个可用脚注编号)`;编号跨分片递增,合并后不撞号。
     """
     path = store.dir_for(part.part_id) / CONTENT_LIST_FILE
     if not path.is_file():
-        return md_text, 0
-    md_text, notes = recover_page_footnotes(md_text, load_content_list(path))
-    if notes:
-        print(f"[mineru] 段 {part.part_id}: 补回 {notes} 条页脚脚注"
-              f"(full.md 不含 discarded blocks,取自 content_list)")
-    return md_text, notes
-
-
-def recover_page_footnotes(md_text: str, blocks: list[dict]) -> tuple[str, int]:
-    """把 content_list 里的 `page_footnote` 补回 Markdown,返回 (新文本, 补回条数)。
-
-    **为什么需要**:见 `RECOVER_BLOCK_TYPES` —— 页脚脚注不在 `full.md` 里,不补就真丢了。
-
-    做法(只补内容、不改写正文):
-      1. 按阅读顺序把 content_list 的内容块与 Markdown 对齐(去空白后取前缀匹配);
-      2. 记住每页**最后一个内容块**在 Markdown 里的段落末尾;
-      3. 该页的脚注插在那个位置之后,独立成段;
-      4. 对不齐时兜底插到文末 —— 位置可以不精确,内容不能丢。
-
-    **不把正文里的标记字符(①/1)改写成 `[^n]` 引用**:OCR 正文里的标记与脚注文本
-    的前缀无法可靠配对,硬改会把正文改错(配对失败还会静默丢引用)。脚注以它自己的
-    标记原样落地,读者能对上。
-    """
-    if not md_text or not blocks:
-        return md_text, 0
-
-    norm_chars: list[str] = []
-    index_map: list[int] = []
-    for i, ch in enumerate(md_text):
-        if not ch.isspace():
-            norm_chars.append(ch)
-            index_map.append(i)
-    norm_md = "".join(norm_chars)
-
-    cursor = 0
-    page_anchor: dict[object, int] = {}          # 页 → 该页最后一块所在段落的结束位置
-    inserts: list[tuple[int, int, str]] = []     # (插入位置, 阅读顺序, 文本)
-
-    for order, block in enumerate(blocks):
-        if not isinstance(block, dict):
-            continue
-        text = content_list_text(block)
-        if block.get("type") in RECOVER_BLOCK_TYPES:
-            if text:
-                anchor = page_anchor.get(block.get("page_idx"))
-                inserts.append((len(md_text) if anchor is None else anchor, order, text))
-            continue
-        key = re.sub(r"\s+", "", text)[:ANCHOR_CHARS]
-        if not key:
-            continue
-        pos = norm_md.find(key, cursor)
-        if pos < 0:
-            continue
-        cursor = pos + len(key)
-        page_anchor[block.get("page_idx")] = _paragraph_end(md_text, index_map[cursor - 1])
-
-    if not inserts:
-        return md_text, 0
-    # 逆序插入(同位置按阅读顺序):从后往前改字符串,前面的位置才不会偏移
-    for pos, _order, text in sorted(inserts, key=lambda t: (t[0], t[1]), reverse=True):
-        md_text = f"{md_text[:pos]}\n\n{text}{md_text[pos:]}"
-    return md_text, len(inserts)
+        return md_text, {}, next_id
+    result = reconstruct_footnotes(md_text, load_content_list(path), next_id=next_id)
+    return result.md, result.stats, result.next_id
 
 
 def _copy_part_images(src_dir: Path, dst_dir: Path, md: str, *, prefix: str) -> tuple[str, int]:
