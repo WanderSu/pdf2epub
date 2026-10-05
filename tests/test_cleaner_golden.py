@@ -32,7 +32,7 @@ GOLDEN_MAP: dict[str, list[str]] = {
     "running_heads": ["running_heads", "code_fence_protected"],
     #   正例:重复 3 次被删;反例:只出现 2 次的短行保留、代码块里重复的 end 保留
     "join_lines": ["join_lines", "poetry_preserved", "poetry_quoted", "poetry_modern",
-                   "page_markers", "ordered_list_toc", "footnotes"],
+                   "page_markers", "ordered_list_toc", "footnotes", "structure_lines"],
     #   正例:断行拼接(含「短行散文」那对)、跨页码注释的拼接(page_markers)
     #   反例:代码块/表格不拼、诗行不拼且加硬换行、标题/列表/引用跨注释不拼
     #   (page_markers)、有序列表条目与页码行不被粘进相邻行(ordered_list_toc 取自
@@ -44,8 +44,12 @@ GOLDEN_MAP: dict[str, list[str]] = {
     #   修复前这两条定义会被拼进正文段(pandoc 认不出脚注,清理后的产物脚注数 0)
     "ocr_spaces": ["ocr_spaces", "code_fence_protected"],
     #   正例:Py Mu PDF → PyMuPDF;反例:正常英文短语、代码块里的注释不被合并
-    "cjk_spaces": ["cjk_spaces", "should_not_touch", "code_fence_protected", "page_markers"],
+    "cjk_spaces": ["cjk_spaces", "should_not_touch", "code_fence_protected", "page_markers",
+                   "structure_lines"],
     #   正例:汉字间空格;反例:中英之间空格保留、代码块/行内代码里的空格保留
+    #   structure_lines:标题/目录条目/注释/版权页字段行里的空格**不能删** ——
+    #   真实扫描书实测,曾经只有版权页那几行被删(删完字段粘成一个词),标题与目录条目
+    #   也会被改成 `第一章巴勒斯坦…`。只有「像正文的行」(够长或以标点收尾)才做空格重写。
     "dup_headings": ["dup_headings"],              # 正例:相邻同名同级去重;反例:被正文隔开/不同级别保留
     "headings": ["headings", "should_not_touch", "code_fence_protected"],
     #   正例:空标题删除 + 层级收敛;反例:正常层级不动、代码块里的 ### 不动

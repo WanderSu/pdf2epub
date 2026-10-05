@@ -70,16 +70,29 @@ CJK_CHARS = (
     "\u201c\u201d\u2018\u2019\u2014\u2026"  # “”‘’—…
 )
 
-#: 跨空行拼接时,「前一行」最少字符数(去空白后)。
-#: 空行在 Markdown 里通常是段落边界;只有足够长的一行才可能是被页码/页眉断开的
-#: 前半句。短行(年份 `1984`、页眉、小标题)拼进下一段会把独立行粘成正文 ——
-#: 这是比「漏拼一处」严重得多的误伤,所以这里取保守门槛。
-CROSS_BLANK_MIN_CHARS = 10
-#: 相邻行拼接时,「前一行」最少字符数(去空白后)。
-#: PDF 里被断开的正文行通常是排满的整行(中文 20-40 字);而 5-7 字的短行更多是
-#: 诗句/居中标题/短标签 —— 拼进去会毁掉诗的换行结构。门槛低到只挡这些短行,
-#: 漏拼一处段落只是多一个换行,属于可接受的方向。
-ADJACENT_MIN_CHARS = 6
+#: 参与拼接的「上一行」最少可见字符数(**拼满一行的门槛**)。
+#: 判据换过一次:旧值是相邻 6 字 / 跨空行 10 字,只挡得住一眼可见的短行(诗、年份),
+#: 挡不住图片说明、小节标题、版权页字段 —— 它们在真实扫描书里正好是 11-19 字:
+#:
+#:   真实 72 页扫描书(MinerU)实测 13 处拼接里 **12 处是误伤**:
+#:     prev=11 `中东"不战不和"的僵局` + 正文段   ← 小节标题被吞进正文
+#:     prev=14 `威武雄壮的巴勒斯坦游击队战士` + 正文段 ← 图片说明被吞进正文
+#:     prev=12 `中国青年出版社印刷厂印刷` + `787×1092毫米32开本…` ← 版权页字段被粘成一行
+#:   唯一正确的拼接 prev=41(`一九七三年十月战争后,埃及士兵站在已被摧毁的"巴" + `线",是…`)
+#:
+#: 结论:「没有句末标点」只是**必要**条件,真正能说明「这是被断行的一行」的是**这一行
+#: 排满了**。中文正文排满的一行实测 20 字以上(双栏样本 24-33 字),段落末行则以标点
+#: 收尾(已被 END_PUNCT 排除),所以门槛放在 20。宁可少拼一处(段落被页边界切成分段的
+#: 视觉效果),也不要把标题/说明/字段吞进正文。
+JOIN_MIN_CHARS = 20
+#: 跨空行拼接的门槛。与相邻拼接取同一值:断行跨不跨空行,和「这一行是否排满」无关,
+#: 旧值(6 / 10)的差异没有证据支撑。
+ADJACENT_MIN_CHARS = JOIN_MIN_CHARS
+CROSS_BLANK_MIN_CHARS = JOIN_MIN_CHARS
+#: 版式字段行的长度上界 = 拼接门槛(``JOIN_MIN_CHARS``):短于「排满一行」的行,
+#: 又没有句末标点,就算字段行(见 ``_looks_like_layout_line``)。
+LAYOUT_MAX_CHARS = JOIN_MIN_CHARS
+
 #: 「诗行」上界:两行都不超过该长度、且都不以句末标点结尾 → **不拼接**,并在这之后
 #: 补 Markdown 硬换行。两个动作必须用同一个门槛:既然已经判定「这不是被断开的段落」,
 #: 就得同时在渲染层保住换行 —— 只判不拼的话,pandoc 仍会把段落内的软换行渲染成空格,
@@ -93,6 +106,96 @@ HARD_BREAK = "  "
 HEADING_RE = re.compile(r"^(#{1,6})\s*(.*)$")
 #: 行内 CJK 字符(判断「中文语境」)
 CJK_RE = re.compile(rf"[{CJK_CHARS}]")
+
+#: 目录 / 索引条目行的行尾:页码(可带 `/`、点线、省略号、`·` 或空格引导)。
+#: 真实书籍的目录就是这种形态(`第一章 失踪与疯癫/35`、`第五章……204`),而它**没有
+#: 句末标点**、长度也常常超过诗行门槛 —— 修复前这类行会被 `join_lines` 拼成一整行
+#: (实测三条目录章节被粘成 `第一章…/1第二章…/15第三章…/32`)。
+ENTRY_TAIL_RE = re.compile(r"(?:/|\.{2,}|…+|·{2,}|\s|^)\s*\d{1,4}\s*$")
+
+
+def _is_catalog_entry(line: str) -> bool:
+    """目录/索引条目行(以页码结尾)。这类行是**独立条目**,不参与拼接与文字重写。"""
+    s = line.strip()
+    return bool(s) and bool(ENTRY_TAIL_RE.search(s))
+
+
+#: 注释/编号行:以 ①-⑳ 这类圈码序号开头。
+#: 页脚脚注在产物里就是这个形态(`① 列宁:《告犹太工人书》…`),MinerU 补回的页脚脚注
+#: 也正是这种独立段落 —— 它们和正文一样会被 `join_lines` 吃掉(脚注不以句末标点结尾
+#: 时,下一段会直接粘上来),也可能被「页眉页脚重复行剔除」当成重复装饰(如多页重复的
+#: `① 同上`)。这类行一律按结构行保护。
+NOTE_LINE_RE = re.compile(r"^[①-⑳]")
+
+
+def _is_note_line(line: str) -> bool:
+    """注释/编号行(圈码序号开头)。"""
+    return bool(NOTE_LINE_RE.match(line.strip()))
+
+
+def _is_structure_line(line: str) -> bool:
+    """标题行 / 目录条目行 / 注释行:内部空格与分行都是有意的排版结构。
+
+    这类行不做「空格重写」类清理:删掉 `第一章 巴勒斯坦问题的由来` 里的空格,会把
+    序号与标题粘成一个词(真实产物上实测如此),而那个空格是排版者写的分隔。
+    """
+    s = line.strip()
+    return bool(HEADING_RE.match(s)) or _is_catalog_entry(s) or _is_note_line(s)
+
+
+def _looks_like_layout_line(line: str) -> bool:
+    """版式字段行:不以句末标点结尾,且**短**(≤ 20 字)或**含数字/拉丁字符**。
+
+    正文段落总以标点收尾;没有标点又独占一段的行主要是排版出来的「一行一个字段」
+    (`人民出版社出版 新華書店发行`、`787×1092毫米32开本 2.25印张 43.000字`、
+    `书号 3001·1505 定价 0.15 元`)。短、或夹着数字/型号,都是字段的特征;
+    一长串纯中文而无标点则更可能是被断开的正文(那种行允许参与拼接)。
+    """
+    s = line.strip()
+    if not s or _is_block_start(s):
+        return False
+    if s[-1] in END_PUNCT:
+        return False
+    visible = re.sub(r"\s+", "", s)
+    return len(visible) < LAYOUT_MAX_CHARS or bool(re.search(r"[0-9A-Za-z]", visible))
+
+
+def _is_layout_unit(kind: str, text: str, gap: int) -> bool:
+    """拼接判定用的版式字段行判据:普通文本、独占一段(前面有空行)、且像字段行。
+
+    字段行**不参与拼接**(两个方向都不):它是排版的一条独立信息,
+    后面紧跟的往往是另一条信息而不是它的下半句。
+    """
+    return kind == "text" and gap >= 1 and _looks_like_layout_line(text)
+
+
+def _map_body_lines(md: str, fix) -> str:
+    """只对**正文行**跑 fix;结构行与「独立成段的版式行」原样保留。
+
+    两类行被跳过(见 ``_is_structure_line`` 与 ``_looks_like_layout_line``):
+      - 标题行 / 目录条目行 / 注释行 —— 它们的空格与分行是有意的结构;
+      - 独立成段、又不以句末标点结尾的行 —— 版权页那种「一行一个字段」的版式
+        (`人民出版社出版 新華書店发行`、`书号 3001·1505 定价 0.15 元`)。真实扫描书
+        实测:全篇只有这几行的空格被删除,删完两个字段就粘成一个词。
+    """
+    lines = md.split("\n")
+
+    def _blank(index: int) -> bool:
+        if not (0 <= index < len(lines)):
+            return True
+        s = lines[index].strip()
+        return s == "" or _is_page_mark(s)
+
+    out: list[str] = []
+    for i, line in enumerate(lines):
+        isolated = _blank(i - 1) and _blank(i + 1)
+        skip = (
+            _is_structure_line(line)              # 标题 / 目录条目 / 注释
+            or _is_verse_line(line)               # 短行且无句末标点(诗句、短标签、标题)
+            or (isolated and _looks_like_layout_line(line))   # 独立成段的版式行(版权页)
+        )
+        out.append(line if skip else fix(line))
+    return "\n".join(out)
 
 #: 围栏代码块标记(``` 开头即进入 / 退出代码块),与 markdown 惯例一致
 FENCE_MARK = "```"
@@ -329,8 +432,22 @@ def _is_verse_line(line: str) -> bool:
     return s[-1] not in END_PUNCT
 
 
+def _keep_line_break(line: str) -> bool:
+    """该行需要靠硬换行保住分行:诗行,**或非块结构的目录条目行 / 注释行**。
+
+    条目行与注释行常常比诗行更长(实测目录条目 19 字),但 pandoc 会把段落里的软换行
+    渲染成空格 —— 不补硬换行,它们会在阅读器里挤成一行(修复前甚至直接被拼成一行)。
+    页脚脚注集中排布时也是这种形态(`① …`/`② …` 连续多行)。
+    已经是块结构的行(`1. 文学社/3`)由列表渲染保证独立,不必补硬换行。
+    """
+    if _is_verse_line(line):
+        return True
+    s = line.strip()
+    return bool(s) and not _is_block_start(s) and (_is_catalog_entry(s) or _is_note_line(s))
+
+
 def _mark_verse_lines(md: str, report: CleanReport) -> str:
-    """给连续短行(诗行)加 Markdown 硬换行,免得诗在阅读器里被渲染成一行。
+    """给连续短行(诗行)与目录条目行加 Markdown 硬换行,免得它们被渲染成一行。
 
     判据与「不拼接」完全一致:连续 ≥ 2 行都不超过 ``VERSE_MAX_CHARS``、都不以句末标点
     结尾、都不是块结构(标题/引用/列表/表格/图片)。**空行会断开连续段**,所以空行分隔
@@ -351,21 +468,21 @@ def _mark_verse_lines(md: str, report: CleanReport) -> str:
                 i += 1
             i += 1
             continue
-        if not _is_verse_line(lines[i]):
+        if not _keep_line_break(lines[i]):
             i += 1
             continue
-        run = [i]                                      # 连续诗行的行号
+        run = [i]                                      # 连续诗行 / 条目行的行号
         cursor = i
         while True:
             k = cursor + 1
             while k < len(lines) and _is_page_mark(lines[k]):
                 k += 1                                 # 页码注释透明
-            if k < len(lines) and _is_verse_line(lines[k]):
+            if k < len(lines) and _keep_line_break(lines[k]):
                 run.append(k)
                 cursor = k
             else:
                 break
-        if len(run) >= 2:                              # 连续 ≥2 行才当诗
+        if len(run) >= 2:                              # 连续 ≥2 行才当诗/条目组
             for k in run[:-1]:                         # 段末行不需要硬换行
                 out[k] = out[k].rstrip() + HARD_BREAK
                 marked += 1
@@ -407,16 +524,9 @@ def clean_markdown(
         md = _strip_running_heads(md, report)
 
     # 4. 中文排版空格:中文(含中文标点)之间、中文与数字之间的空格
-    #    (保留中英之间的空格)
+    #    (保留中英之间的空格;标题与目录条目行不动 —— 那里的空格是排版结构)
     if options.cjk_spaces:
-        md = re.sub(rf"(?<=[{CJK_CHARS}]) (?=[{CJK_CHARS}])", "", md)
-        md = re.sub(rf"(?<=[{CJK_CHARS}]) (?=\d)", "", md)
-        md = re.sub(rf"(?<=\d) (?=[{CJK_CHARS}])", "", md)
-        # 内联 HTML 标签两侧(如 "<u>首" 前的空格)与半角括号两侧
-        md = re.sub(rf"(?<=[{CJK_CHARS}]) (?=<[^>]+>)", "", md)
-        md = re.sub(r"(</?[a-zA-Z]{1,5}>) (?=[\u4e00-\u9fff])", r"\1", md)
-        md = re.sub(rf"(?<=[{CJK_CHARS}]) (?=[()])", "", md)
-        md = re.sub(rf"(?<=[()]) (?=[{CJK_CHARS}])", "", md)
+        md = _fix_cjk_spaces(md)
 
     # 5. 中间空行压缩(页码行删除后会留下连续空行,压缩到单个空行
     #    以便跨页断行拼接能跨越)
@@ -463,6 +573,28 @@ def clean_markdown(
     return md
 
 
+def _fix_cjk_spaces(md: str) -> str:
+    """中文排版空格修正:汉字/中文标点/数字之间、半角括号与内联 HTML 标签两侧。
+
+    只对**正文行**生效(见 ``_is_structure_line``):
+      - `第一章 巴勒斯坦问题的由来` 这类标题里的空格是序号与标题的分隔;
+      - `第三章 武装斗争/32` 这类目录条目里的空格同理。
+    删掉它们会把两个字段粘成一个词 —— 这是「改写结构」而不是「清理垃圾」。
+    """
+    def fix(line: str) -> str:
+        line = re.sub(rf"(?<=[{CJK_CHARS}]) (?=[{CJK_CHARS}])", "", line)
+        line = re.sub(rf"(?<=[{CJK_CHARS}]) (?=\d)", "", line)
+        line = re.sub(rf"(?<=\d) (?=[{CJK_CHARS}])", "", line)
+        # 内联 HTML 标签两侧(如 "<u>首" 前的空格)与半角括号两侧
+        line = re.sub(rf"(?<=[{CJK_CHARS}]) (?=<[^>]+>)", "", line)
+        line = re.sub(r"(</?[a-zA-Z]{1,5}>) (?=[\u4e00-\u9fff])", r"\1", line)
+        line = re.sub(rf"(?<=[{CJK_CHARS}]) (?=[()])", "", line)
+        line = re.sub(rf"(?<=[()]) (?=[{CJK_CHARS}])", "", line)
+        return line
+
+    return _map_body_lines(md, fix)
+
+
 def _is_running_head_candidate(s: str, max_len: int) -> bool:
     """页眉页脚候选行:短、无句末标点、非 markdown 块结构。
 
@@ -473,6 +605,8 @@ def _is_running_head_candidate(s: str, max_len: int) -> bool:
         return False
     if _is_block_start(s) or "[" in s or "]" in s:
         return False
+    if _is_catalog_entry(s) or _is_note_line(s):
+        return False                        # 目录/索引条目与注释是有内容的行,不是页面装饰
     if s[-1] in END_PUNCT:
         return False
     if s.isdigit():
@@ -519,6 +653,8 @@ def _fix_ocr_spaces(md: str, report: CleanReport, *, max_frag: int = 4,
       ① 该行含中文 —— OCR 拆词几乎只发生在中文语境里;
       ② 连续 ≥3 个 ≤4 字母的拉丁片段,其中至少 2 个片段长 ≤2(拆开的碎片通常极短);
       ③ 片段之间只有单个空格,且两端不与其它字母相连。
+
+    标题行与目录条目行不参与(与 ``_fix_cjk_spaces`` 同一取舍:那里的空格是结构)。
     """
     frag = rf"[A-Za-z]{{1,{max_frag}}}"
     pattern = re.compile(rf"(?<![A-Za-z]){frag}(?: {frag}){{{min_frags - 1},}}(?![A-Za-z])")
@@ -526,7 +662,7 @@ def _fix_ocr_spaces(md: str, report: CleanReport, *, max_frag: int = 4,
 
     def fix_line(line: str) -> str:
         nonlocal hits
-        if not CJK_RE.search(line):
+        if not CJK_RE.search(line) or _is_structure_line(line):
             return line
 
         def repl(m: re.Match[str]) -> str:
@@ -633,6 +769,11 @@ def _join_broken_lines(md: str) -> str:
     markdown 块标记开头(允许中间隔 1 个空行,如被删除页码留下的),
     视为同一段落被断行,拼接。
 
+    **但「没有句末标点」本身不是断行的证据**(它只是必要条件):目录/索引条目
+    (`第一章 失踪与疯癫/35`、`第五章……204`)同样没有句末标点,却是有意的独立行 ——
+    它们现在被排除在拼接之外(``_is_catalog_entry``)。宁可少拼一处,也不要把两行
+    独立内容粘成一行。
+
     **页码注释(`<!-- page 12 -->`)是透明单元**:它标记页边界,不是内容,
     既不参与拼接也不打断拼接。产物里每页之间都有一条注释(PyMuPDF / OCR 两条
     链路都会写),不透明的话「被页边界断开的段落」永远拼不上 —— 该规则会在
@@ -677,6 +818,10 @@ def _join_broken_lines(md: str) -> str:
     pending: tuple[str, str, int] | None = None
     marks: list[tuple[str, int]] = []         # 悬空的页码注释(文本, 之前的空行数)
     blanks = 0
+    #: pending 这一行是否「版式字段行」(独占一段、无句末标点、短或含数字/拉丁字符)。
+    #: 两个相邻的字段行**不许拼接** —— 它们是并列字段(版权页),不是被断开的句子;
+    #: 单个字段行仍可能与下一段构成一次真正的断行拼接,所以只在两侧都是字段行时禁拼。
+    pending_layout = False
 
     for kind, text in units:
         if kind == "text" and text == "":
@@ -690,6 +835,7 @@ def _join_broken_lines(md: str) -> str:
             out.extend(("mark", t, g) for t, g in marks)   # 文档开头的注释
             marks = []
             pending = (kind, text, blanks)
+            pending_layout = _is_layout_unit(kind, text, blanks)
             blanks = 0
             continue
         pk, pt, pb = pending
@@ -697,8 +843,9 @@ def _join_broken_lines(md: str) -> str:
         prev_len = len(re.sub(r"\s+", "", pt))
         cur_len = len(re.sub(r"\s+", "", text))
         # 诗行对:两行都短、且**两行都没有句末标点** —— 换行是有意的,不能拼。
-        # 只看长度挡不住「短行被拼」(7 字律诗必踩);只不看标点又挡不住正常的
-        # 短行散文断行(样本 join_lines 的 9 字 + 14 字那对),所以两个条件都要。
+        # (JOIN_MIN_CHARS=20 之后,「两行都短」这一半已被长度门槛覆盖;保留这个条件是为了
+        #  两个判据始终一致 —— 「不拼接」与「补硬换行」必须用同一个门槛,否则改回低门槛时
+        #  13-18 字的诗行会既不拼接、又拿不到硬换行,在阅读器里照样挤成一行。)
         verse_pair = (
             prev_len <= VERSE_MAX_CHARS
             and cur_len <= VERSE_MAX_CHARS
@@ -710,10 +857,20 @@ def _join_broken_lines(md: str) -> str:
             and gap <= 1
             and not _is_block_start(pt)
             and not _is_block_start(text)
+            # 目录/索引条目行与注释行是独立结构,两侧都不参与拼接
+            # (见 `_is_catalog_entry` / `_is_note_line`)
+            and not _is_catalog_entry(pt)
+            and not _is_catalog_entry(text)
+            and not _is_note_line(pt)
+            and not _is_note_line(text)
             and pt[-1] not in END_PUNCT
             and text[0] not in START_PUNCT
-            # 短行不拼(诗句/年份/页眉/小标题):跨空行比相邻更保守
+            # 短行不拼(诗句/年份/页眉/小标题):长度门槛见 JOIN_MIN_CHARS
             and prev_len >= (CROSS_BLANK_MIN_CHARS if gap >= 1 else ADJACENT_MIN_CHARS)
+            # 版式字段行不参与拼接(两个方向):这类行是排版上的独立信息 ——
+            # 版权页实测被粘成过一整行,图片说明/小节标题也被吞进过正文
+            and not pending_layout
+            and not _is_layout_unit(kind, text, gap)
             and not verse_pair
         )
         if joinable:
@@ -725,11 +882,13 @@ def _join_broken_lines(md: str) -> str:
                     and text[0].isascii() and text[0].isalpha():
                 sep = " "
             pending = ("text", pt + sep + text, pb)
+            pending_layout = False             # 拼出来的段落不再是版式字段行
         else:
             out.append(pending)
             out.extend(("mark", t, g) for t, g in marks)
             marks = []
             pending = (kind, text, gap)
+            pending_layout = _is_layout_unit(kind, text, gap)
         blanks = 0
     if pending is not None:
         out.append(pending)
