@@ -792,9 +792,36 @@ fn library_set_meta(
 
 /// 用系统默认程序打开 EPUB(Rust 侧调用 opener 插件,绕开前端权限链;
 /// 无关联程序时错误会真实返回到前端)。
+///
+/// **必须校验扩展名**:这个命令把路径一路交给系统 shell,不校验就等于给前端
+/// 配了一个「启动任意程序」的入口(前端 CSP 一旦被绕过,`calc.exe` 也能开)。
 #[tauri::command]
 fn open_epub(path: String) -> Result<(), String> {
+    let p = Path::new(&path);
+    if !p.is_file() {
+        return Err(format!("文件不存在: {path}"));
+    }
+    let is_epub = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("epub"))
+        .unwrap_or(false);
+    if !is_epub {
+        return Err("只允许打开 .epub 文件".into());
+    }
     tauri_plugin_opener::open_path(&path, None::<&str>).map_err(|e| e.to_string())
+}
+
+/// 打开输出目录(资源管理器)。返回实际打开的绝对路径。
+///
+/// 前端原来用「第一本书的路径」去 reveal,书不在 output/ 里时打开的就是别的目录;
+/// 目录还不存在(还没转过任何书)时也要能打开 —— 先建再开。
+#[tauri::command]
+fn open_output_dir(output_dir: String) -> Result<String, String> {
+    let dir = resolve_dir(&output_dir);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败 {}: {e}", dir.display()))?;
+    tauri_plugin_opener::open_path(&dir, None::<&str>).map_err(|e| e.to_string())?;
+    Ok(dir.to_string_lossy().into_owned())
 }
 
 fn sanitize_name(name: &str) -> String {
@@ -1072,7 +1099,8 @@ pub fn run() {
             save_apikey,
             library_sync,
             library_set_meta,
-            open_epub
+            open_epub,
+            open_output_dir
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

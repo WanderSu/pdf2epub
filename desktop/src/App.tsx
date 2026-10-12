@@ -9,7 +9,6 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 // 引擎事件流(--json-events):状态与进度的唯一可信来源(见 src/events.ts)
 import {
@@ -429,7 +428,10 @@ interface LibraryBook {
   id: string;
   title: string;
   author: string;
+  /** 已格式化的展示值("1.2 MB")—— 只用于显示,排序与合计一律用 bytes */
   size: string;
+  /** 原始字节数:排序/合计必须用它,不能 parseFloat("512 KB") */
+  bytes: number;
   pages: number;
   date: string;
   type?: FileType;
@@ -496,7 +498,25 @@ const CLEAN_KEYS = [
   "page_numbers", "running_heads", "join_lines", "ocr_spaces", "cjk_spaces",
   "dup_headings", "headings", "bold", "images",
 ] as const;
-const CLEAN_DEFAULTS = [true, true, true, true, true, true, true, false, true];
+type CleanKey = (typeof CLEAN_KEYS)[number];
+/**
+ * 以 key 为索引存开关,不用 boolean[]:
+ * 数组靠下标与 Python 侧对齐,后端**顺序一变**(项数不变)长度校验照样通过,
+ * 开关就会静默错位 —— 用户以为关掉了「删除页码」,实际关掉的是「校验图片引用」。
+ */
+type CleanOpts = Record<CleanKey, boolean>;
+
+const CLEAN_DEFAULTS: CleanOpts = {
+  page_numbers: true,
+  running_heads: true,
+  join_lines: true,
+  ocr_spaces: true,
+  cjk_spaces: true,
+  dup_headings: true,
+  headings: true,
+  bold: false,
+  images: true,
+};
 
 // ── LOG PARSERS(legacy 兜底:仅在事件流缺失时使用)────────────────────────────
 //  正常路径下状态全部来自引擎事件流(src/events.ts)。下面这些正则只服务于
@@ -562,6 +582,19 @@ function formatSize(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+/** 本地日期 YYYY-MM-DD。**不要用 toISOString()**:那是 UTC,东八区 0-8 点会差一天。 */
+function fmtDate(d: Date | number): string {
+  const t = new Date(d);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${t.getFullYear()}-${p(t.getMonth() + 1)}-${p(t.getDate())}`;
+}
+
+/** 本地 MM-DD(最近文件列表用) */
+function fmtMonthDay(d: Date | number): string {
+  const t = new Date(d);
+  return `${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
+}
+
 function baseName(p: string): string {
   return p.split(/[\\/]/).pop() || p;
 }
@@ -581,12 +614,24 @@ function backendFromPlan(b: string): Backend {
   return "Auto";
 }
 
-function loadCleanOpts(): boolean[] {
+function loadCleanOpts(): CleanOpts {
+  const next: CleanOpts = { ...CLEAN_DEFAULTS };
   try {
     const raw = JSON.parse(localStorage.getItem("pdf2epub.clean") || "null");
-    if (Array.isArray(raw) && raw.length === CLEAN_KEYS.length) return raw.map(Boolean);
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+      // 新格式:按 key 取值,后端增删/重排都不影响已存的值
+      for (const k of CLEAN_KEYS) {
+        const v = (raw as Record<string, unknown>)[k];
+        if (typeof v === "boolean") next[k] = v;
+      }
+    } else if (Array.isArray(raw)) {
+      // 旧格式(裸数组):按下标迁移一次,之后一律对象
+      CLEAN_KEYS.forEach((k, i) => {
+        if (typeof raw[i] === "boolean") next[k] = raw[i];
+      });
+    }
   } catch { /* 忽略坏数据 */ }
-  return [...CLEAN_DEFAULTS];
+  return next;
 }
 
 function loadRecent(): RecentEntry[] {
@@ -606,14 +651,14 @@ function Rule({ vertical = false, className = "" }: { vertical?: boolean; classN
 function TypeBadge({ type }: { type?: FileType }) {
   if (!type) {
     return (
-      <span className="font-mono text-[8px] leading-none px-1.5 py-0.5 border border-dashed border-[var(--border)] text-[var(--muted-foreground)] shrink-0">
+      <span className="font-mono text-[10px] leading-none px-1.5 py-0.5 border border-dashed border-[var(--border)] text-[var(--muted-foreground)] shrink-0">
         ?
       </span>
     );
   }
   if (type === "HYB") {
     return (
-      <span className="inline-flex overflow-hidden font-mono text-[8px] leading-none shrink-0">
+      <span className="inline-flex overflow-hidden font-mono text-[10px] leading-none shrink-0">
         <span className="px-1 py-0.5 border border-[var(--info)] text-[var(--info)]">HY</span>
         <span className="px-1 py-0.5 border border-l-0 border-[var(--border)] text-[var(--muted-foreground)]">B</span>
       </span>
@@ -624,7 +669,7 @@ function TypeBadge({ type }: { type?: FileType }) {
     SCN: "border-[var(--info)] text-[var(--info)]",
     MD: "border-[var(--paddle)] text-[var(--paddle)]",
   };
-  return <span className={`font-mono text-[8px] leading-none px-1.5 py-0.5 border shrink-0 ${s[type]}`}>{type}</span>;
+  return <span className={`font-mono text-[10px] leading-none px-1.5 py-0.5 border shrink-0 ${s[type]}`}>{type}</span>;
 }
 
 const STATUS_STYLE: Record<FileStatus, string> = {
@@ -637,13 +682,16 @@ const STATUS_STYLE: Record<FileStatus, string> = {
   cancelled: "text-[var(--warn)] border-[var(--warn)]",
 };
 
-/** 状态 chip:技术 token,两种语言下都用英文(RETRYING 是可见的中间态) */
+/** 状态 chip:技术 token,两种语言下都用英文(RETRYING 是可见的中间态)
+ *  failed / cancelled 额外带形状标记:主色是朱砂,只在颜色上区分状态不够用 */
 function StatusChip({ status, retrying }: { status: FileStatus; retrying?: boolean }) {
   const isRetrying = retrying === true && status === "converting";
   const label = isRetrying ? "RETRYING" : status === "converting" ? "CONVERTING" : status.toUpperCase();
   const style = isRetrying ? STATUS_STYLE.cancelled : STATUS_STYLE[status];
+  const glyph = isRetrying ? "↻" : status === "failed" ? "✕" : status === "cancelled" ? "⊘" : null;
   return (
-    <span className={`font-mono text-[8px] tracking-[0.08em] px-1.5 py-0.5 border ${style}`}>
+    <span className={`inline-flex items-center gap-1 font-mono text-[10px] tracking-[0.08em] px-1.5 py-0.5 border ${style}`}>
+      {glyph && <span aria-hidden>{glyph}</span>}
       {label}
     </span>
   );
@@ -653,10 +701,10 @@ function StatusChip({ status, retrying }: { status: FileStatus; retrying?: boole
 function ErrorLine({ kind, message, lang }: { kind: ErrorKind; message: string; lang: Lang }) {
   return (
     <span className="flex items-baseline gap-2 min-w-0">
-      <span className="font-mono text-[9px] tracking-[0.06em] text-[var(--danger)] border border-[var(--danger)] px-1 py-px shrink-0">
+      <span className="font-mono text-[10px] tracking-[0.06em] text-[var(--danger)] border border-[var(--danger)] px-1 py-px shrink-0">
         {ERROR_KIND_LABEL[kind]}
       </span>
-      <span className={`text-[10px] text-[var(--danger)] truncate ${lang === "zh" ? "cjk" : "font-mono"}`}>
+      <span className={`text-[11px] text-[var(--danger)] truncate selectable ${lang === "zh" ? "cjk" : "font-mono"}`}>
         {message}
       </span>
     </span>
@@ -673,13 +721,13 @@ const BACKEND_STYLE: Record<Backend, string> = {
 function BackendBadge({ backend }: { backend?: Backend }) {
   if (!backend) {
     return (
-      <span className="font-mono text-[8px] px-1.5 py-0.5 border border-dashed border-[var(--border)] text-[var(--muted-foreground)] shrink-0">
+      <span className="font-mono text-[10px] px-1.5 py-0.5 border border-dashed border-[var(--border)] text-[var(--muted-foreground)] shrink-0">
         —
       </span>
     );
   }
   const label = backend === "PaddleOCR" ? "PADDLE" : backend.toUpperCase();
-  return <span className={`font-mono text-[8px] tracking-[0.06em] px-1.5 py-0.5 border shrink-0 ${BACKEND_STYLE[backend]}`}>{label}</span>;
+  return <span className={`font-mono text-[10px] tracking-[0.06em] px-1.5 py-0.5 border shrink-0 ${BACKEND_STYLE[backend]}`}>{label}</span>;
 }
 
 /** 工序:制版 → 检字 → 校勘 → 付印(云端 OCR 时标 OCR) */
@@ -709,14 +757,14 @@ function StageStepper({ stages, signatures, lang }: { stages: StageNode[]; signa
           <span key={s.key} className="flex items-center">
             {i > 0 && <span className={`w-5 h-px ${lineColor} transition-all duration-300`} />}
             <span className="flex flex-col items-center gap-0.5">
-              <span className={`w-4 h-4 border flex items-center justify-center font-mono text-[7px] transition-all ${nodeClass}`}>
+              <span className={`w-4 h-4 border flex items-center justify-center font-mono text-[9px] transition-all ${nodeClass}`}>
                 {isDone ? (
                   <svg width="8" height="6" viewBox="0 0 8 6" fill="none" className="check-draw">
                     <path d="M1 3 L3 5 L7 1" stroke="currentColor" strokeWidth="1.2" strokeDasharray="20" strokeDashoffset="0" strokeLinecap="square" />
                   </svg>
                 ) : isFailed ? "✕" : nodeLabel}
               </span>
-              <span className={`font-mono text-[7px] tracking-[0.04em] ${labelColor}`}>
+              <span className={`font-mono text-[9px] tracking-[0.04em] ${labelColor}`}>
                 {lang === "zh" && !s.isOcr ? (CRAFT_ZH[s.key] ?? s.key) : stageLabel}
               </span>
             </span>
@@ -724,7 +772,7 @@ function StageStepper({ stages, signatures, lang }: { stages: StageNode[]; signa
         );
       })}
       {signatures && signatures.total > 1 && (
-        <span className="ml-2 font-mono text-[8px] px-1.5 py-0.5 border border-[var(--primary)] text-[var(--primary)] shrink-0">
+        <span className="ml-2 font-mono text-[10px] px-1.5 py-0.5 border border-[var(--primary)] text-[var(--primary)] shrink-0">
           {lang === "zh"
             ? `第 ${signatures.current} 帖 · 共 ${signatures.total} 帖`
             : `SIGNATURE ${signatures.current} OF ${signatures.total}`}
@@ -764,7 +812,7 @@ function Switch({ checked, onChange, label, description, disabled, lang }: {
         <div className={`text-[13px] text-[var(--foreground)] ${lang === "zh" ? "cjk" : ""}`}>{label}</div>
         {description && <div className={`text-[12px] text-[var(--muted-foreground)] ${lang === "zh" ? "cjk" : "font-mono"}`}>{description}</div>}
       </div>
-      <span className={`font-mono text-[9px] tracking-[0.08em] shrink-0 ${checked ? "text-[var(--primary)]" : "text-[var(--muted-foreground)]"}`}>
+      <span className={`font-mono text-[10px] tracking-[0.08em] shrink-0 ${checked ? "text-[var(--primary)]" : "text-[var(--muted-foreground)]"}`}>
         {checked ? "ON" : "OFF"}
       </span>
       <button
@@ -772,11 +820,12 @@ function Switch({ checked, onChange, label, description, disabled, lang }: {
         aria-checked={checked}
         aria-label={label}
         disabled={disabled}
+        onClick={e => { e.stopPropagation(); if (!disabled) onChange(!checked); }}
         className={`relative shrink-0 w-[40px] h-[22px] border transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-[var(--ring)] focus:ring-offset-2 focus:ring-offset-[var(--background)]
           ${checked ? "bg-[var(--primary)] border-[var(--primary)]" : "bg-[var(--card)] border-[var(--foreground)]"}
           ${disabled ? "border-dashed" : ""}`}
       >
-        <span className={`absolute top-[2px] w-4 h-4 transition-transform duration-200 ${checked ? "translate-x-[19px] bg-white" : "translate-x-[2px] border border-[var(--foreground)] bg-transparent"}`} />
+        <span className={`absolute top-[2px] w-4 h-4 transition-transform duration-200 ${checked ? "translate-x-[20px] bg-white" : "translate-x-[2px] border border-[var(--foreground)] bg-transparent"}`} />
       </button>
     </div>
   );
@@ -825,7 +874,7 @@ function RadioRow({ label, desc, active, onClick, lang }: {
         <div className={`text-[13px] text-[var(--foreground)] ${lang === "zh" ? "cjk" : ""}`}>{label}</div>
         <div className={`text-[12px] text-[var(--muted-foreground)] ${lang === "zh" ? "cjk" : "font-mono"}`}>{desc}</div>
       </div>
-      {active && <span className="font-mono text-[8px] tracking-[0.1em] text-[var(--primary)]">ACTIVE</span>}
+      {active && <span className="font-mono text-[10px] tracking-[0.1em] text-[var(--primary)]">ACTIVE</span>}
     </button>
   );
 }
@@ -834,22 +883,25 @@ function RadioRow({ label, desc, active, onClick, lang }: {
 function ComposingRoom({ expanded, setExpanded, lang, lines }: {
   expanded: boolean; setExpanded: (v: boolean) => void; lang: Lang; lines: ConsoleLine[];
 }) {
-  const [paused, setPaused] = useState(false);
+  // 暂停 = 冻结当前快照,而不是「只显示最后 80 行」——
+  // 后者日志还在长,视图跟着变,按钮看起来像坏了。
+  const [frozen, setFrozen] = useState<ConsoleLine[] | null>(null);
+  const paused = frozen !== null;
   const t = T[lang].convert;
-  const shown = paused ? lines.slice(-80) : lines;
+  const shown = frozen ?? lines;
   return (
     <div className="border-t border-[var(--border)] shrink-0 flex flex-col overflow-hidden transition-[height] duration-[220ms] ease-[cubic-bezier(0.2,0,0,1)]"
       style={{ height: expanded ? 220 : 28 }}>
       <div
-        className="h-7 flex items-center px-[64px] pr-[72px] gap-4 cursor-pointer hover:bg-[var(--secondary)] transition-colors shrink-0"
+        className="h-7 flex items-center gutter gap-4 cursor-pointer hover:bg-[var(--secondary)] transition-colors shrink-0"
         onClick={() => setExpanded(!expanded)}
       >
-        <span className={`font-mono text-[9px] tracking-[0.12em] text-[var(--muted-foreground)]`}>{t.composing}</span>
+        <span className={`font-mono text-[10px] tracking-[0.12em] text-[var(--muted-foreground)]`}>{t.composing}</span>
         <Rule className="flex-1" />
         {expanded && (
           <>
-            <button onClick={e => { e.stopPropagation(); setPaused(!paused); }}
-              className={`font-mono text-[9px] tracking-[0.1em] ${paused ? "text-[var(--primary)]" : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"}`}>
+            <button onClick={e => { e.stopPropagation(); setFrozen(paused ? null : [...lines]); }}
+              className={`font-mono text-[10px] tracking-[0.1em] ${paused ? "text-[var(--primary)]" : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"}`}>
               {paused ? t.tail : t.pause}
             </button>
             <Rule vertical />
@@ -860,7 +912,7 @@ function ComposingRoom({ expanded, setExpanded, lang, lines }: {
         </svg>
       </div>
       {expanded && (
-        <div className="flex-1 overflow-auto composing-bg px-[64px] pr-[72px] py-3 space-y-0.5">
+        <div className="flex-1 overflow-auto scroll-area composing-bg gutter py-3 space-y-0.5">
           {shown.length === 0 && <div className="font-mono text-[10px] text-[var(--muted-foreground)]">{t.noOutput}</div>}
           {shown.map((line, i) => (
             <div key={i} className="flex gap-4">
@@ -872,7 +924,7 @@ function ComposingRoom({ expanded, setExpanded, lang, lines }: {
                 {line.text}
               </span>
               {line.legacy && (
-                <span className="font-mono text-[9px] px-1 border border-[var(--warn)] text-[var(--warn)] shrink-0 self-center" title="状态由旧正则从日志文本猜测(新版 CLI 会发 JSON 事件)">
+                <span className="font-mono text-[10px] px-1 border border-[var(--warn)] text-[var(--warn)] shrink-0 self-center" title="状态由旧正则从日志文本猜测(新版 CLI 会发 JSON 事件)">
                   LEGACY
                 </span>
               )}
@@ -896,16 +948,16 @@ function WarningStrip({ file, lang, onUseOcr }: { file: QueueFile; lang: Lang; o
         <line x1="6" y1="4.5" x2="6" y2="7.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="square" />
         <rect x="5.4" y="8.3" width="1.2" height="1.2" fill="currentColor" />
       </svg>
-      <span className={`text-[11px] text-[var(--warn)] flex-1 ${lang === "zh" ? "cjk" : "font-mono"}`}>{t.msg(file.name)}</span>
+      <span className={`text-[11px] text-[var(--warn)] flex-1 selectable ${lang === "zh" ? "cjk" : "font-mono"}`}>{t.msg(file.name)}</span>
       <button onClick={() => { onUseOcr(file.id); setDismissed(true); }}
-        className="font-mono text-[9px] tracking-[0.08em] text-[var(--primary)] border border-[var(--primary)] px-2 py-0.5 hover:bg-[var(--primary)] hover:text-[var(--primary-foreground)] transition-colors">
+        className="font-mono text-[10px] tracking-[0.08em] text-[var(--primary)] border border-[var(--primary)] px-2 py-0.5 hover:bg-[var(--primary)] hover:text-[var(--primary-foreground)] transition-colors">
         {t.ocr}
       </button>
       <button onClick={() => setDismissed(true)}
-        className="font-mono text-[9px] tracking-[0.08em] text-[var(--warn)] border border-[var(--warn)] px-2 py-0.5 transition-colors">
+        className="font-mono text-[10px] tracking-[0.08em] text-[var(--warn)] border border-[var(--warn)] px-2 py-0.5 transition-colors">
         {t.local}
       </button>
-      <button onClick={() => setDismissed(true)} className="text-[var(--muted-foreground)] hover:text-[var(--foreground)] p-1 transition-colors" aria-label="Dismiss">
+      <button onClick={() => setDismissed(true)} className="text-[var(--muted-foreground)] hover:text-[var(--foreground)] p-1 transition-colors" aria-label={lang === "zh" ? "关闭" : "Dismiss"}>
         <svg width="7" height="7" viewBox="0 0 7 7" fill="none"><line x1="1" y1="1" x2="6" y2="6" stroke="currentColor" strokeWidth="1" /><line x1="6" y1="1" x2="1" y2="6" stroke="currentColor" strokeWidth="1" /></svg>
       </button>
     </div>
@@ -967,7 +1019,16 @@ function ConvertScreen({
   const skipped = files.filter(f => f.status === "skipped").length;
   const pending = files.filter(f => f.status === "pending").length;
   const total = files.length;
-  const overallPct = total > 0 ? Math.round(files.reduce((s, f) => s + f.progress, 0) / (total * 100) * 100) : 0;
+  // 总进度 = 完成率(skip 也算跑完),在跑的行按自身进度补齐。
+  // **失败/取消不贡献进度**:否则一批文件里有 2 个失败,大字会永久停在 40%,
+  // 看起来像卡死 —— 而右侧明明写着 FAILED 2。
+  const settled = done + skipped;
+  const running = files.reduce((s, f) => (f.status === "converting" ? s + f.progress / 100 : s), 0);
+  const overallPct = total === 0
+    ? 0
+    : settled === total
+      ? 100
+      : Math.min(99, Math.round(((settled + running) / total) * 100));
 
   const toggleRow = (id: string) => setExpandedRows(prev => { const s = new Set(prev); if (s.has(id)) { s.delete(id); } else { s.add(id); } return s; });
   const toggleSel = (id: string) => setSelected(prev => { const s = new Set(prev); if (s.has(id)) { s.delete(id); } else { s.add(id); } return s; });
@@ -984,13 +1045,13 @@ function ConvertScreen({
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
-      <div className="px-[64px] pr-[72px] pt-6 shrink-0">
+      <div className="gutter pt-6 shrink-0">
         <ChapterHead label={`01 ${T[lang].screens[0]}`} state={active > 0 ? t.active(active) : undefined} lang={lang} />
       </div>
 
       {/* ── 空状态:拖放区 + 类型检测 + 最近文件 ── */}
       {!hasFiles && (
-        <div className="flex-1 flex overflow-auto px-[64px] pr-[72px] py-6">
+        <div className="flex-1 flex overflow-auto scroll-area gutter py-6">
           <div className="flex flex-1 gap-8 min-h-0">
             <div className="flex-1 flex flex-col items-center min-h-[280px]">
               <div
@@ -998,10 +1059,6 @@ function ConvertScreen({
                   ${dragging ? "border border-[var(--primary)] bg-[var(--primary)]/4" : "border border-dashed border-[var(--border)] hover:border-[var(--muted-foreground)]"}`}
                 onDragOver={e => e.preventDefault()}
                 onClick={onPick}
-                role="button"
-                tabIndex={0}
-                aria-label={t.drop}
-                onKeyDown={e => { if (e.key === "Enter" || e.key === " ") onPick(); }}
               >
                 {[["top-2 left-2", "-translate-x-px -translate-y-px"], ["top-2 right-2", "translate-x-px -translate-y-px"], ["bottom-2 left-2", "-translate-x-px translate-y-px"], ["bottom-2 right-2", "translate-x-px translate-y-px"]].map(([pos, offset], i) => (
                   <svg key={i} width="8" height="8" viewBox="0 0 8 8" className={`absolute ${pos} text-[var(--muted-foreground)] transition-transform duration-[140ms] ${dragging ? offset : ""}`} fill="none">
@@ -1036,11 +1093,11 @@ function ConvertScreen({
                         <TypeBadge type={preflightOf(r.path) ? KIND_TO_TYPE[preflightOf(r.path)!.kind] : undefined} />
                         <span className="flex-1 font-mono text-[11px] text-[var(--foreground)] truncate">{r.name}</span>
                         <span className="font-mono text-[10px] text-[var(--muted-foreground)] tabular-nums">{preflightOf(r.path)?.pages || "—"}</span>
-                        <span className="font-mono text-[10px] text-[var(--muted-foreground)]">{new Date(r.at).toISOString().slice(5, 10)}</span>
-                        <button onClick={() => onPreflightRecent(r.path)} className="opacity-0 group-hover:opacity-100 font-mono text-[9px] text-[var(--primary)] transition-opacity">
+                        <span className="font-mono text-[10px] text-[var(--muted-foreground)] tabular-nums">{fmtMonthDay(r.at)}</span>
+                        <button onClick={() => onPreflightRecent(r.path)} className="opacity-55 group-hover:opacity-100 focus-visible:opacity-100 font-mono text-[10px] text-[var(--primary)] transition-opacity">
                           {t.preflightRun}
                         </button>
-                        <button onClick={() => onAddRecent(r.path)} className="opacity-0 group-hover:opacity-100 font-mono text-[9px] text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-opacity">
+                        <button onClick={() => onAddRecent(r.path)} className="opacity-55 group-hover:opacity-100 focus-visible:opacity-100 font-mono text-[10px] text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-opacity">
                           {t.addToQueue}
                         </button>
                       </div>
@@ -1070,8 +1127,8 @@ function ConvertScreen({
                     {[
                       [t.detection.backend, <BackendBadge key="b" backend={backendFromPlan(previewPlan.backend)} />],
                       [t.detection.pages, <span key="p" className="font-mono text-[11px] text-[var(--foreground)] tabular-nums">{previewPlan.pages}</span>],
-                      [t.detection.signatures, <span key="s" className="font-mono text-[9px] text-[var(--primary)] border border-[var(--primary)] px-1.5 py-0.5 tabular-nums">{previewPlan.shards}</span>],
-                      [t.detection.cloud, <span key="c" className="font-mono text-[9px] text-[var(--muted-foreground)] tabular-nums">{previewPlan.ocr_pages}</span>],
+                      [t.detection.signatures, <span key="s" className="font-mono text-[10px] text-[var(--primary)] border border-[var(--primary)] px-1.5 py-0.5 tabular-nums">{previewPlan.shards}</span>],
+                      [t.detection.cloud, <span key="c" className="font-mono text-[10px] text-[var(--muted-foreground)] tabular-nums">{previewPlan.ocr_pages}</span>],
                     ].map(([label, value], i) => (
                       <div key={i} className="flex items-center justify-between">
                         <span className={`text-[11px] text-[var(--muted-foreground)] ${lang === "zh" ? "cjk" : "font-mono tracking-[0.08em]"}`}>{label}</span>
@@ -1112,7 +1169,7 @@ function ConvertScreen({
       {/* ── 工作状态:添加条 + 总进度 + 工具条 + 表 ── */}
       {hasFiles && (
         <>
-          <div className="px-[64px] pr-[72px] shrink-0">
+          <div className="gutter shrink-0">
             <div
               className={`flex items-center justify-center cursor-pointer transition-all duration-[140ms] border-t border-b border-dashed border-[var(--border)] hover:border-[var(--muted-foreground)]
                 ${dragging ? "h-28 border-[var(--primary)] bg-[var(--primary)]/4" : "h-[40px]"}`}
@@ -1125,9 +1182,9 @@ function ConvertScreen({
 
           {/* 印前检查汇总(需要云端 OCR 时出现) */}
           {batchNotice && batchNotice.total_ocr_pages > 0 && (
-            <div className="px-[64px] pr-[72px] shrink-0">
+            <div className="gutter shrink-0">
               <div className={`flex items-center gap-3 py-1.5 border-b ${batchNotice.over_quota ? "border-[var(--danger)]" : "border-[var(--border)]"}`}>
-                <span className={`font-mono text-[9px] tracking-[0.1em] uppercase ${batchNotice.over_quota ? "text-[var(--danger)]" : "text-[var(--muted-foreground)]"}`}>{t.preflight}</span>
+                <span className={`font-mono text-[10px] tracking-[0.1em] uppercase ${batchNotice.over_quota ? "text-[var(--danger)]" : "text-[var(--muted-foreground)]"}`}>{t.preflight}</span>
                 <span className={`text-[11px] flex-1 ${batchNotice.over_quota ? "text-[var(--danger)]" : "text-[var(--muted-foreground)]"} ${lang === "zh" ? "cjk" : "font-mono"}`}>
                   {batchNotice.over_quota
                     ? t.quota(batchNotice.total_ocr_pages, batchNotice.quota)
@@ -1137,17 +1194,17 @@ function ConvertScreen({
             </div>
           )}
 
-          <div className="px-[64px] pr-[72px] pt-4 shrink-0">
+          <div className="gutter pt-4 shrink-0">
             <div className="flex items-end gap-8 py-4 border-b border-[var(--border)]">
               <div className="flex-1">
                 <div className="flex items-baseline gap-6 mb-3">
                   {[{ label: "DONE", val: done, color: "var(--ok)" }, { label: "SKIPPED", val: skipped, color: "var(--info)" }, { label: "ACTIVE", val: active, color: "var(--primary)" }, { label: "FAILED", val: failed, color: "var(--danger)" }, { label: "PENDING", val: pending, color: "var(--muted-foreground)" }].map(({ label, val, color }) => (
                     <div key={label} className="flex items-baseline gap-1.5">
                       <span className="font-mono text-[13px] font-medium tabular-nums" style={{ color }}>{val}</span>
-                      <span className="font-mono text-[9px] tracking-[0.08em] text-[var(--muted-foreground)]">{label}</span>
+                      <span className="font-mono text-[10px] tracking-[0.08em] text-[var(--muted-foreground)]">{label}</span>
                     </div>
                   ))}
-                  <span className="font-mono text-[9px] text-[var(--muted-foreground)] ml-auto">{total} FILES</span>
+                  <span className="font-mono text-[10px] text-[var(--muted-foreground)] ml-auto">{total} FILES</span>
                 </div>
                 <div className="relative h-px w-full bg-[var(--border)] overflow-visible">
                   <div className="absolute inset-y-0 left-0 bg-[var(--primary)] transition-all duration-700" style={{ width: `${overallPct}%`, height: "1px" }} />
@@ -1198,12 +1255,12 @@ function ConvertScreen({
 
             <div className="grid grid-cols-[1fr_56px_64px_60px_96px_100px_72px] gap-3 py-1.5 border-b border-[var(--border)]">
               {["", t.colFile, t.colSize, t.colPages, t.colBackend, t.colStatus, t.colAction].map((h, i) => (
-                <span key={i} className={`font-mono text-[9px] tracking-[0.1em] uppercase text-[var(--muted-foreground)] ${i >= 2 && i <= 3 ? "text-right" : ""}`}>{h}</span>
+                <span key={i} className={`text-[10px] text-[var(--muted-foreground)] ${lang === "zh" ? "cjk" : "font-mono tracking-[0.1em] uppercase"} ${i >= 2 && i <= 3 ? "text-right" : ""}`}>{h}</span>
               ))}
             </div>
           </div>
 
-          <div className="flex-1 overflow-auto px-[64px] pr-[72px] pb-2">
+          <div className="flex-1 overflow-auto scroll-area gutter pb-2">
             {files.map((file, fi) => {
               const isExpanded = expandedRows.has(file.id);
               const isSelected = selected.has(file.id);
@@ -1216,12 +1273,21 @@ function ConvertScreen({
                     <div className="flex items-center gap-2 min-w-0">
                       <button
                         onClick={e => { e.stopPropagation(); toggleSel(file.id); }}
-                        aria-label="select"
+                        aria-label={lang === "zh" ? "选择" : "Select"}
+                        aria-pressed={isSelected}
                         className={`w-2.5 h-2.5 border shrink-0 transition-colors ${isSelected ? "bg-[var(--primary)] border-[var(--primary)]" : "border-[var(--border)] hover:border-[var(--foreground)]"}`}
                       />
-                      <svg width="6" height="6" viewBox="0 0 6 6" className={`shrink-0 text-[var(--muted-foreground)] transition-transform ${isExpanded ? "rotate-90" : ""}`} fill="none">
-                        <path d="M1 1 L5 3 L1 5" stroke="currentColor" strokeWidth="1" />
-                      </svg>
+                      {/* 展开箭头是唯一的键盘入口:行本身是 div,只能鼠标点 */}
+                      <button
+                        onClick={e => { e.stopPropagation(); toggleRow(file.id); }}
+                        aria-expanded={isExpanded}
+                        aria-label={lang === "zh" ? "展开详情" : "Toggle details"}
+                        className="shrink-0 p-0.5 -m-0.5 text-[var(--muted-foreground)] hover:text-[var(--foreground)] focus:outline-none focus-visible:ring-1 focus-visible:ring-[var(--ring)]"
+                      >
+                        <svg width="6" height="6" viewBox="0 0 6 6" className={`transition-transform ${isExpanded ? "rotate-90" : ""}`} fill="none">
+                          <path d="M1 1 L5 3 L1 5" stroke="currentColor" strokeWidth="1" />
+                        </svg>
+                      </button>
                       <span className="font-mono text-[11px] text-[var(--foreground)] truncate">{file.name}</span>
                     </div>
                     <TypeBadge type={file.type} />
@@ -1231,13 +1297,13 @@ function ConvertScreen({
                     <StatusChip status={file.status} retrying={!!file.retrying} />
                     <div className="flex justify-end">
                       {(file.status === "pending" || file.status === "converting") && (
-                        <button onClick={e => { e.stopPropagation(); onCancel(file.id); }} className="font-mono text-[10px] text-[var(--muted-foreground)] hover:text-[var(--danger)] transition-colors" aria-label="cancel">✕</button>
+                        <button onClick={e => { e.stopPropagation(); onCancel(file.id); }} className="font-mono text-[10px] text-[var(--muted-foreground)] hover:text-[var(--danger)] transition-colors" aria-label={lang === "zh" ? "取消" : "Cancel"}>✕</button>
                       )}
                       {file.status === "failed" && (
-                        <button onClick={e => { e.stopPropagation(); onRetry(file.id); }} className={`font-mono text-[9px] tracking-[0.06em] text-[var(--primary)] uppercase ${lang === "zh" ? "cjk font-sans" : ""}`}>{t.retry}</button>
+                        <button onClick={e => { e.stopPropagation(); onRetry(file.id); }} className={`font-mono text-[10px] tracking-[0.06em] text-[var(--primary)] uppercase ${lang === "zh" ? "cjk font-sans" : ""}`}>{t.retry}</button>
                       )}
                       {(file.status === "done" || file.status === "skipped") && (
-                        <button onClick={e => { e.stopPropagation(); onRetry(file.id); }} className={`font-mono text-[9px] tracking-[0.06em] text-[var(--muted-foreground)] uppercase hover:text-[var(--foreground)] transition-colors ${lang === "zh" ? "cjk font-sans" : ""}`}>{t.requeue}</button>
+                        <button onClick={e => { e.stopPropagation(); onRetry(file.id); }} className={`font-mono text-[10px] tracking-[0.06em] text-[var(--muted-foreground)] uppercase hover:text-[var(--foreground)] transition-colors ${lang === "zh" ? "cjk font-sans" : ""}`}>{t.requeue}</button>
                       )}
                     </div>
                   </div>
@@ -1269,7 +1335,7 @@ function ConvertScreen({
                             {t.skippedHint}
                           </span>
                         ) : file.lastLog ? (
-                          <span className="font-mono text-[10px] text-[var(--muted-foreground)] truncate block">{file.lastLog}</span>
+                          <span className="font-mono text-[10px] text-[var(--muted-foreground)] truncate block selectable">{file.lastLog}</span>
                         ) : null}
                       </div>
                     </div>
@@ -1297,7 +1363,7 @@ function LibraryScreen({ lang, books, loading, outputDir, onRefresh, onOpenFolde
   loading: boolean;
   outputDir: string;
   onRefresh: () => void;
-  onOpenFolder: (epub: string) => void;
+  onOpenFolder: () => void;
   onOpenEpub: (epub: string) => void;
   onReconvert: (path: string) => void;
 }) {
@@ -1313,17 +1379,17 @@ function LibraryScreen({ lang, books, loading, outputDir, onRefresh, onOpenFolde
     .sort((a, b) => {
       if (sort === "date") return (b.date || "").localeCompare(a.date || "");
       if (sort === "title") return a.title.localeCompare(b.title);
-      return parseFloat(b.size) - parseFloat(a.size);
+      return b.bytes - a.bytes;
     });
 
-  const totalBytes = books.reduce((s, b) => s + parseFloat(b.size) * 1024 * 1024, 0);
+  const totalBytes = books.reduce((s, b) => s + b.bytes, 0);
   const totalLabel = books.length ? formatSize(totalBytes) : "—";
   const newest = books.reduce((m, b) => (b.date > m ? b.date : m), "");
   const countOf = (bd: Backend) => books.filter(b => b.backend === bd).length;
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
-      <div className="px-[64px] pr-[72px] pt-6 shrink-0">
+      <div className="gutter pt-6 shrink-0">
         <ChapterHead
           label={`02 ${T[lang].screens[1]}`}
           state={loading ? t.loading : t.books(books.length)}
@@ -1331,14 +1397,16 @@ function LibraryScreen({ lang, books, loading, outputDir, onRefresh, onOpenFolde
         />
       </div>
 
-      <div className="px-[64px] pr-[72px] py-3 flex items-center gap-4 shrink-0 border-b border-[var(--border)]">
+      <div className="gutter py-3 flex items-center gap-4 shrink-0 border-b border-[var(--border)]">
         <div className="relative flex items-center border-b border-[var(--border)]">
-          <span className="font-mono text-[11px] text-[var(--border)] mr-2">/</span>
+          <span className="font-mono text-[11px] text-[var(--muted-foreground)] mr-2">/</span>
           <input
             type="text"
             value={search}
             onChange={e => setSearch(e.target.value)}
             placeholder={t.search}
+            spellCheck={false}
+            autoComplete="off"
             className={`bg-transparent text-[12px] text-[var(--foreground)] placeholder-[var(--muted-foreground)] focus:outline-none w-48 ${lang === "zh" ? "cjk" : "font-mono"}`}
           />
           {search && <span className="font-mono text-[10px] text-[var(--muted-foreground)] ml-2 tabular-nums">{filtered.length}</span>}
@@ -1349,7 +1417,7 @@ function LibraryScreen({ lang, books, loading, outputDir, onRefresh, onOpenFolde
             <button
               key={k}
               onClick={() => setSort(k)}
-              className={`px-3 py-1 font-mono text-[9px] tracking-[0.08em] uppercase transition-colors ${i > 0 ? "border-l border-[var(--border)]" : ""}
+              className={`px-3 py-1 transition-colors ${lang === "zh" ? "cjk text-[11px]" : "font-mono text-[10px] tracking-[0.08em] uppercase"} ${i > 0 ? "border-l border-[var(--border)]" : ""}
                 ${sort === k ? "text-[var(--primary)] border-b-2 border-b-[var(--primary)]" : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"}`}
             >
               {label}
@@ -1362,7 +1430,7 @@ function LibraryScreen({ lang, books, loading, outputDir, onRefresh, onOpenFolde
             <button
               key={b}
               onClick={() => setFilter(b)}
-              className={`px-2 py-1 font-mono text-[9px] tracking-[0.06em] uppercase transition-colors ${i > 0 ? "border-l border-[var(--border)]" : ""}
+              className={`px-2 py-1 font-mono text-[10px] tracking-[0.06em] uppercase transition-colors ${i > 0 ? "border-l border-[var(--border)]" : ""}
                 ${filter === b ? "text-[var(--primary)] border-b-2 border-b-[var(--primary)]" : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"}`}
             >
               {b === "All" ? t.filterAll : b === "PaddleOCR" ? "PADDLE" : b.toUpperCase()}
@@ -1373,15 +1441,15 @@ function LibraryScreen({ lang, books, loading, outputDir, onRefresh, onOpenFolde
         <div className="flex-1" />
         <button onClick={onRefresh} className={`font-mono text-[10px] tracking-[0.08em] uppercase text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors ${lang === "zh" ? "cjk font-sans" : ""}`}>{t.refresh}</button>
         <Rule vertical />
-        <button onClick={() => onOpenFolder(books[0]?.epub ?? "")} className={`font-mono text-[10px] tracking-[0.08em] uppercase text-[var(--foreground)] hover:text-[var(--primary)] transition-colors ${lang === "zh" ? "cjk font-sans" : ""}`}>{t.openFolder}</button>
+        <button onClick={onOpenFolder} className={`font-mono text-[10px] tracking-[0.08em] uppercase text-[var(--foreground)] hover:text-[var(--primary)] transition-colors ${lang === "zh" ? "cjk font-sans" : ""}`}>{t.openFolder}</button>
       </div>
 
       <div className="flex-1 flex overflow-hidden">
         {/* 左侧书志汇总栏 */}
-        <div className="w-[160px] shrink-0 border-r border-[var(--border)] px-[24px] py-6 overflow-auto">
+        <div className="w-[192px] shrink-0 border-r border-[var(--border)] pl-[var(--gutter)] pr-6 py-6 overflow-auto scroll-area">
           <div className="space-y-4">
             <div>
-              <div className="font-mono text-[9px] tracking-[0.1em] text-[var(--muted-foreground)] uppercase mb-1">{t.totalLabel}</div>
+              <div className="font-mono text-[10px] tracking-[0.1em] text-[var(--muted-foreground)] uppercase mb-1">{t.totalLabel}</div>
               <div className="font-mono text-[20px] tabular-nums text-[var(--foreground)]">{books.length}</div>
               <div className="font-mono text-[10px] text-[var(--muted-foreground)] tabular-nums">{totalLabel}</div>
             </div>
@@ -1393,24 +1461,24 @@ function LibraryScreen({ lang, books, loading, outputDir, onRefresh, onOpenFolde
                   onClick={() => setFilter(filter === name ? "All" : name)}
                   className={`w-full flex items-baseline justify-between hover:text-[var(--foreground)] transition-colors ${filter === name ? "text-[var(--foreground)]" : "text-[var(--muted-foreground)]"}`}
                 >
-                  <span className="font-mono text-[9px] tracking-[0.06em]">{name === "PaddleOCR" ? "PADDLE" : name.toUpperCase()}</span>
+                  <span className="font-mono text-[10px] tracking-[0.06em]">{name === "PaddleOCR" ? "PADDLE" : name.toUpperCase()}</span>
                   <span className="font-mono text-[11px] tabular-nums" style={{ color }}>{count}</span>
                 </button>
               ))}
             </div>
             <Rule />
             <div>
-              <div className="font-mono text-[9px] tracking-[0.1em] text-[var(--muted-foreground)] uppercase mb-1">{t.newest}</div>
+              <div className="font-mono text-[10px] tracking-[0.1em] text-[var(--muted-foreground)] uppercase mb-1">{t.newest}</div>
               <div className="font-mono text-[10px] text-[var(--foreground)] tabular-nums">{newest ? newest.slice(5) : "—"}</div>
             </div>
           </div>
         </div>
 
         {/* 书目 */}
-        <div className="flex-1 overflow-auto pl-8 pr-[72px] py-4">
+        <div className="flex-1 overflow-auto scroll-area pl-8 pr-[var(--gutter)] py-4">
           <div className="grid grid-cols-[44px_1fr_80px_64px_88px_140px] gap-4 pb-1.5 border-b border-[var(--border)]">
             {["", t.colTitle, t.colSize, t.colPages, t.colDate, ""].map((h, i) => (
-              <span key={i} className="font-mono text-[9px] tracking-[0.1em] uppercase text-[var(--muted-foreground)]">{h}</span>
+              <span key={i} className={`text-[10px] text-[var(--muted-foreground)] ${lang === "zh" ? "cjk" : "font-mono tracking-[0.1em] uppercase"}`}>{h}</span>
             ))}
           </div>
 
@@ -1451,12 +1519,12 @@ function LibraryScreen({ lang, books, loading, outputDir, onRefresh, onOpenFolde
               <span className="font-mono text-[11px] text-[var(--muted-foreground)] tabular-nums self-center">{book.size}</span>
               <span className="font-mono text-[11px] text-[var(--muted-foreground)] tabular-nums self-center">{book.pages || "—"}</span>
               <span className="font-mono text-[11px] text-[var(--muted-foreground)] tabular-nums self-center">{(book.date || "").slice(5)}</span>
-              <div className={`flex items-center gap-3 self-center transition-opacity duration-[140ms] ${hoveredId === book.id ? "opacity-100" : "opacity-0"}`}>
-                <button onClick={() => onOpenEpub(book.epub)} className={`font-mono text-[9px] tracking-[0.06em] uppercase text-[var(--foreground)] hover:text-[var(--primary)] transition-colors ${lang === "zh" ? "cjk font-mono" : ""}`}>{t.openEpub}</button>
+              <div className={`flex items-center gap-3 self-center transition-opacity duration-[140ms] ${hoveredId === book.id ? "opacity-100" : "opacity-55"} focus-within:opacity-100`}>
+                <button onClick={() => onOpenEpub(book.epub)} className={`font-mono text-[10px] tracking-[0.06em] uppercase text-[var(--foreground)] hover:text-[var(--primary)] transition-colors ${lang === "zh" ? "cjk font-mono" : ""}`}>{t.openEpub}</button>
                 {book.path && (
                   <>
                     <Rule vertical />
-                    <button onClick={() => onReconvert(book.path!)} className={`font-mono text-[9px] tracking-[0.06em] uppercase text-[var(--muted-foreground)] hover:text-[var(--primary)] transition-colors ${lang === "zh" ? "cjk font-mono" : ""}`}>{t.reconvert}</button>
+                    <button onClick={() => onReconvert(book.path!)} className={`font-mono text-[10px] tracking-[0.06em] uppercase text-[var(--muted-foreground)] hover:text-[var(--primary)] transition-colors ${lang === "zh" ? "cjk font-mono" : ""}`}>{t.reconvert}</button>
                   </>
                 )}
               </div>
@@ -1484,7 +1552,7 @@ interface SettingsSnapshot {
   backendPref: BackendPref;
   outputDir: string;
   cliPath: string;
-  cleanOpts: boolean[];
+  cleanOpts: CleanOpts;
   strictVerify: boolean;
 }
 
@@ -1515,39 +1583,55 @@ function FieldRow({ lang, label, children }: { lang: Lang; label: string; childr
 }
 
 /** 校勘分组主开关:三态(全开 / 部分两色 / 全关) */
-function GroupSwitch({ idxs, cleanOpts, onToggle }: {
-  idxs: number[]; cleanOpts: boolean[]; onToggle: (on: boolean) => void;
+function GroupSwitch({ keys, cleanOpts, onToggle, lang }: {
+  keys: CleanKey[]; cleanOpts: CleanOpts; onToggle: (on: boolean) => void; lang: Lang;
 }) {
-  const on = idxs.filter(i => cleanOpts[i]).length;
-  const allOn = on === idxs.length;
-  const someOn = on > 0 && on < idxs.length;
+  const on = keys.filter(k => cleanOpts[k]).length;
+  const allOn = on === keys.length;
+  const someOn = on > 0 && on < keys.length;
   return (
     <div className="relative flex items-center gap-3 shrink-0">
-      <span className="font-mono text-[9px] text-[var(--muted-foreground)] tabular-nums">{on}/{idxs.length}</span>
+      <span className="font-mono text-[10px] text-[var(--muted-foreground)] tabular-nums">{on}/{keys.length}</span>
       <button
         role="switch"
         aria-checked={allOn}
-        aria-label="toggle group"
+        aria-label={lang === "zh" ? "切换分组" : "Toggle group"}
         onClick={() => onToggle(!allOn)}
         className={`relative w-[40px] h-[22px] border transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--ring)] focus:ring-offset-2 focus:ring-offset-[var(--background)]
           ${allOn || someOn ? "border-[var(--primary)]" : "border-[var(--foreground)]"}`}
-        style={someOn ? { background: `linear-gradient(to right, var(--primary) ${(on / idxs.length) * 100}%, var(--muted) ${(on / idxs.length) * 100}%)` } : {}}
+        style={someOn ? { background: `linear-gradient(to right, var(--primary) ${(on / keys.length) * 100}%, var(--muted) ${(on / keys.length) * 100}%)` } : {}}
       >
         {!someOn && <span className={`absolute inset-0 ${allOn ? "bg-[var(--primary)]" : "bg-[var(--card)]"}`} />}
-        <span className={`absolute top-[2px] w-4 h-4 transition-transform z-10 ${allOn ? "translate-x-[19px] bg-white" : "translate-x-[2px] border border-[var(--foreground)] bg-[var(--card)]"}`} />
+        {/* 部分开启时滑块停中间:停在最左看起来像「关」,而轨道一半有色,语义打架 */}
+        <span className={`absolute top-[2px] w-4 h-4 transition-transform z-10
+          ${allOn ? "translate-x-[20px] bg-white" : someOn ? "translate-x-[11px] bg-white" : "translate-x-[2px] border border-[var(--foreground)] bg-[var(--card)]"}`} />
       </button>
     </div>
   );
 }
 
-/** 凭证行:只写不读(原值不回显,这是项目的凭证约定),SHOW 仅在已输入内容时可点 */
+/** 凭证行:只写不读(原值不回显,这是项目的凭证约定),SHOW 仅在已输入内容时可点。
+ *  CLEAR 需要点两次:已存的密钥抹掉就再也取不回来,一次误点代价太大。 */
 function TokenRow({ lang, label, configured, pending, value, onChange, onClear }: {
   lang: Lang; label: string; configured: boolean; pending: boolean; value: string;
   onChange: (v: string) => void; onClear: () => void;
 }) {
   const t = T[lang].settings;
   const [show, setShow] = useState(false);
+  const [armed, setArmed] = useState(false);
+  const timer = useRef<number | undefined>(undefined);
+  useEffect(() => () => { if (timer.current) window.clearTimeout(timer.current); }, []);
   const hasInput = value.length > 0;
+  const handleClear = () => {
+    if (!armed) {
+      setArmed(true);
+      timer.current = window.setTimeout(() => setArmed(false), 3000);
+      return;
+    }
+    if (timer.current) window.clearTimeout(timer.current);
+    setArmed(false);
+    onClear();
+  };
   const chipClass = pending
     ? "border-[var(--warn)] text-[var(--warn)]"
     : configured
@@ -1557,7 +1641,7 @@ function TokenRow({ lang, label, configured, pending, value, onChange, onClear }
     <div>
       <div className="flex items-center justify-between mb-1">
         <span className={`text-[12px] text-[var(--muted-foreground)] ${lang === "zh" ? "cjk" : "font-mono"}`}>{label}</span>
-        <span className={`font-mono text-[8px] tracking-[0.08em] px-1.5 py-0.5 border ${chipClass}`}>
+        <span className={`font-mono text-[10px] tracking-[0.08em] px-1.5 py-0.5 border ${chipClass}`}>
           {pending ? t.tokenPending : configured ? t.configured : t.missing}
         </span>
       </div>
@@ -1567,16 +1651,22 @@ function TokenRow({ lang, label, configured, pending, value, onChange, onClear }
           value={value}
           onChange={e => onChange(e.target.value)}
           placeholder={configured ? t.tokenPlaceholderSet : t.tokenPlaceholder}
+          spellCheck={false}
+          autoComplete="off"
           className="flex-1 bg-transparent font-mono text-[11px] text-[var(--foreground)] placeholder-[var(--muted-foreground)] focus:outline-none py-1"
         />
         <button
           onClick={() => setShow(!show)}
           disabled={!hasInput}
           title={hasInput ? undefined : t.showHint}
-          className={`font-mono text-[9px] tracking-[0.08em] uppercase px-2 ${hasInput ? "text-[var(--muted-foreground)] hover:text-[var(--foreground)]" : "text-[var(--border)] cursor-not-allowed"}`}>
+          className={`font-mono text-[10px] tracking-[0.08em] uppercase px-2 ${hasInput ? "text-[var(--muted-foreground)] hover:text-[var(--foreground)]" : "text-[var(--border)] cursor-not-allowed"}`}>
           {show ? t.hide : t.show}
         </button>
-        <button onClick={onClear} className="font-mono text-[9px] tracking-[0.08em] uppercase text-[var(--muted-foreground)] hover:text-[var(--danger)] px-2">{t.clear}</button>
+        <button onClick={handleClear}
+          className={`font-mono text-[10px] tracking-[0.08em] uppercase px-2 transition-colors
+            ${armed ? "text-[var(--danger)] border border-[var(--danger)]" : "text-[var(--muted-foreground)] hover:text-[var(--danger)]"}`}>
+          {armed ? `${t.clear} ?` : t.clear}
+        </button>
       </div>
     </div>
   );
@@ -1598,8 +1688,8 @@ function SettingsScreen({
   cliPath: string;
   setCliPath: (v: string) => void;
   env: EnvState | null;
-  cleanOpts: boolean[];
-  setCleanOpts: (v: boolean[]) => void;
+  cleanOpts: CleanOpts;
+  setCleanOpts: (v: CleanOpts) => void;
   strictVerify: boolean;
   setStrictVerify: (v: boolean) => void;
   onSave: () => void;
@@ -1614,11 +1704,11 @@ function SettingsScreen({
   const [savedFlash, setSavedFlash] = useState(false);
 
   const snapRef = useRef<SettingsSnapshot>({
-    backendPref, outputDir, cliPath, cleanOpts: [...cleanOpts], strictVerify,
+    backendPref, outputDir, cliPath, cleanOpts: { ...cleanOpts }, strictVerify,
   });
   const snap = snapRef.current;
   const snapshot = (): SettingsSnapshot => ({
-    backendPref, outputDir, cliPath, cleanOpts: [...cleanOpts], strictVerify,
+    backendPref, outputDir, cliPath, cleanOpts: { ...cleanOpts }, strictVerify,
   });
   // 差异数:把开关拨回去就归零(不再是「操作次数」)
   const dirty =
@@ -1626,7 +1716,7 @@ function SettingsScreen({
     (outputDir !== snap.outputDir ? 1 : 0) +
     (cliPath !== snap.cliPath ? 1 : 0) +
     (strictVerify !== snap.strictVerify ? 1 : 0) +
-    cleanOpts.reduce((n, v, i) => n + (v !== snap.cleanOpts[i] ? 1 : 0), 0);
+    CLEAN_KEYS.reduce((n, k) => n + (cleanOpts[k] !== snap.cleanOpts[k] ? 1 : 0), 0);
   // 凭证是「写入式」字段:已输入但未保存也必须计入未保存,
   // 否则粘完密钥、别处没改动 → 未保存数为 0 → 底部保存栏根本不出现
   const tokenPending = (mineruToken.trim() ? 1 : 0) + (paddleToken.trim() ? 1 : 0);
@@ -1640,7 +1730,7 @@ function SettingsScreen({
     setBackendPref(snap.backendPref);
     setOutputDir(snap.outputDir);
     setCliPath(snap.cliPath);
-    setCleanOpts([...snap.cleanOpts]);
+    setCleanOpts({ ...snap.cleanOpts });
     setStrictVerify(snap.strictVerify);
     setMinerUToken("");
     setPaddleToken("");
@@ -1708,17 +1798,18 @@ function SettingsScreen({
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
-      <div className="px-[64px] pr-[72px] pt-6 shrink-0">
+      <div className="gutter pt-6 shrink-0">
         <ChapterHead label={`03 ${T[lang].screens[2]}`} state={unsaved > 0 ? t.dirty(unsaved) : undefined} lang={lang} />
       </div>
 
-      <div className="flex-1 overflow-auto px-[64px] pr-[72px] pb-24">
+      <div className="flex-1 overflow-auto scroll-area gutter pb-24">
         {/* A: 转换器 */}
         <SectionCard lang={lang} letter="A" title={t.sections[0]} summary="">
           <FieldRow lang={lang} label={t.outputDir}>
             <input
               type="text" value={outputDir} onChange={e => setOutputDir(e.target.value)}
-              className="flex-1 bg-transparent border-b border-[var(--border)] font-mono text-[11px] text-[var(--foreground)] focus:outline-none focus:border-[var(--primary)] py-1"
+              spellCheck={false} autoComplete="off"
+              className="flex-1 bg-transparent border-b border-[var(--border)] font-mono text-[11px] text-[var(--foreground)] focus:outline-none focus:border-[var(--primary)] py-1 selectable"
             />
             <button onClick={browseDir} className={`font-mono text-[10px] tracking-[0.08em] uppercase text-[var(--muted-foreground)] hover:text-[var(--foreground)] border border-[var(--border)] px-3 py-1 ${lang === "zh" ? "cjk font-sans" : ""}`}>{t.browse}</button>
           </FieldRow>
@@ -1726,12 +1817,13 @@ function SettingsScreen({
             <input
               type="text" value={cliPath} onChange={e => setCliPath(e.target.value)}
               placeholder={t.cliPlaceholder}
-              className="flex-1 bg-transparent border-b border-[var(--border)] font-mono text-[11px] text-[var(--foreground)] placeholder-[var(--muted-foreground)] focus:outline-none focus:border-[var(--primary)] py-1"
+              spellCheck={false} autoComplete="off"
+              className="flex-1 bg-transparent border-b border-[var(--border)] font-mono text-[11px] text-[var(--foreground)] placeholder-[var(--muted-foreground)] focus:outline-none focus:border-[var(--primary)] py-1 selectable"
             />
           </FieldRow>
 
           <div className="mt-4">
-            <div className="font-mono text-[9px] tracking-[0.12em] uppercase text-[var(--muted-foreground)] mb-2">{t.envCheck}</div>
+            <div className="font-mono text-[10px] tracking-[0.12em] uppercase text-[var(--muted-foreground)] mb-2">{t.envCheck}</div>
             <Rule />
             {envRows.map(item => (
               <div key={item.name} className="flex items-center gap-3 py-2 border-b border-[var(--border)]">
@@ -1739,7 +1831,7 @@ function SettingsScreen({
                 <span className="font-mono text-[11px] text-[var(--foreground)] flex-1">{item.name}</span>
                 {item.version && <span className="font-mono text-[10px] text-[var(--muted-foreground)] tabular-nums">{item.version}</span>}
                 {item.path && <span className="font-mono text-[10px] text-[var(--muted-foreground)] truncate max-w-[280px]">{item.path}</span>}
-                <span className={`font-mono text-[8px] tracking-[0.08em] px-1.5 py-0.5 border ${item.status === "ok" ? "border-[var(--ok)] text-[var(--ok)]" : "border-[var(--danger)] text-[var(--danger)]"}`}>
+                <span className={`font-mono text-[10px] tracking-[0.08em] px-1.5 py-0.5 border ${item.status === "ok" ? "border-[var(--ok)] text-[var(--ok)]" : "border-[var(--danger)] text-[var(--danger)]"}`}>
                   {item.status === "ok" ? "OK" : "MISSING"}
                 </span>
               </div>
@@ -1749,7 +1841,7 @@ function SettingsScreen({
                 <p className={`text-[13px] text-[var(--foreground)] mb-2 ${lang === "zh" ? "cjk" : ""}`}>{t.pandocMissing}</p>
                 <div className="flex items-center gap-3">
                   <code className="font-mono text-[11px] text-[var(--foreground)] bg-[var(--secondary)] px-3 py-1">{t.installCmd}</code>
-                  <button onClick={copyInstall} className="font-mono text-[9px] tracking-[0.08em] border border-[var(--border)] px-2 py-1 text-[var(--muted-foreground)] hover:text-[var(--foreground)]">
+                  <button onClick={copyInstall} className="font-mono text-[10px] tracking-[0.08em] border border-[var(--border)] px-2 py-1 text-[var(--muted-foreground)] hover:text-[var(--foreground)]">
                     {copied ? t.copied : t.copy}
                   </button>
                 </div>
@@ -1802,46 +1894,55 @@ function SettingsScreen({
         <Rule />
 
         {/* C: 校勘流水线 */}
-        <SectionCard lang={lang} letter="C" title={t.sections[2]} summary={`${cleanOpts.filter(Boolean).length}/9 ON`}>
+        <SectionCard lang={lang} letter="C" title={t.sections[2]}
+          summary={`${CLEAN_KEYS.filter(k => cleanOpts[k]).length}/${CLEAN_KEYS.length} ON`}>
           {groups.map((group, gi) => {
-            const idxs = group.items.map(it => CLEAN_KEYS.indexOf(it.key as typeof CLEAN_KEYS[number]));
+            const keys = group.items.map(it => it.key as CleanKey);
             return (
               <div key={gi} className="mb-4">
                 <div className="flex items-center gap-4 py-1.5 border-b border-[var(--border)]">
                   <span className={`text-[12px] text-[var(--muted-foreground)] flex-1 ${lang === "zh" ? "cjk font-medium" : "font-mono tracking-[0.08em]"}`}>{group.name}</span>
                   <GroupSwitch
-                    idxs={idxs}
+                    keys={keys}
+                    lang={lang}
                     cleanOpts={cleanOpts}
-                    onToggle={on => setCleanOpts(cleanOpts.map((v, i) => idxs.includes(i) ? on : v))}
+                    onToggle={on => {
+                      const next = { ...cleanOpts };
+                      for (const k of keys) next[k] = on;
+                      setCleanOpts(next);
+                    }}
                   />
                 </div>
                 {group.items.map(item => {
-                  const idx = CLEAN_KEYS.indexOf(item.key as typeof CLEAN_KEYS[number]);
+                  const key = item.key as CleanKey;
+                  const on = cleanOpts[key];
+                  const toggle = () => setCleanOpts({ ...cleanOpts, [key]: !on });
                   return (
                     <div key={item.key} title={item.key}
                       className="flex items-center h-11 gap-4 border-b border-[var(--border)] hover:bg-[var(--secondary)] transition-colors cursor-pointer"
-                      onClick={() => setCleanOpts(cleanOpts.map((v, j) => j === idx ? !v : v))}>
+                      onClick={toggle}>
                       <span className="font-mono text-[13px] text-[var(--muted-foreground)] w-5 shrink-0 text-center">{item.glyph}</span>
                       <div className="flex-1 min-w-0">
                         <div className={`text-[13px] text-[var(--foreground)] ${lang === "zh" ? "cjk" : ""}`}>
                           {item.label}
                           {item.advanced && (
-                            <span className="ml-2 font-mono text-[8px] tracking-[0.08em] border border-[var(--muted-foreground)] text-[var(--muted-foreground)] px-1">ADVANCED</span>
+                            <span className="ml-2 font-mono text-[10px] tracking-[0.08em] border border-[var(--muted-foreground)] text-[var(--muted-foreground)] px-1">ADVANCED</span>
                           )}
                         </div>
                         <div className={`text-[12px] text-[var(--muted-foreground)] ${lang === "zh" ? "cjk" : "font-mono"}`}>{item.desc}</div>
                       </div>
-                      <span className={`font-mono text-[9px] shrink-0 ${cleanOpts[idx] ? "text-[var(--primary)]" : "text-[var(--muted-foreground)]"}`}>
-                        {cleanOpts[idx] ? "ON" : "OFF"}
+                      <span className={`font-mono text-[10px] shrink-0 ${on ? "text-[var(--primary)]" : "text-[var(--muted-foreground)]"}`}>
+                        {on ? "ON" : "OFF"}
                       </span>
                       <button
                         role="switch"
-                        aria-checked={cleanOpts[idx]}
+                        aria-checked={on}
                         aria-label={item.label}
-                        className={`relative shrink-0 w-[40px] h-[22px] border transition-colors
-                          ${cleanOpts[idx] ? "bg-[var(--primary)] border-[var(--primary)]" : "bg-[var(--card)] border-[var(--foreground)]"}`}
+                        onClick={e => { e.stopPropagation(); toggle(); }}
+                        className={`relative shrink-0 w-[40px] h-[22px] border transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--ring)] focus:ring-offset-2 focus:ring-offset-[var(--background)]
+                          ${on ? "bg-[var(--primary)] border-[var(--primary)]" : "bg-[var(--card)] border-[var(--foreground)]"}`}
                       >
-                        <span className={`absolute top-[2px] w-4 h-4 transition-transform ${cleanOpts[idx] ? "translate-x-[19px] bg-white" : "translate-x-[2px] border border-[var(--foreground)] bg-transparent"}`} />
+                        <span className={`absolute top-[2px] w-4 h-4 transition-transform ${on ? "translate-x-[20px] bg-white" : "translate-x-[2px] border border-[var(--foreground)] bg-transparent"}`} />
                       </button>
                     </div>
                   );
@@ -1884,7 +1985,7 @@ function SettingsScreen({
       </div>
 
       {unsaved > 0 && (
-        <div className="shrink-0 border-t border-[var(--border)] flex items-center justify-end gap-4 px-[64px] pr-[72px] py-3 bg-[var(--card)]">
+        <div className="shrink-0 border-t border-[var(--border)] flex items-center justify-end gap-4 gutter py-3 bg-[var(--card)]">
           <span className="font-mono text-[11px] text-[var(--muted-foreground)] flex-1">{t.dirty(unsaved)}</span>
           <button onClick={discard} className={`font-mono text-[10px] tracking-[0.08em] uppercase text-[var(--muted-foreground)] hover:text-[var(--foreground)] ${lang === "zh" ? "cjk font-sans" : ""}`}>{t.discard}</button>
           <button onClick={() => void handleSave()} disabled={saving} className={`px-6 py-2 bg-[var(--primary)] text-[var(--primary-foreground)] font-mono text-[10px] tracking-[0.1em] uppercase hover:opacity-90 transition-opacity disabled:opacity-60 ${lang === "zh" ? "cjk font-sans" : ""}`}>{t.save}</button>
@@ -1899,7 +2000,14 @@ function SettingsScreen({
 export default function App() {
   const [screen, setScreen] = useState<Screen>("convert");
   const [darkMode, setDarkMode] = useState<boolean>(() => localStorage.getItem("pdf2epub.dark") === "1");
-  const [lang, setLang] = useState<Lang>(() => (localStorage.getItem("pdf2epub.lang") as Lang) || "en");
+  const [lang, setLang] = useState<Lang>(() => {
+    const saved = localStorage.getItem("pdf2epub.lang");
+    if (saved === "en" || saved === "zh") return saved;
+    // 首次启动跟随系统:中文项目默认给英文界面是没道理的
+    return (navigator.language || "").toLowerCase().startsWith("zh") ? "zh" : "en";
+  });
+  // 页眉时钟:没有定时器时它停在上一次任何 state 变化的那一刻
+  const [now, setNow] = useState(() => new Date());
   const [composingExpanded, setComposingExpanded] = useState(false);
   const [files, setFiles] = useState<QueueFile[]>([]);
   const [consoleLines, setConsoleLines] = useState<ConsoleLine[]>([]);
@@ -1920,7 +2028,7 @@ export default function App() {
   const [cliPath, setCliPath] = useState<string>(
     () => localStorage.getItem("pdf2epub.cliPath") || "",
   );
-  const [cleanOpts, setCleanOpts] = useState<boolean[]>(loadCleanOpts);
+  const [cleanOpts, setCleanOpts] = useState<CleanOpts>(loadCleanOpts);
   const [strictVerify, setStrictVerify] = useState<boolean>(
     () => localStorage.getItem("pdf2epub.strict") === "1",
   );
@@ -1928,16 +2036,30 @@ export default function App() {
   // 队列最新快照:转换结束回写书库元数据时取用(不依赖 setState 的异步性)
   const filesRef = useRef<QueueFile[]>([]);
   useEffect(() => { filesRef.current = files; }, [files]);
-  const cleanDisable = useMemo(() => CLEAN_KEYS.filter((_, i) => !cleanOpts[i]), [cleanOpts]);
+  const cleanDisable = useMemo(
+    () => CLEAN_KEYS.filter(k => !cleanOpts[k]),
+    [cleanOpts],
+  );
 
   // ── CLI 进度事件 ──
   //  stdout 的 JSON 事件(--json-events)是状态/进度的唯一来源;stderr 的人类日志
   //  进控制台。只有拿不到事件(老版 CLI)时才退回正则解析,并给该文件打 legacy 标记。
   useEffect(() => {
+    let disposed = false;
     let unlisten: (() => void) | undefined;
     // 事件流是否见过该文件(未见事件却收到日志 = 老版 CLI,退化正则并标注)
     const seenEvent = new Set<string>();
     const logLines = new Map<string, number>();
+    // 日志按帧合并:每行两次 setState 会让 2500 行的组件树在 OCR 阶段持续重渲染,
+    // 表现为「转换时界面发涩」。进度仍逐条更新(它是 UI 的核心),日志攒到下一帧。
+    const logBuf: ConsoleLine[] = [];
+    let raf = 0;
+    const flushLogs = () => {
+      raf = 0;
+      if (logBuf.length === 0) return;
+      const batch = logBuf.splice(0, logBuf.length);
+      setConsoleLines(prev => [...prev.slice(-300), ...batch].slice(-300));
+    };
     listen<{ file: string; line: string; channel?: string }>("conv://progress", e => {
       const { file, line } = e.payload;
       const ev = parseEventLine(line);
@@ -1948,12 +2070,15 @@ export default function App() {
         logLines.set(file, count);
         const legacy = !seenEvent.has(file) && count >= 3;
         const ts = new Date().toTimeString().slice(0, 8);
-        setConsoleLines(prev => [...prev.slice(-300), {
+        logBuf.push({
           ts,
           level: /error|失败/i.test(line) ? "ERROR" : /warn|伪文字层|疑似/i.test(line) ? "WARN" : "INFO",
           text: line,
           legacy,
-        }]);
+        });
+        // 窗口最小化时 rAF 会被节流,兜个上限防止无界堆积
+        if (logBuf.length > 400) logBuf.splice(0, logBuf.length - 400);
+        if (!raf) raf = requestAnimationFrame(flushLogs);
       }
       setFiles(prev => prev.map(f => {
         if (f.path !== file || f.status !== "converting") return f;
@@ -1989,8 +2114,17 @@ export default function App() {
           lastLog: line,
         };
       }));
-    }).then(un => { unlisten = un; });
-    return () => { unlisten?.(); };
+    }).then(un => {
+      // 卸载可能发生在 promise resolve 之前(StrictMode / HMR):此时必须立刻注销,
+      // 否则监听器永久存活 —— dev 下每条日志被处理两次,进度来回跳。
+      if (disposed) un();
+      else unlisten = un;
+    });
+    return () => {
+      disposed = true;
+      if (raf) cancelAnimationFrame(raf);
+      unlisten?.();
+    };
   }, []);
 
   // ── 主题 / 语言 ──
@@ -2000,8 +2134,16 @@ export default function App() {
   }, [darkMode]);
   useEffect(() => {
     document.documentElement.classList.toggle("lang-zh", lang === "zh");
+    // <html lang> 决定读屏语言与断词/字形选择,不能固定成 zh-CN
+    document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
     localStorage.setItem("pdf2epub.lang", lang);
   }, [lang]);
+
+  // 页眉时钟:30s 一跳(秒级没必要,反而增加重渲染)
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(new Date()), 30_000);
+    return () => window.clearInterval(id);
+  }, []);
 
   // ── 设置页刷新环境检查 ──
   useEffect(() => {
@@ -2202,18 +2344,35 @@ export default function App() {
       stages: freshStages(),
       log: [],
     }));
-    setFiles(prev => [...prev, ...newFiles]);
-    rememberRecent(paths);
+    // 同一文件重复入队会跑两遍、并发写同一个产物(后端只能报 name_conflict)。
+    // 只跟「还没终结」的行去重:已完成的允许重新入队(那是重转语义)。
+    const busy = new Set(
+      filesRef.current
+        .filter(f => f.status === "pending" || f.status === "converting")
+        .map(f => normPath(f.path)),
+    );
+    const fresh = newFiles.filter(f => !busy.has(normPath(f.path)));
+    if (fresh.length === 0) {
+      const ts = new Date().toTimeString().slice(0, 8);
+      setConsoleLines(prev => [...prev.slice(-300), {
+        ts, level: "WARN" as const,
+        text: `[QUEUE] ${paths.map(baseName).join(", ")} 已在队列中,已忽略重复添加`,
+      }]);
+      return;
+    }
+    setFiles(prev => [...prev, ...fresh]);
+    rememberRecent(fresh.map(f => f.path));
     setScreen("convert");
     // 先印前检查(检测类型/页数/折帖/云端页数,后端与转换一致),再串行转换
-    void runPreflight(paths);
-    for (const f of newFiles) {
+    void runPreflight(fresh.map(f => f.path));
+    for (const f of fresh) {
       await convertOne(f, undefined, force);
     }
   }, [convertOne, rememberRecent, runPreflight]);
 
   // ── 原生拖放(WebView2 下 HTML5 DnD 拿不到路径)──
   useEffect(() => {
+    let disposed = false;
     let unlisten: (() => void) | undefined;
     getCurrentWebview().onDragDropEvent(event => {
       const p = event.payload;
@@ -2225,8 +2384,11 @@ export default function App() {
         setDragging(false);
         if (p.paths.length > 0) void addFiles(p.paths);
       }
-    }).then(un => { unlisten = un; });
-    return () => { unlisten?.(); };
+    }).then(un => {
+      if (disposed) un();
+      else unlisten = un;
+    });
+    return () => { disposed = true; unlisten?.(); };
   }, [addFiles]);
 
   const pickFiles = useCallback(async () => {
@@ -2241,10 +2403,18 @@ export default function App() {
   }, [addFiles]);
 
   // ── 队列操作 ──
+  //  取消只能作用于「还没终结」的行:批量操作会遍历全部选中项(含已完成),
+  //  无条件改状态会把 DONE / SKIPPED 悄悄变成 CANCELLED —— 三个终态互不冒充。
   const cancelFile = useCallback((id: string) => {
+    const target = filesRef.current.find(f => f.id === id);
+    if (!target || (target.status !== "pending" && target.status !== "converting")) return;
     canceled.current.add(id);
+    setFiles(prev => prev.map(f =>
+      f.id === id && (f.status === "pending" || f.status === "converting")
+        ? { ...f, status: "cancelled" as FileStatus, error: undefined }
+        : f,
+    ));
     void invoke("cancel_convert", { taskId: id }).catch(() => { /* 已退出 */ });
-    setFiles(prev => prev.map(f => f.id === id ? { ...f, status: "cancelled" as FileStatus, error: undefined } : f));
   }, []);
 
   const retryFile = useCallback((id: string) => {
@@ -2307,22 +2477,24 @@ export default function App() {
   }, [backendPref, outputDir, cliPath, cleanOpts, strictVerify]);
 
   // ── 书库数据:library.json(含转换时回写的类型/后端/页数)+ 本会话兜底 ──
-  const books: LibraryBook[] = diskBooks.map(b => {
+  //  memo:转换期间每行日志都会触发 App 重渲染,这里不必跟着重算
+  const books: LibraryBook[] = useMemo(() => diskBooks.map(b => {
     const s = files.find(f => f.status === "done" && f.epub && normPath(f.epub) === normPath(b.path));
     return {
       id: b.path,
       title: b.title || baseName(b.path),
       author: b.author,
       size: formatSize(b.size),
+      bytes: b.size,
       // 页数/类型/后端优先取库里的持久值(重启后仍在),会话内再用实时值纠正
       pages: s?.pages || b.pages || 0,
-      date: b.mtime ? new Date(b.mtime * 1000).toISOString().slice(0, 10) : "",
+      date: b.mtime ? fmtDate(b.mtime * 1000) : "",
       type: s?.type ?? ((b.kind ?? undefined) as FileType | undefined),
       backend: s?.backend ?? ((b.backend ?? undefined) as Backend | undefined),
       epub: b.path,
       path: s?.path,
     };
-  });
+  }), [diskBooks, files]);
 
   const openEpub = useCallback(async (epub: string) => {
     try {
@@ -2337,12 +2509,16 @@ export default function App() {
     }
   }, []);
 
-  const openFolder = useCallback(async (epub: string) => {
+  const openFolder = useCallback(async () => {
     try {
-      if (epub) await revealItemInDir(epub);
-      else await openPath(outputDir);
+      await invoke<string>("open_output_dir", { outputDir });
     } catch (e) {
-      console.error("reveal failed", e);
+      const ts = new Date().toTimeString().slice(0, 8);
+      setConsoleLines(prev => [...prev.slice(-300), {
+        ts,
+        level: "ERROR" as const,
+        text: `[OPEN DIR] ${outputDir} — ${String(e)}`,
+      }]);
     }
   }, [outputDir]);
 
@@ -2355,6 +2531,8 @@ export default function App() {
   }, [files, convertOne, addFiles]);
 
   const convertingCount = files.filter(f => f.status === "converting").length;
+  const failedCount = files.filter(f => f.status === "failed").length;
+  const doneCount = files.filter(f => f.status === "done").length;
   const activeFile = files.find(f => f.status === "converting");
   const activeStage = activeFile?.stages.find(s => s.state === "active");
   const pendingCount = files.filter(f => f.status === "pending").length;
@@ -2374,7 +2552,7 @@ export default function App() {
     >
       {/* 页眉 — running head */}
       <header className="shrink-0 flex items-stretch" style={{ background: "var(--card)" }}>
-        <div className="h-10 flex items-center px-[64px] pr-[72px] w-full gap-6">
+        <div className="h-10 flex items-center gutter w-full gap-6">
           <span className="font-mono text-[11px] tracking-[0.08em] text-[var(--muted-foreground)] shrink-0">
             {t.brand} <span className="opacity-50">{APP_VERSION}</span>
           </span>
@@ -2411,7 +2589,7 @@ export default function App() {
             <button
               onClick={() => setDarkMode(!darkMode)}
               className="font-mono text-[10px] text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors"
-              aria-label="Toggle theme"
+              aria-label={lang === "zh" ? "切换主题" : "Toggle theme"}
             >
               {darkMode ? "☀" : "☾"}
             </button>
@@ -2423,9 +2601,12 @@ export default function App() {
               {t.langToggle}
             </button>
             <Rule vertical />
-            <span className="font-mono text-[11px] tabular-nums text-[var(--muted-foreground)]">
-              {new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" })}
-            </span>
+            <time
+              dateTime={now.toISOString()}
+              className="font-mono text-[11px] tabular-nums text-[var(--muted-foreground)]"
+            >
+              {now.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" })}
+            </time>
           </div>
         </div>
       </header>
@@ -2493,7 +2674,7 @@ export default function App() {
 
       {/* 版心脚注 — status bar */}
       <Rule />
-      <footer className="shrink-0 h-6 flex items-center px-[64px] pr-[72px] gap-4" style={{ background: "var(--card)" }}>
+      <footer className="shrink-0 h-6 flex items-center gutter gap-4" style={{ background: "var(--card)" }}>
         <div className={`w-1.5 h-1.5 shrink-0 ${convertingCount > 0 ? "bg-[var(--primary)]" : "bg-[var(--ok)]"}`} />
         <span className="font-mono text-[10px] tracking-[0.08em] text-[var(--muted-foreground)] uppercase">
           {activeStage
@@ -2513,8 +2694,17 @@ export default function App() {
         <Rule vertical />
         <span className={`text-[10px] text-[var(--muted-foreground)] ${lang === "zh" ? "cjk" : "font-mono"}`}>{t.status.pending(pendingCount)}</span>
         <div className="flex-1" />
-        <span className="font-mono text-[10px] text-[var(--muted-foreground)] truncate max-w-[300px]">{outputDir}</span>
+        <span className="font-mono text-[10px] text-[var(--muted-foreground)] truncate max-w-[300px] selectable" title={outputDir}>{outputDir}</span>
       </footer>
+
+      {/* 终态播报:视觉上的状态变化对读屏器不可见 */}
+      <div aria-live="polite" className="sr-only">
+        {failedCount > 0
+          ? (lang === "zh" ? `${failedCount} 个文件转换失败` : `${failedCount} file(s) failed`)
+          : doneCount > 0 && convertingCount === 0
+            ? (lang === "zh" ? "转换完成" : "Conversion finished")
+            : ""}
+      </div>
     </div>
   );
 }

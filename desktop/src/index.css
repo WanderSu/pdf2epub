@@ -1,7 +1,3 @@
-@import url('https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;700&display=swap');
-@import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300;0,14..32,400;0,14..32,500;0,14..32,600;0,14..32,700;1,14..32,400&display=swap');
-@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&display=swap');
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&display=swap');
 @import 'tailwindcss';
 
 @theme inline {
@@ -15,10 +11,19 @@
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);
   --color-ring: var(--ring);
+  /* 语义色也映射进主题:可用 text-ok / border-danger 这类工具类,
+     不必满屏写 text-[var(--ok)] */
+  --color-ok: var(--ok);
+  --color-danger: var(--danger);
+  --color-warn: var(--warn);
+  --color-info: var(--info);
+  --color-paddle: var(--paddle);
 }
 
 /* ── PAPER / INK / CINNABAR — light ── */
 :root {
+  color-scheme: light;
+
   --background: #F7F5EF;
   --card: #FFFDF8;
   --secondary: #EFEAE0;
@@ -31,14 +36,30 @@
   --ring: #B5342A;
   /* annotation — text/dot/rule only */
   --ok: #2F6B4F;
-  --danger: #A6262E;
+  /* 错误色刻意偏洋红:与朱砂主色(色相差 4° → 约 30°)拉开,
+     否则「转换中」与「失败」两个 chip 在同屏几乎同色(可用性问题,不只是审美) */
+  --danger: #96183F;
   --warn: #8A5A00;
   --info: #1F3C6E;
   --paddle: #5B3A8E;
+
+  /* 字体栈全部用本机字体:桌面端不引远端 @import —— Google Fonts 在国内
+     不可达(中文标题会静默回退),且四次串行 @import 会造成启动瞬间字体跳变。 */
+  --font-sans: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC",
+    "Noto Sans SC", system-ui, sans-serif;
+  --font-serif: "Source Han Serif SC", "Noto Serif SC", "Songti SC",
+    "SimSun", Georgia, serif;
+  --font-mono: "Cascadia Mono", Consolas, "JetBrains Mono", "Courier New",
+    monospace;
+
+  /* 版心:三屏 + 页眉页脚共用同一组横向留白(改版心只改这里) */
+  --gutter: 64px;
 }
 
 /* ── dark ── */
 .dark {
+  color-scheme: dark;
+
   --background: #12110F;
   --card: #1A1815;
   --secondary: #221F1A;
@@ -50,7 +71,7 @@
   --primary-foreground: #FFFDF8;
   --ring: #C2452F;
   --ok: #4E9E75;
-  --danger: #C0453C;
+  --danger: #C84A6E;
   --warn: #C08A2E;
   --info: #5B86C7;
   --paddle: #9B7BD4;
@@ -60,7 +81,7 @@
 html, body, #root { width: 100%; height: 100%; margin: 0; padding: 0; }
 
 body {
-  font-family: 'Inter', 'Noto Sans SC', system-ui, sans-serif;
+  font-family: var(--font-sans);
   background-color: var(--background);
   color: var(--foreground);
   -webkit-font-smoothing: antialiased;
@@ -68,38 +89,45 @@ body {
 }
 
 /* Typeface utilities */
-.font-serif {
-  font-family: 'Noto Serif SC', 'Georgia', serif;
-}
-.font-mono {
-  font-family: 'JetBrains Mono', 'Courier New', monospace;
-}
-.font-sans {
-  font-family: 'Inter', 'Noto Sans SC', system-ui, sans-serif;
-}
+.font-serif { font-family: var(--font-serif); }
+.font-mono { font-family: var(--font-mono); }
+.font-sans { font-family: var(--font-sans); }
+
+/* 版心:替代散落 15 处的 px-[64px] pr-[72px] */
+.gutter { padding-left: var(--gutter); padding-right: var(--gutter); }
+
+/* 根节点是 select-none(应用式界面),只有这些地方需要复制:
+   错误原文、输出目录、日志 */
+.selectable,
+.selectable * { user-select: text; }
 
 /* CJK: never uppercase, never tracked, line-height 1.7 */
 .lang-zh .cjk {
-  font-family: 'Noto Sans SC', system-ui, sans-serif;
+  font-family: var(--font-sans);
   letter-spacing: 0;
   text-transform: none;
   line-height: 1.7;
 }
 .lang-zh .cjk-serif {
-  font-family: 'Noto Serif SC', serif;
+  font-family: var(--font-serif);
   letter-spacing: 0;
   text-transform: none;
   line-height: 1.7;
 }
 /* mono always stays mono */
-.font-mono, .lang-zh .font-mono { font-family: 'JetBrains Mono', monospace; }
+.font-mono, .lang-zh .font-mono { font-family: var(--font-mono); }
 
-/* Scrollbars */
-* { scrollbar-width: none; }
-*::-webkit-scrollbar { display: none; }
-*:hover { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
-*:hover::-webkit-scrollbar { display: block; width: 3px; }
-*:hover::-webkit-scrollbar-thumb { background-color: var(--border); }
+/* Scrollbars — 只作用于可滚动容器、常显细条:
+   全部隐藏会让用户不知道「下面还有内容」;全局 *:hover 又会在每次鼠标移动时
+   触发全量样式重算。 */
+.scroll-area {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.scroll-area::-webkit-scrollbar { width: 4px; height: 4px; }
+.scroll-area::-webkit-scrollbar-track { background: transparent; }
+.scroll-area::-webkit-scrollbar-thumb { background-color: var(--border); }
+.scroll-area:hover::-webkit-scrollbar-thumb { background-color: var(--muted-foreground); }
 
 /* Progress pulse at leading edge */
 @keyframes ink-pulse {
@@ -110,15 +138,8 @@ body {
 
 /* Stage active ring */
 @keyframes stage-breathe {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(181, 52, 42, 0); }
-  50% { box-shadow: 0 0 0 3px rgba(181, 52, 42, 0.25); }
-}
-.dark .stage-breathe {
-  animation-name: stage-breathe-dark;
-}
-@keyframes stage-breathe-dark {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(194, 69, 47, 0); }
-  50% { box-shadow: 0 0 0 3px rgba(194, 69, 47, 0.3); }
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--primary) 0%, transparent); }
+  50% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 25%, transparent); }
 }
 .stage-breathe { animation: stage-breathe 1.8s cubic-bezier(0.2, 0, 0, 1) infinite; }
 
@@ -135,10 +156,7 @@ body {
 
 /* Composing room background */
 .composing-bg {
-  background-color: #F2EEE4;
-}
-.dark .composing-bg {
-  background-color: #14120F;
+  background-color: color-mix(in srgb, var(--background) 94%, var(--foreground));
 }
 
 /* 排字记录 / 输入框要能选中复制(应用其余部分保持 select-none) */

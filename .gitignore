@@ -54,3 +54,6 @@ dist_release/
 
 # 本地计划/路线图(Agent 工作文件,只留本地,不进远程仓库)
 .hermes/
+
+# 前端冒烟测试输出
+desktop/.smoke/

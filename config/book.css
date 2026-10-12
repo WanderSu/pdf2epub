@@ -481,6 +481,15 @@ li p {
   text-indent: 0;
 }
 
+/* 表格单元格与图注里的段落同样不缩进:Pandoc 从 Markdown 表格生成的多段内容
+   会继承正文的 2em 段首缩进,看起来像「表格里每段都空两格」。 */
+td p,
+th p,
+figcaption p,
+dd p {
+  text-indent: 0;
+}
+
 
 /* 水平线保持极轻，作为章节内部的分隔，而不是网页装饰。 */
 hr {
