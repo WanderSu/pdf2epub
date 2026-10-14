@@ -940,6 +940,42 @@ fn merge_apikey(existing: &str, service: &str, token: &str) -> Result<String, St
     serde_json::to_string_pretty(&serde_json::Value::Object(obj)).map_err(|e| e.to_string())
 }
 
+/// 收紧凭证文件权限:仅当前用户可读写。
+///
+/// 与 Python 侧 `paths.tighten_api_key_permissions` 语义一致:
+/// Windows 收敛 ACL(去掉继承、只给当前用户 R/W),其他平台 chmod 600。
+/// 失败一律忽略——它属于加固,不该阻挡凭证保存成功。
+#[cfg(windows)]
+fn harden_apikey_permissions(target: &std::path::Path) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let user = std::env::var("USERNAME").unwrap_or_default().trim().to_string();
+    if user.is_empty() {
+        return;
+    }
+    let domain = std::env::var("USERDOMAIN").unwrap_or_default().trim().to_string();
+    let principal = if domain.is_empty() {
+        user
+    } else {
+        format!("{domain}\\{user}")
+    };
+    let _ = std::process::Command::new("icacls")
+        .arg(target.to_string_lossy().to_string())
+        .args(["/inheritance:r", "/grant:r", &format!("{principal}:(R,W)")])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+}
+
+#[cfg(not(windows))]
+fn harden_apikey_permissions(target: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(md) = std::fs::metadata(target) {
+        let mut p = md.permissions();
+        p.set_mode(0o600);
+        let _ = std::fs::set_permissions(target, p);
+    }
+}
+
 /// 保存/清除凭证(设置页):写入 apikey.json 并返回实际写入路径。
 /// 空 token = 删除该键;凭证值不回显、不写日志。
 #[tauri::command]
@@ -955,6 +991,7 @@ fn save_apikey(app: AppHandle, service: String, token: String) -> Result<String,
         let _ = std::fs::create_dir_all(parent);
     }
     std::fs::write(&target, merged).map_err(|e| format!("写入失败 {}: {e}", target.display()))?;
+    harden_apikey_permissions(&target);
     Ok(target.to_string_lossy().into_owned())
 }
 
@@ -1189,6 +1226,19 @@ mod tests {
     fn apikey_merge_rejects_broken_json() {
         assert!(merge_apikey("not json", "MinerU", "x").is_err());
         assert!(merge_apikey("[1,2]", "MinerU", "x").is_err());
+    }
+
+    #[test]
+    fn hardening_leaves_the_file_readable() {
+        // 加固不能把凭证文件锁成自己都读不了——这条是加固功能的验收底线。
+        let dir = std::env::temp_dir().join("pdf2epub-perms-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let f = dir.join("apikey.json");
+        std::fs::write(&f, r#"{"MinerU":"tok"}"#).unwrap();
+        harden_apikey_permissions(&f);
+        // 加固后仍能读回来(读不到说明 ACL/权限位收错了)
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), r#"{"MinerU":"tok"}"#);
+        let _ = std::fs::remove_file(&f);
     }
 
     // ---------- 引擎终态判定(skip ≠ completed,错误带码) ----------

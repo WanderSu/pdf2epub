@@ -5,8 +5,12 @@
 """
 from __future__ import annotations
 
+import os
+import stat
 import sys
 from pathlib import Path
+
+import pytest
 
 import paths
 from conftest import PROJECT_ROOT
@@ -80,3 +84,63 @@ def test_load_api_key_missing_returns_none(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(paths, "_roots", lambda: [tmp_path])
     assert paths.api_key_file() is None
     assert paths.load_api_key("MinerU") is None
+
+
+# ---------- 凭证文件权限加固 ----------
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows ACL 路径")
+def test_tighten_windows_removes_inherited_acls(tmp_path: Path) -> None:
+    """收紧后:继承 ACE 与 Users/Everyone 均不应留在 ACL 里。"""
+    key = tmp_path / "apikey.json"
+    key.write_text('{"MinerU": "t"}', encoding="utf-8")
+    assert paths.tighten_api_key_permissions(key) is True
+
+    out = paths.subprocess.run(
+        ["icacls", str(key)], capture_output=True, creationflags=0x08000000, check=False
+    ).stdout.decode("utf-8", "replace")
+    # 先去掉文件路径本身——它恰好含 Users 目录名,会干扰断言
+    acl = out.replace(str(key), "").lower()
+    assert os.environ.get("USERNAME", "").lower() in acl
+    assert "everyone" not in acl
+    assert "builtin\\users" not in acl
+    assert "authenticated users" not in acl
+    # 加固不影响本机读取
+    assert key.read_text(encoding="utf-8") == '{"MinerU": "t"}'
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX 权限位路径")
+def test_tighten_posix_chmods_600(tmp_path: Path) -> None:
+    key = tmp_path / "apikey.json"
+    key.write_text('{"MinerU": "t"}', encoding="utf-8")
+    key.chmod(0o644)
+    assert paths.tighten_api_key_permissions(key) is True
+    assert stat.S_IMODE(key.stat().st_mode) == 0o600
+
+
+def test_api_key_file_hardens_once(tmp_path: Path, monkeypatch) -> None:
+    """读取凭证时自动加固,且同一次运行内不重复调用。"""
+    calls: list[Path] = []
+    monkeypatch.setattr(paths, "tighten_api_key_permissions", lambda p: calls.append(p) or True)
+    monkeypatch.setattr(paths, "_HARDENED", set())
+    key = tmp_path / "apikey.json"
+    key.write_text('{"MinerU": "t"}', encoding="utf-8")
+    monkeypatch.setattr(paths, "_roots", lambda: [tmp_path])
+
+    assert paths.api_key_file() == key
+    assert paths.api_key_file() == key
+    assert calls == [key]
+
+
+def test_perms_can_be_disabled(tmp_path: Path, monkeypatch) -> None:
+    """PDF2EPUB_APIKEY_PERMS=0 时不再自动加固(多账号共享场景)。"""
+    monkeypatch.setenv("PDF2EPUB_APIKEY_PERMS", "0")
+    monkeypatch.setattr(paths, "_HARDENED", set())
+    key = tmp_path / "apikey.json"
+    key.write_text('{"MinerU": "t"}', encoding="utf-8")
+    monkeypatch.setattr(paths, "_roots", lambda: [tmp_path])
+    seen: list[Path] = []
+    monkeypatch.setattr(paths, "tighten_api_key_permissions", lambda p: seen.append(p) or True)
+
+    assert paths.api_key_file() == key
+    assert seen == []

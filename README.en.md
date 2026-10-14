@@ -224,6 +224,11 @@ for example:
 
 `apikey.json` is never committed to Git.
 
+Whenever a credential file is read or written, the app automatically narrows its permissions to the
+current user only — on Windows it strips inherited entries and keeps your account, on Linux / macOS
+it chmods to `600`. Nothing to configure by hand. If you genuinely need to share one credential file
+between several OS accounts, set `PDF2EPUB_APIKEY_PERMS=0` to opt out.
+
 ---
 
 ## Using the desktop app

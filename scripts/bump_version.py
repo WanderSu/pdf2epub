@@ -10,7 +10,7 @@
   - uv.lock                      (锁文件里的包版本;漏同步 → 下一次 `uv run` 改脏工作区)
   - desktop/src-tauri/tauri.conf.json (壳:安装包/窗口版本)
   - desktop/src-tauri/Cargo.toml (Rust crate 版本)
-  - desktop/src/App.tsx          (界面左下角显示的 APP_VERSION)
+  - desktop/src/types.ts         (界面左下角显示的 APP_VERSION;拆分前在 App.tsx)
   - README.md / README.en.md     (发布包文件名,避免下载引导指向旧版本)
 """
 from __future__ import annotations
@@ -40,7 +40,8 @@ TARGETS: tuple[tuple[str, str, str], ...] = (
     ("desktop/src-tauri/Cargo.toml",
      r'(?m)^version\s*=\s*"([^"]+)"',
      'version = "{v}"'),
-    ("desktop/src/App.tsx",
+    # 界面版本常量。原在 App.tsx,拆分后移到 types.ts(App.tsx 只做装配)。
+    ("desktop/src/types.ts",
      r'APP_VERSION\s*=\s*"v([^"]+)"',
      'APP_VERSION = "v{v}"'),
     # README 里的发布包文件名(下载引导),不同步会指向旧版本

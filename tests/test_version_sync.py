@@ -19,7 +19,7 @@ SAMPLE = {
     "uv.lock": '[[package]]\nname = "pdf2epub"\nversion = "0.2.3"\nsource = { editable = "." }\n',
     "desktop/src-tauri/tauri.conf.json": '{\n  "productName": "pdf2epub",\n  "version": "0.2.3",\n  "identifier": "com.x.y"\n}\n',
     "desktop/src-tauri/Cargo.toml": '[package]\nname = "desktop"\nversion = "0.2.3"\nedition = "2021"\n',
-    "desktop/src/App.tsx": 'const APP_VERSION = "v0.2.3";\n',
+    "desktop/src/types.ts": 'export const APP_VERSION = "v0.2.3";\n',
     "README.md": "下载 `pdf2epub-v0.2.3-win-x64.zip` 并解压。\n",
     "README.en.md": "Grab `pdf2epub-v0.2.3-win-x64.zip` from Releases.\n",
 }
@@ -57,8 +57,8 @@ def test_write_versions_syncs_all(tmp_path: Path) -> None:
     consistent, versions = check_versions(tmp_path)
     assert consistent is True
     assert set(versions.values()) == {"0.2.4"}
-    # App.tsx 保留 "v" 前缀
-    assert 'APP_VERSION = "v0.2.4"' in (tmp_path / "desktop/src/App.tsx").read_text(encoding="utf-8")
+    # types.ts 保留 "v" 前缀(拆分前在 App.tsx)
+    assert 'APP_VERSION = "v0.2.4"' in (tmp_path / "desktop/src/types.ts").read_text(encoding="utf-8")
 
 
 def test_write_versions_preserves_crlf(tmp_path: Path) -> None:
@@ -72,7 +72,7 @@ def test_write_versions_preserves_crlf(tmp_path: Path) -> None:
 
 def test_write_versions_reports_missing_file(tmp_path: Path) -> None:
     _make_tree(tmp_path)
-    (tmp_path / "desktop/src/App.tsx").unlink()
+    (tmp_path / "desktop/src/types.ts").unlink()
     with pytest.raises(FileNotFoundError):
         write_versions("0.2.4", tmp_path)
 
