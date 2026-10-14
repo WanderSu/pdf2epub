@@ -29,7 +29,7 @@ import zipfile
 import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, quote
 
 NS = {
     "opf": "http://www.idpf.org/2007/opf",
@@ -71,6 +71,8 @@ DATE_RE = re.compile(
 )
 #: 正文标题达到这个数量却没有 TOC 条目 → 报「目录为空」(单标题的书不报)
 TOC_EMPTY_MIN_HEADINGS = 5
+#: XHTML 里的 id 属性值(锚点校验):一次扫出整份文档的 id 集合,避免逐条锚点重读文档
+HTML_ID_RE = re.compile(r'(?<![\w:-])id="([^"]*)"')
 
 
 @dataclass(frozen=True)
@@ -309,20 +311,44 @@ def verify_epub(
         # 不拿它告警(有些书的章节本来就跨级,报警会把正常书也说成有问题)
         heading_levels: dict[str, int] = {}
 
-        for index, hf in enumerate(html_files):
-            hf_posix = str((opf_dir / hf).as_posix())
+        # 包内 XHTML 只解压一次:第 4 节(内容统计)与第 6 节(内部链接/锚点)都要用
+        # 全文,旧实现各读一遍 —— 大扫描书(单章 300KB+)上的 CRC + 解压是纯浪费。
+        doc_text: dict[str, str] = {}
+        doc_ids: dict[str, set[str]] = {}
+
+        def xhtml(hf: str) -> str | None:
+            """一份包内 XHTML 的解码文本(只解压一次;读不到返回 None)。"""
+            if hf in doc_text:
+                return doc_text[hf]
             try:
-                raw_doc = zf.read(hf_posix)
+                raw = zf.read(str((opf_dir / hf).as_posix()))
             except KeyError:
+                return None
+            text = raw.decode("utf-8", errors="replace")
+            doc_text[hf] = text
+            # 顺带索引 id,锚点校验不再整文重扫(旧实现每条锚点链接都重读一次目标文档)
+            doc_ids[hf] = set(HTML_ID_RE.findall(text))
+            return text
+
+        def target_has_anchor(file_part: str, anchor: str) -> bool:
+            """目标文档里是否存在该锚点(含 URL 编码与百分号解码两种写法)。"""
+            want = {anchor, unquote(anchor), quote(anchor, safe="")}
+            return bool(want & doc_ids.get(file_part, set()))
+
+        for index, hf in enumerate(html_files):
+            content = xhtml(hf)
+            if content is None:
                 continue   # manifest 缺失已在上面报过
+            hf_posix = str((opf_dir / hf).as_posix())
             # **良构性**:EPUB 的正文是 XHTML(XML)。正则看不出未闭合标签 / 裸 `&` /
             # `<br>` 这类写法,而阅读器会整章拒绝渲染 —— 一个标签就能毁掉整本书。
             try:
-                ET.fromstring(raw_doc)
+                ET.fromstring(zf.read(hf_posix))
             except ET.ParseError as e:
                 result.fail("xhtml_invalid",
                             f"{hf} 不是良构 XHTML(阅读器可能拒绝渲染): {e}")
-            content = raw_doc.decode("utf-8", errors="replace")
+            except KeyError:
+                continue
             hf_dir = opf_dir_parts + [p for p in Path(hf).parent.parts if p not in ("", ".")]
             # 标题页/目录/封面/标题章不是正文:它们天然短,参与空章节统计会一直误报;
             # 里面的链接是导航(long toc/landmarks),也不是「内容里的链接」。
@@ -495,10 +521,8 @@ def verify_epub(
         internal_breaks: list[str] = []
         missing_anchors: list[str] = []
         for hf in html_files:
-            hf_posix = str((opf_dir / hf).as_posix())
-            try:
-                content = zf.read(hf_posix).decode("utf-8", errors="replace")
-            except KeyError:
+            content = xhtml(hf)          # 已在第 4 节解压过,不重复读 zip
+            if content is None:
                 continue
             hf_dir = opf_dir_parts + [p for p in Path(hf).parent.parts if p not in ("", ".")]
             for m in re.finditer(r'href="([^"#]+(?:#[^"]*)?)"', content):
@@ -512,11 +536,8 @@ def verify_epub(
                     internal_breaks.append(f"{hf} → {href}")
                     continue
                 if anchor:
-                    target_path = str((opf_dir / file_part).as_posix())
-                    if target_path in names:
-                        target_content = zf.read(target_path).decode("utf-8", errors="replace")
-                        if f'id="{unquote(anchor)}"' not in target_content:
-                            missing_anchors.append(f"{hf} → #{anchor}")
+                    if in_zip(file_part, hf_dir) and not target_has_anchor(file_part, anchor):
+                        missing_anchors.append(f"{hf} → #{anchor}")
         if internal_breaks:
             result.fail("link_broken", f"内部链接断裂: {internal_breaks[:5]}")
         if missing_anchors:

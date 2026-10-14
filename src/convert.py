@@ -95,8 +95,8 @@ def convert_auto(
     else:
         hybrid_cfg = config.get("hybrid") or {}
         limit = resolve_ocr_run_limit(hybrid_cfg.get("max_ocr_runs"))
-        scanned = [i for i in range(detection.total_pages)
-                   if i not in set(detection.text_page_idxs)]
+        text_set = set(detection.text_page_idxs)
+        scanned = [i for i in range(detection.total_pages) if i not in text_set]
         runs = plan_ocr_runs(scanned, limit)
         events.emit("plan", backend=f"hybrid({ocr_name})", pages=detection.total_pages,
                     ocr_pages=len(scanned), ocr_runs=len(runs),
@@ -135,7 +135,10 @@ def _convert_hybrid(
     """
     # 页级路由与 PDFDetector 判定一致(有效字符 + 乱码率)
     text_idxs = list(detection.text_page_idxs)
-    scanned_idxs = [i for i in range(detection.total_pages) if i not in set(text_idxs)]
+    # 先做集合再过滤:直接 `i not in set(text_idxs)` 会在每个整数上重建一次集合
+    # (页数 × 页数 次插入),大书上比正确写法慢一个数量级
+    text_set = set(text_idxs)
+    scanned_idxs = [i for i in range(detection.total_pages) if i not in text_set]
     pymupdf_cfg = pymupdf_cfg or {}
 
     images_abs = work_dir / IMAGES_DIR

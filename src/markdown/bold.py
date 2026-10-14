@@ -82,6 +82,10 @@ def annotate_bold(
     if not blocks:
         return md_text
 
+    # 用 Aho-Corasick 一次扫描取代「每行 × 每个块」的子串查找:块数是 O(千)、
+    # 行数是 O(万),旧写法最坏要做上千万次 `in`。现在每行只扫一遍。
+    matcher = _block_matcher(blocks)
+
     lines = md_text.split("\n")
     out: list[str] = []
     for line in lines:
@@ -94,9 +98,43 @@ def annotate_bold(
         if not flat:
             out.append(line)
             continue
-        if any(b in flat for b in blocks):
+        if matcher(flat):
             out.append(f"**{s}**")
         else:
             out.append(line)
 
     return "\n".join(out)
+
+
+def _block_matcher(blocks: list[str]):
+    """返回 `flat -> bool`(flat 中是否含有任一强调块)。
+
+    优先用 pyahocorasick(单次线性扫描);未安装时退化为「按首字符分桶 + 只比较同桶
+    块」—— 仍是 O(行 × 桶内块),但桶内块通常只有个位数,避免全量两两比较。
+    """
+    try:
+        import ahocorasick  # type: ignore[import-not-found]
+
+        automaton = ahocorasick.Automaton()
+        for block in blocks:
+            automaton.add_word(block, block)
+        automaton.make_automaton()
+        return lambda text: next(automaton.iter(text), None) is not None
+    except ImportError:
+        pass
+
+    buckets: dict[str, list[str]] = {}
+    for block in blocks:
+        buckets.setdefault(block[0], []).append(block)
+
+    def contains(text: str) -> bool:
+        seen: set[str] = set()
+        for ch in text:
+            if ch not in buckets or ch in seen:
+                continue
+            seen.add(ch)
+            if any(block in text for block in buckets[ch]):
+                return True
+        return False
+
+    return contains
