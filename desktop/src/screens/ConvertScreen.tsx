@@ -285,9 +285,9 @@ export function ConvertScreen({
               </div>
             )}
 
-            <div className="grid grid-cols-[1fr_56px_64px_60px_96px_100px_72px] gap-3 py-1.5 border-b border-[var(--border)]">
+            <div className="queue-table grid grid-cols-[minmax(0,1fr)_min-content_minmax(56px,72px)_minmax(48px,64px)_minmax(0,96px)_minmax(0,108px)_72px] gap-3 py-1.5 border-b border-[var(--border)]">
               {["", t.colFile, t.colSize, t.colPages, t.colBackend, t.colStatus, t.colAction].map((h, i) => (
-                <span key={i} className={`text-[10px] text-[var(--muted-foreground)] ${lang === "zh" ? "cjk" : "font-mono tracking-[0.1em] uppercase"} ${i >= 2 && i <= 3 ? "text-right" : ""}`}>{h}</span>
+                <span key={i} className={`text-[10px] text-[var(--muted-foreground)] ${lang === "zh" ? "cjk" : "font-mono tracking-[0.1em] uppercase"} ${i >= 2 && i <= 3 ? "text-right" : ""} ${i === 1 ? "head-type" : ""} ${i === 4 ? "head-backend" : ""} ${i === 5 ? "whitespace-nowrap" : ""}`}>{h}</span>
               ))}
             </div>
           </div>
@@ -299,7 +299,7 @@ export function ConvertScreen({
               return (
                 <div key={file.id} className={`row-enter ${isSelected ? "bg-[var(--primary)]/4" : ""}`} style={{ animationDelay: `${Math.min(fi, 8) * 24}ms` }}>
                   <div
-                    className="grid grid-cols-[1fr_56px_64px_60px_96px_100px_72px] gap-3 py-2 items-center hover:bg-[var(--secondary)] transition-colors cursor-pointer border-b border-[var(--border)]"
+                    className="queue-table grid grid-cols-[minmax(0,1fr)_min-content_minmax(56px,72px)_minmax(48px,64px)_minmax(0,96px)_minmax(0,108px)_72px] gap-3 py-2 items-center hover:bg-[var(--secondary)] transition-colors cursor-pointer border-b border-[var(--border)]"
                     onClick={() => toggleRow(file.id)}
                   >
                     <div className="flex items-center gap-2 min-w-0">
@@ -320,13 +320,13 @@ export function ConvertScreen({
                           <path d="M1 1 L5 3 L1 5" stroke="currentColor" strokeWidth="1" />
                         </svg>
                       </button>
-                      <span className="font-mono text-[11px] text-[var(--foreground)] truncate">{file.name}</span>
+                      <span className="font-mono text-[11px] text-[var(--foreground)] truncate min-w-0 flex-1">{file.name}</span>
                     </div>
-                    <TypeBadge type={file.type} />
+                    <span className="col-type inline-flex"><TypeBadge type={file.type} /></span>
                     <span className="font-mono text-[10px] text-[var(--muted-foreground)] tabular-nums text-right">{file.size}</span>
                     <span className="font-mono text-[10px] text-[var(--muted-foreground)] tabular-nums text-right">{file.pages || "—"}</span>
-                    <BackendBadge backend={file.backend} />
-                    <StatusChip status={file.status} retrying={!!file.retrying} />
+                    <span className="col-backend inline-flex"><BackendBadge backend={file.backend} /></span>
+                    <span className="whitespace-nowrap"><StatusChip status={file.status} retrying={!!file.retrying} /></span>
                     <div className="flex justify-end">
                       {(file.status === "pending" || file.status === "converting") && (
                         <button onClick={e => { e.stopPropagation(); onCancel(file.id); }} className="font-mono text-[10px] text-[var(--muted-foreground)] hover:text-[var(--danger)] transition-colors" aria-label={lang === "zh" ? "取消" : "Cancel"}>✕</button>

@@ -170,3 +170,16 @@ input, textarea, pre { user-select: text; }
     transition-duration: 0ms !important;
   }
 }
+
+/* 队列表格断点:窄屏折叠次要列
+ *  < 900px: 隐藏 backend 列(状态列移到原 backend 位置)
+ *  < 720px: 再隐藏 type 列
+ *  用 Tailwind 自定义 container 标记避免与其它响应式混淆 */
+@media (max-width: 900px) {
+  .queue-table .col-backend,
+  .queue-table .head-backend { display: none; }
+}
+@media (max-width: 720px) {
+  .queue-table .col-type,
+  .queue-table .head-type { display: none; }
+}
