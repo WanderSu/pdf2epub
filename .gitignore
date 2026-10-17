@@ -57,3 +57,7 @@ dist_release/
 
 # 前端冒烟测试输出
 desktop/.smoke/
+
+# 前端单测缓存(Vitest / Vite 依赖预打包)
+desktop/node_modules/.vite-test/
+desktop/coverage/
