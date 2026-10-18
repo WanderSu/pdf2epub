@@ -35,7 +35,9 @@ export function TypeBadge({ type }: { type?: FileType }) {
   return <span className={`font-mono text-[10px] leading-none px-1.5 py-0.5 border shrink-0 ${s[type]}`}>{type}</span>;
 }
 
-export const STATUS_STYLE: Record<FileStatus, string> = {
+// 只在本文件内使用,不导出 —— 导出非组件会让 react-refresh 提示
+// (「这个文件不纯,改了就整页重载」),而这些样式表没有跨模块复用价值。
+const STATUS_STYLE: Record<FileStatus, string> = {
   pending: "text-[var(--muted-foreground)] border-[var(--border)]",
   converting: "text-[var(--primary)] border-[var(--primary)]",
   done: "text-[var(--ok)] border-[var(--ok)]",
@@ -74,7 +76,7 @@ export function ErrorLine({ kind, message, lang }: { kind: ErrorKind; message: s
   );
 }
 
-export const BACKEND_STYLE: Record<Backend, string> = {
+const BACKEND_STYLE: Record<Backend, string> = {
   Local: "border-[var(--border)] text-[var(--muted-foreground)]",
   MinerU: "border-[var(--info)] text-[var(--info)]",
   PaddleOCR: "border-[var(--paddle)] text-[var(--paddle)]",

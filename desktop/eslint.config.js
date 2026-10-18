@@ -44,6 +44,8 @@ export default [
         Blob: "readonly",
         fetch: "readonly",
         localStorage: "readonly",
+        sessionStorage: "readonly",
+        Storage: "readonly",
         performance: "readonly",
       },
     },
