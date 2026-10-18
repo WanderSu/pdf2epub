@@ -287,7 +287,7 @@ export function ConvertScreen({
 
             <div className="queue-table grid grid-cols-[minmax(0,1fr)_min-content_minmax(56px,72px)_minmax(48px,64px)_minmax(0,96px)_minmax(0,108px)_72px] gap-3 py-1.5 border-b border-[var(--border)]">
               {["", t.colFile, t.colSize, t.colPages, t.colBackend, t.colStatus, t.colAction].map((h, i) => (
-                <span key={i} className={`text-[10px] text-[var(--muted-foreground)] ${lang === "zh" ? "cjk" : "font-mono tracking-[0.1em] uppercase"} ${i >= 2 && i <= 3 ? "text-right" : ""} ${i === 1 ? "head-type" : ""} ${i === 4 ? "head-backend" : ""} ${i === 5 ? "whitespace-nowrap" : ""}`}>{h}</span>
+                <span key={i} className={`text-[10px] text-[var(--muted-foreground)] ${lang === "zh" ? "cjk" : "font-mono tracking-[0.1em] uppercase"} ${i >= 2 && i <= 3 ? "text-right" : ""} ${i === 1 ? "head-type whitespace-nowrap" : ""} ${i === 4 ? "head-backend" : ""} ${i === 5 ? "whitespace-nowrap" : ""}`}>{h}</span>
               ))}
             </div>
           </div>

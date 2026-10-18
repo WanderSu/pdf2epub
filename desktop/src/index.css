@@ -174,12 +174,21 @@ input, textarea, pre { user-select: text; }
 /* 队列表格断点:窄屏折叠次要列
  *  < 900px: 隐藏 backend 列(状态列移到原 backend 位置)
  *  < 720px: 再隐藏 type 列
- *  用 Tailwind 自定义 container 标记避免与其它响应式混淆 */
+ *  注意:display:none 只藏单元格不藏轨道,后续单元格会整体左移一条轨道、
+ *  落进为别的列定义的宽度里(实测 780px 时类型列被挤到 10px 竖排)。
+ *  所以每个断点必须连 grid-template-columns 一起收掉。
+ *  .queue-table.grid(0,2,0)压过 Tailwind 的 grid-cols-[...](0,1,0),不靠顺序。 */
 @media (max-width: 900px) {
   .queue-table .col-backend,
   .queue-table .head-backend { display: none; }
+  .queue-table.grid {
+    grid-template-columns: minmax(0,1fr) min-content minmax(56px,72px) minmax(48px,64px) minmax(0,108px) 72px;
+  }
 }
 @media (max-width: 720px) {
   .queue-table .col-type,
   .queue-table .head-type { display: none; }
+  .queue-table.grid {
+    grid-template-columns: minmax(0,1fr) minmax(56px,72px) minmax(48px,64px) minmax(0,108px) 72px;
+  }
 }

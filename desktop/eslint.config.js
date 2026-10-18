@@ -81,6 +81,8 @@ export default [
         beforeEach: "readonly",
         afterEach: "readonly",
         vi: "readonly",
+        // 测试里读 fixture 用(node 内建,vitest 运行时提供)
+        process: "readonly",
       },
     },
   },
