@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { T, CLEAN_GROUPS, type Lang } from "../i18n";
-import { Rule, Switch, Segment, RadioRow, ChapterHead } from "../primitives";
+import { Rule, Switch, Segment, RadioRow, ChapterHead, ToggleSwitch } from "../primitives";
 import {
   CLEAN_KEYS, type BackendPref, type CleanKey, type CleanOpts, type EnvState,
 } from "../types";
@@ -40,34 +40,6 @@ function FieldRow({ lang, label, children }: { lang: Lang; label: string; childr
     <div className="flex items-center gap-4 py-2 border-b border-[var(--border)]">
       <span className={`text-[13px] text-[var(--muted-foreground)] w-40 shrink-0 ${lang === "zh" ? "cjk" : ""}`}>{label}</span>
       {children}
-    </div>
-  );
-}
-
-/** 校勘分组主开关:三态(全开 / 部分两色 / 全关) */
-function GroupSwitch({ keys, cleanOpts, onToggle, lang }: {
-  keys: CleanKey[]; cleanOpts: CleanOpts; onToggle: (on: boolean) => void; lang: Lang;
-}) {
-  const on = keys.filter(k => cleanOpts[k]).length;
-  const allOn = on === keys.length;
-  const someOn = on > 0 && on < keys.length;
-  return (
-    <div className="relative flex items-center gap-3 shrink-0">
-      <span className="font-mono text-[10px] text-[var(--muted-foreground)] tabular-nums">{on}/{keys.length}</span>
-      <button
-        role="switch"
-        aria-checked={allOn}
-        aria-label={lang === "zh" ? "切换分组" : "Toggle group"}
-        onClick={() => onToggle(!allOn)}
-        className={`relative w-[40px] h-[22px] border transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--ring)] focus:ring-offset-2 focus:ring-offset-[var(--background)]
-          ${allOn || someOn ? "border-[var(--primary)]" : "border-[var(--foreground)]"}`}
-        style={someOn ? { background: `linear-gradient(to right, var(--primary) ${(on / keys.length) * 100}%, var(--muted) ${(on / keys.length) * 100}%)` } : {}}
-      >
-        {!someOn && <span className={`absolute inset-0 ${allOn ? "bg-[var(--primary)]" : "bg-[var(--card)]"}`} />}
-        {/* 部分开启时滑块停中间:停在最左看起来像「关」,而轨道一半有色,语义打架 */}
-        <span className={`absolute top-[2px] w-4 h-4 transition-transform z-10
-          ${allOn ? "translate-x-[20px] bg-white" : someOn ? "translate-x-[11px] bg-white" : "translate-x-[2px] border border-[var(--foreground)] bg-[var(--card)]"}`} />
-      </button>
     </div>
   );
 }
@@ -359,33 +331,30 @@ export function SettingsScreen({
         <SectionCard lang={lang} letter="C" title={t.sections[2]}
           summary={`${CLEAN_KEYS.filter(k => cleanOpts[k]).length}/${CLEAN_KEYS.length} ON`}>
           {groups.map((group, gi) => {
-            const keys = group.items.map(it => it.key as CleanKey);
+            const onInGroup = group.items.filter(it => cleanOpts[it.key as CleanKey]).length;
             return (
               <div key={gi} className="mb-4">
+                {/* 分组标题只做分区说明:批量开合交给每一项自己的开关(九项各自独立决策,
+                    一个总开关很容易把用户刚调好的项全部冲掉) */}
                 <div className="flex items-center gap-4 py-1.5 border-b border-[var(--border)]">
                   <span className={`text-[12px] text-[var(--muted-foreground)] flex-1 ${lang === "zh" ? "cjk font-medium" : "font-mono tracking-[0.08em]"}`}>{group.name}</span>
-                  <GroupSwitch
-                    keys={keys}
-                    lang={lang}
-                    cleanOpts={cleanOpts}
-                    onToggle={on => {
-                      const next = { ...cleanOpts };
-                      for (const k of keys) next[k] = on;
-                      setCleanOpts(next);
-                    }}
-                  />
+                  <span className="font-mono text-[10px] text-[var(--muted-foreground)] tabular-nums">
+                    {onInGroup}/{group.items.length}
+                  </span>
                 </div>
                 {group.items.map(item => {
                   const key = item.key as CleanKey;
                   const on = cleanOpts[key];
                   const toggle = () => setCleanOpts({ ...cleanOpts, [key]: !on });
+                  // 行只响应鼠标;键盘入口是行内那个开关本身 —— 否则 Tab 会停在
+                  // 一个不可见的 div 上,空格同时触发行与按钮,切两次等于没切。
                   return (
                     <div key={item.key} title={item.key}
-                      className="flex items-center h-11 gap-4 border-b border-[var(--border)] hover:bg-[var(--secondary)] transition-colors cursor-pointer"
+                      className="group flex items-center h-11 gap-4 border-b border-[var(--border)] hover:bg-[var(--secondary)] transition-colors cursor-pointer"
                       onClick={toggle}>
-                      <span className="font-mono text-[13px] text-[var(--muted-foreground)] w-5 shrink-0 text-center">{item.glyph}</span>
+                      <span className={`font-mono text-[13px] w-5 shrink-0 text-center transition-colors ${on ? "text-[var(--primary)]" : "text-[var(--muted-foreground)]"}`}>{item.glyph}</span>
                       <div className="flex-1 min-w-0">
-                        <div className={`text-[13px] text-[var(--foreground)] ${lang === "zh" ? "cjk" : ""}`}>
+                        <div className={`text-[13px] ${on ? "text-[var(--foreground)]" : "text-[var(--muted-foreground)]"} transition-colors ${lang === "zh" ? "cjk" : ""}`}>
                           {item.label}
                           {item.advanced && (
                             <span className="ml-2 font-mono text-[10px] tracking-[0.08em] border border-[var(--muted-foreground)] text-[var(--muted-foreground)] px-1">ADVANCED</span>
@@ -393,19 +362,7 @@ export function SettingsScreen({
                         </div>
                         <div className={`text-[12px] text-[var(--muted-foreground)] ${lang === "zh" ? "cjk" : "font-mono"}`}>{item.desc}</div>
                       </div>
-                      <span className={`font-mono text-[10px] shrink-0 ${on ? "text-[var(--primary)]" : "text-[var(--muted-foreground)]"}`}>
-                        {on ? "ON" : "OFF"}
-                      </span>
-                      <button
-                        role="switch"
-                        aria-checked={on}
-                        aria-label={item.label}
-                        onClick={e => { e.stopPropagation(); toggle(); }}
-                        className={`relative shrink-0 w-[40px] h-[22px] border transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--ring)] focus:ring-offset-2 focus:ring-offset-[var(--background)]
-                          ${on ? "bg-[var(--primary)] border-[var(--primary)]" : "bg-[var(--card)] border-[var(--foreground)]"}`}
-                      >
-                        <span className={`absolute top-[2px] w-4 h-4 transition-transform ${on ? "translate-x-[20px] bg-white" : "translate-x-[2px] border border-[var(--foreground)] bg-transparent"}`} />
-                      </button>
+                      <ToggleSwitch checked={on} onChange={toggle} label={item.label} />
                     </div>
                   );
                 })}

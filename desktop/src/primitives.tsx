@@ -190,9 +190,50 @@ export function Switch({ checked, onChange, label, description, disabled, lang }
           ${checked ? "bg-[var(--primary)] border-[var(--primary)]" : "bg-[var(--card)] border-[var(--foreground)]"}
           ${disabled ? "border-dashed" : ""}`}
       >
-        <span className={`absolute top-[2px] w-4 h-4 transition-transform duration-200 ${checked ? "translate-x-[20px] bg-white" : "translate-x-[2px] border border-[var(--foreground)] bg-transparent"}`} />
+        <span className={`absolute top-[2px] left-[2px] w-4 h-4 transition-[left,background-color,border-color] duration-200 ${checked ? "left-[20px] bg-white" : "border border-[var(--foreground)] bg-transparent"}`} />
       </button>
     </div>
+  );
+}
+
+/**
+ * 方角开关(只有轨道,不带行)。
+ *
+ * 与上面的 `Switch` 外观一致,但把「行的可点区域」交给调用方 —— 规范页整行点了
+ * 要切换,而 `<button>` 已能单独聚焦,若行容器再可聚焦,空格键会同时触发行与
+ * 按钮两个 onClick,等于切了两次(原地不动)。所以这里行只响应鼠标。
+ *
+ * 视觉:
+ *  - 关:纸色轨道 + 墨色细边,滑块为墨色描边空心方块(与「未落印」对应)
+ *  - 开:朱砂实心轨道,滑块为纸色实心方块
+ *  - 关态悬停:边框转墨色,提示「这里可以点」
+ *  - 焦点:外扩 2px 的朱砂环,键盘用户能看清落点
+ */
+export function ToggleSwitch({ checked, onChange, label, className = "" }: {
+  checked: boolean; onChange: (v: boolean) => void; label: string; className?: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      onClick={e => { e.stopPropagation(); onChange(!checked); }}
+      className={`group relative shrink-0 w-[40px] h-[22px] rounded-[2px] border transition-[background-color,border-color,box-shadow] duration-200
+        focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--background)]
+        ${checked
+          ? "bg-[var(--primary)] border-[var(--primary)] shadow-[inset_0_1px_0_rgba(255,255,255,0.18)]"
+          : "bg-[var(--card)] border-[var(--border)] group-hover:border-[var(--muted-foreground)]"}
+        ${className}`}
+    >
+      {/* left 显式定位:translate-x-* 依赖 abspos 静态位置,实测整体右移 20px(滑块悬出轨道) */}
+      <span
+        className={`absolute top-[2px] left-[2px] w-4 h-4 rounded-[1px] transition-[left,background-color,border-color] duration-200 ease-[cubic-bezier(0.2,0,0,1)]
+          ${checked
+            ? "left-[20px] bg-[var(--primary-foreground)] border border-transparent shadow-[0_1px_2px_rgba(0,0,0,0.18)]"
+            : "bg-transparent border border-[var(--muted-foreground)] group-hover:border-[var(--foreground)]"}`}
+      />
+    </button>
   );
 }
 
