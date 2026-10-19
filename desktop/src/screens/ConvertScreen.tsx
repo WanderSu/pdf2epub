@@ -7,8 +7,19 @@ import {
 } from "../primitives";
 import { KIND_TO_TYPE, backendFromPlan, fmtMonthDay } from "../format";
 import type {
-  ConsoleLine, FileType, PreflightFile, PreflightReport, QueueFile, RecentEntry,
+  ConsoleLine, FileStatus, FileType, PreflightFile, PreflightReport, QueueFile, RecentEntry,
 } from "../types";
+
+/** 进度线颜色:三个终态互不冒充(失败红 / 完成绿 / 跳过蓝),在跑是朱砂 */
+function progressColor(status: FileStatus): string {
+  switch (status) {
+    case "failed": return "bg-[var(--danger)]";
+    case "cancelled": return "bg-[var(--warn)]";
+    case "done": return "bg-[var(--ok)]";
+    case "skipped": return "bg-[var(--info)]";
+    default: return "bg-[var(--primary)]";
+  }
+}
 
 // ── CONVERT SCREEN ────────────────────────────────────────────────────────────
 
@@ -297,9 +308,9 @@ export function ConvertScreen({
               const isExpanded = expandedRows.has(file.id);
               const isSelected = selected.has(file.id);
               return (
-                <div key={file.id} className={`row-enter ${isSelected ? "bg-[var(--primary)]/4" : ""}`} style={{ animationDelay: `${Math.min(fi, 8) * 24}ms` }}>
+                <div key={file.id} className={`row-enter relative ${isSelected ? "bg-[var(--primary)]/4" : ""}`} style={{ animationDelay: `${Math.min(fi, 8) * 24}ms` }}>
                   <div
-                    className="queue-table grid grid-cols-[minmax(0,1fr)_min-content_minmax(56px,72px)_minmax(48px,64px)_minmax(0,96px)_minmax(0,108px)_72px] gap-3 py-2 items-center hover:bg-[var(--secondary)] transition-colors cursor-pointer border-b border-[var(--border)]"
+                    className="queue-table grid grid-cols-[minmax(0,1fr)_min-content_minmax(56px,72px)_minmax(48px,64px)_minmax(0,96px)_minmax(0,108px)_72px] gap-3 py-2 items-center hover:bg-[var(--secondary)] transition-colors cursor-pointer"
                     onClick={() => toggleRow(file.id)}
                   >
                     <div className="flex items-center gap-2 min-w-0">
@@ -341,15 +352,6 @@ export function ConvertScreen({
                   </div>
 
                   <div className={`border-b border-[var(--border)] overflow-hidden transition-all duration-[180ms] ${isExpanded ? "" : "py-1"}`}>
-                    <div className="relative h-px bg-[var(--border)] mx-0 my-1 overflow-visible">
-                      <div
-                        className={`absolute inset-y-0 left-0 transition-all duration-700 ${file.status === "failed" ? "bg-[var(--danger)]" : file.status === "cancelled" ? "bg-[var(--warn)]" : file.status === "done" ? "bg-[var(--ok)]" : file.status === "skipped" ? "bg-[var(--info)]" : "bg-[var(--primary)]"}`}
-                        style={{ width: `${file.progress}%`, height: "1px" }}
-                      />
-                      {file.status === "converting" && (
-                        <div className="absolute top-1/2 -translate-y-1/2 w-1 h-1 bg-[var(--primary)] ink-pulse" style={{ left: `calc(${file.progress}% - 2px)` }} />
-                      )}
-                    </div>
                     <div className="flex items-center gap-4 py-1.5">
                       <StageStepper stages={file.stages} signatures={file.signatures} lang={lang} />
                       <div className="flex-1 min-w-0">
@@ -372,6 +374,22 @@ export function ConvertScreen({
                       </div>
                     </div>
                     {file.warning && isExpanded && <WarningStrip file={file} lang={lang} onUseOcr={onUseOcr} />}
+                  </div>
+
+                  {/* 常驻进度线:挂在行容器底部(不是展开区里),收起时也能看见进度。
+                      1px 是发行物的分界线,2px 才在纸色底上看得出来;失败/完成/跳过各自
+                      用语义色,只有「转换中」才有流动的墨点。 */}
+                  <div className="absolute left-0 right-0 bottom-0 h-[2px] pointer-events-none" aria-hidden>
+                    <div
+                      className={`h-full transition-[width,background-color] duration-700 ease-[cubic-bezier(0.2,0,0,1)] ${progressColor(file.status)}`}
+                      style={{ width: `${file.progress}%` }}
+                    />
+                    {file.status === "converting" && file.progress < 100 && (
+                      <div
+                        className="absolute -top-px bottom-0 w-[2px] bg-[var(--primary)] ink-pulse"
+                        style={{ left: `calc(${file.progress}% - 2px)` }}
+                      />
+                    )}
                   </div>
                 </div>
               );

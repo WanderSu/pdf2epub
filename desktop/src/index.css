@@ -171,6 +171,37 @@ input, textarea, pre { user-select: text; }
   }
 }
 
+/* ── 交互反馈基线 ────────────────────────────────────────────────────────────
+ * 全屏 38 个 <button>,此前只有 1 个写了按下的视觉、2 个写了键盘焦点环,
+ * 而 9 处 focus:outline-none 把浏览器默认焦点环也去掉了 —— 键盘用户等于
+ * 摸黑。与其逐处补类名(改一处漏一处),不如在这里用 @layer base 定一套
+ * 基线:任何按钮默认就有「能聚焦 / 按下有反馈」,个别组件再自己覆盖。
+ *
+ * 用 :not(:disabled) 而不是 :enabled —— 后者会把 role="switch" 之类
+ * 非原生按钮也算进来,行为一致但可读性差。
+ */
+@layer base {
+  button:not(:disabled) {
+    /* 键盘焦点:朱砂 1px 环 + 1px 纸色间隙,在纸色/朱砂底上都看得见。
+       outline 不改布局,不会让 40px 的开关抖一下。 */
+    &:focus-visible {
+      outline: 2px solid var(--ring);
+      outline-offset: 1px;
+    }
+    /* 按下:整体压深 4%,是「落印」而不是缩放 —— 这个界面的隐喻里没有弹跳 */
+    &:active:not([aria-disabled="true"]) {
+      transform: translateY(0.5px);
+    }
+  }
+  /* 纯文字按钮(无边框)按下去时给一点点底色,免得只有 0.5px 位移看不出来。
+     带 border 的按钮不动背景,否则会把它们的视觉重量改掉。 */
+  button.border:active { filter: brightness(0.96); }
+  /* 减少动效的用户:位移也去掉 */
+  @media (prefers-reduced-motion: reduce) {
+    button:not(:disabled):active { transform: none; }
+  }
+}
+
 /* 队列表格断点:窄屏折叠次要列
  *  < 900px: 隐藏 backend 列(状态列移到原 backend 位置)
  *  < 720px: 再隐藏 type 列

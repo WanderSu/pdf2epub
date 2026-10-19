@@ -220,7 +220,7 @@ export function ToggleSwitch({ checked, onChange, label, className = "" }: {
       aria-label={label}
       onClick={e => { e.stopPropagation(); onChange(!checked); }}
       className={`group relative shrink-0 w-[40px] h-[22px] rounded-[2px] border transition-[background-color,border-color,box-shadow] duration-200
-        focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--background)]
+        focus:outline-none focus-visible:outline-none
         ${checked
           ? "bg-[var(--primary)] border-[var(--primary)] shadow-[inset_0_1px_0_rgba(255,255,255,0.18)]"
           : "bg-[var(--card)] border-[var(--border)] group-hover:border-[var(--muted-foreground)]"}
