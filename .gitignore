@@ -14,8 +14,9 @@ logs/
 # 中间工作目录(Markdown + images)
 work/
 
-# 批处理测试输入目录(含大文件与损坏样本)
-books/
+# 测试样本已统一收在 samples/ 并入库(tests/test_epub_realbook.py 依赖它)。
+# 早先的 books/ 与此处 samples/pdfs/ 内容重复,且被这里忽略 —— 干净 clone 的
+# 机器上真实书验收测试会被静默 skip。不要再加类似的大目录忽略规则。
 
 # 测试产物(测试代码入库,tests/ 下的中间产物不入库)
 tests/__pycache__/

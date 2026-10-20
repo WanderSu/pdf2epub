@@ -292,7 +292,7 @@ The PDF type is detected automatically.
 ### Batch conversion
 
 ```bash
-.venv/Scripts/ebook-converter.exe books/ -o output
+.venv/Scripts/ebook-converter.exe samples/pdfs/ -o output
 ```
 
 ### Convert Markdown

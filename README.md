@@ -301,7 +301,7 @@ uv sync
 ### 批量转换
 
 ```bash
-.venv/Scripts/ebook-converter.exe books/ -o output
+.venv/Scripts/ebook-converter.exe samples/pdfs/ -o output
 ```
 
 ### 转换 Markdown

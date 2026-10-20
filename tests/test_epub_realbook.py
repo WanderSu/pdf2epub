@@ -11,9 +11,12 @@
   - 校验零失败零警告。
 
 **只跑本地后端**(`--backend pymupdf`):扫描书在这里会被判成扫描版而调云端 OCR ——
-慢、耗额度、无凭证的机器直接红。云端路径(OCR / hybrid)的验收见 `books/` 下的
-真实样本手动跑法(docs/ 与 README 有说明),自动化测试不碰云端。
-样本文件缺失时 skip,不 fail(仓库不强求携带大样本)。
+慢、耗额度、无凭证的机器直接红。云端路径(OCR / hybrid)的验收见 `samples/pdfs/` 下
+扫描/混合样本的手动跑法(docs/ 与 README 有说明),自动化测试不碰云端。
+
+样本放在 `samples/pdfs/`(**已入库**)。早先指向 `books/`,而 `books/` 被 .gitignore
+排除 —— 干净 clone 的机器上这 4 个测试会被 skip 掉且没有任何提示,等于验收形同虚设。
+样本仍缺失时 skip,不 fail。
 """
 from __future__ import annotations
 
@@ -28,10 +31,11 @@ from epub.content import verify_content
 from epub.verify import verify_epub
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+SAMPLES = PROJECT_ROOT / "samples" / "pdfs"
 #: 真实样本:纯文字 PDF(仓库自带,1.2MB)
-TEXT_BOOK = PROJECT_ROOT / "books" / "中文电子书测试.pdf"
+TEXT_BOOK = SAMPLES / "中文电子书测试.pdf"
 #: 真实样本:双栏排版 PDF
-TWO_COLUMN_BOOK = PROJECT_ROOT / "books" / "双栏测试.pdf"
+TWO_COLUMN_BOOK = SAMPLES / "双栏测试.pdf"
 
 CFG = {"pymupdf": {"write_images": True, "bold_fonts": []}}
 
