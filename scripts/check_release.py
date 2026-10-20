@@ -95,8 +95,29 @@ def check(target: Path, *, keep_tmp: bool = False) -> int:
         failures.append(msg)
         print(f"  [FAIL] {msg}")
 
+    # 临时目录落在系统 TMP(Windows 下是 %LOCALAPPDATA%\Temp),**不要**改成
+    # 仓库内的相对路径或 "/tmp" —— 后者的落点取决于 shell 挂载,可能跑到项目
+    # 外面去。用完即删;只有 --keep-tmp、自检失败或未预期异常时才保留。
     tmp = Path(tempfile.mkdtemp(prefix="pdf2epub-release-check-"))
     print(f"自检临时目录: {tmp}")
+    keep = True  # 默认留现场;正常跑完才可能改成 False
+    try:
+        rc = _check(target, tmp, ok, fail, failures)
+        keep = keep_tmp or bool(failures)
+    except BaseException as exc:
+        # 崩了要留现场,并说清楚留在哪 —— 否则临时目录会静默堆在 %TEMP% 里
+        print(f"\n自检中断({type(exc).__name__}), 保留临时目录以便排查: {tmp}")
+        raise
+    else:
+        if keep:
+            print("\n保留临时目录以便排查:", tmp)
+    finally:
+        if not keep:
+            shutil.rmtree(tmp, ignore_errors=True)
+    return rc
+
+
+def _check(target: Path, tmp: Path, ok, fail, failures: list[str]) -> int:
 
     # ---- 1. 解压与必备文件 ----
     print("\n[1] 包内容")
@@ -173,12 +194,9 @@ def check(target: Path, *, keep_tmp: bool = False) -> int:
 
     print(f"\n=== 发布包自检: {len(failures)} 失败 ===")
     if failures:
-        print("保留临时目录以便排查:", tmp)
         for f in failures:
             print("  ✗", f)
         return 1
-    if not keep_tmp:
-        shutil.rmtree(tmp, ignore_errors=True)
     print("发布包可用 ✓")
     return 0
 

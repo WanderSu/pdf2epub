@@ -22,6 +22,10 @@ work/
 tests/__pycache__/
 tests/_artifacts/
 
+# 需要临时目录时只许落在仓库内这几处(或系统 %TEMP%),别再往仓库外建目录:
+# 字面量 /tmp 的落点取决于调用方认不认 MSYS 映射,不可控。详见 docs/design.md §9.5。
+/.smoke/
+
 # 本地 API 凭证(绝对不入库)
 apikey.json
 

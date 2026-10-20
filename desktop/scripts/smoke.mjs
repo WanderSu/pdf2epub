@@ -1,12 +1,26 @@
 // 用 CDP 直接驱动本机 Chrome,零依赖验证前端在真实 CSP 下能否正常渲染。
 // 不是测试框架,是一次性体检:检查控制台错误、CSP 拦截、关键文本是否渲染、字体是否本地生效。
 import { spawn } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const CHROME = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 const URL_TARGET = process.argv[2] || "http://127.0.0.1:4173/";
+// 截图落到 desktop/.smoke/(已 gitignore)。参数可以是文件名或绝对路径;
+// 文件名按本文件位置解析,不按 cwd —— 早先默认 "shot.png" 会写在启动目录里。
+const DESKTOP = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const SMOKE = join(DESKTOP, ".smoke");
+if (!existsSync(SMOKE)) mkdirSync(SMOKE, { recursive: true });
+function safeOut(arg, fallback) {
+  const raw = arg || fallback;
+  const p = /^([a-zA-Z]:[\\/]|[\\/])/.test(raw) ? resolve(raw) : resolve(SMOKE, raw);
+  if (p !== SMOKE && !p.startsWith(SMOKE + sep)) {
+    throw new Error(`拒绝写入 desktop/.smoke 之外的路径: ${p}`);
+  }
+  return p;
+}
 const PORT = 9222;
 const profile = mkdtempSync(join(tmpdir(), "cdp-"));
 
@@ -156,7 +170,7 @@ const evalJs = async (expr) => {
 };
 
 const shot = await send("Page.captureScreenshot", { format: "png" });
-writeFileSync(process.argv[3] || "shot.png", Buffer.from(shot.result.data, "base64"));
+writeFileSync(safeOut(process.argv[3], "shot.png"), Buffer.from(shot.result.data, "base64"));
 
 // 若指定了第二张截图名,则点导航切到下一屏再截(按 nav 文本找按钮)
 if (process.argv[4]) {
@@ -171,7 +185,8 @@ if (process.argv[4]) {
     `);
     await sleep(1200);
     const s2 = await send("Page.captureScreenshot", { format: "png" });
-    writeFileSync(process.argv[4].replace(/\.png$/, `-${label}.png`), Buffer.from(s2.result.data, "base64"));
+    const target2 = safeOut(process.argv[4], "shot.png");
+    writeFileSync(target2.replace(/\.png$/, `-${label}.png`), Buffer.from(s2.result.data, "base64"));
   }
 }
 

@@ -14,19 +14,39 @@
 //   screenshot-library-light.png   书目页 · 浅色
 //
 // 用法：先 `npx vite build && npx vite preview --port 4173`，再
-//   node scripts/shot-readme.mjs "http://[::1]:4173/" ../../docs 1280 900
+//   node scripts/shot-readme.mjs "http://[::1]:4173/"
 // 本机 vite preview 只侦听 [::1]，用 127.0.0.1 会连不上。
+//
+// 输出目录**不收位置参数**：恒定是仓库根的 docs/（按本文件位置推算）。
+// 早先默认值写作 "../../docs"，是按「从 desktop/ 启动」手算的相对路径，
+// 一旦在别处启动就会解析到仓库外，在 E:\Project\Python\ 下凭空建出 docs/。
+// 相对路径 + cwd 这种组合不要再回到这个文件里。
 import { spawn } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const CHROME = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 const URL_TARGET = process.argv[2] || "http://[::1]:4173/";
-const OUT = process.argv[3] || "../../docs";
-const W = Number(process.argv[4] || 1280);
-const H = Number(process.argv[5] || 900);
+const W = Number(process.argv[3] || 1280);
+const H = Number(process.argv[4] || 900);
 const PORT = 9231;
+
+/** 仓库根：本文件在 <root>/desktop/scripts/ 下 */
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+/** 任何产物只许落在这里，越界即报错（见 safeOut） */
+const OUT = join(ROOT, "docs");
+
+/** 把相对 OUT 的路径解析成绝对路径，并断言没跑出仓库 */
+function safeOut(name) {
+  const p = resolve(OUT, name);
+  if (p !== OUT && !p.startsWith(OUT + sep)) {
+    throw new Error(`拒绝写入仓库外路径: ${p}`);
+  }
+  return p;
+}
+
 if (!existsSync(OUT)) mkdirSync(OUT, { recursive: true });
 const profile = mkdtempSync(join(tmpdir(), "cdp-shot-"));
 
@@ -254,9 +274,10 @@ const state = await evalJs(`(() => {
 console.log("队列状态:", JSON.stringify(state));
 
 const shot = async (name) => {
+  const file = safeOut(name);
   const png = await send("Page.captureScreenshot", { format: "png" });
-  writeFileSync(join(OUT, name), Buffer.from(png.result.data, "base64"));
-  console.log("  写入", name);
+  writeFileSync(file, Buffer.from(png.result.data, "base64"));
+  console.log("  写入", file);
 };
 
 // 1. 转换页浅色

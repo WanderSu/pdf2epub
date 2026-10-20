@@ -1,13 +1,24 @@
 // 规范页开关的视觉验收:亮/暗两套主题 × 开/关 × 悬停/焦点,逐张截图。
 // 只看「有没有开关」不够 —— 关态边框、开态滑块、焦点环必须肉眼可见。
 import { spawn } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const CHROME = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 const URL_TARGET = process.argv[2] || "http://localhost:4173/";
-const OUT = process.argv[3] || ".smoke";
+// 产物落到 desktop/.smoke/(已 gitignore),按本文件位置推算,不看 cwd
+const DESKTOP = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const OUT = join(DESKTOP, ".smoke");
+function safeOut(name) {
+  const p = resolve(OUT, name);
+  if (p !== OUT && !p.startsWith(OUT + sep)) {
+    throw new Error(`拒绝写入预期目录之外的路径: ${p}`);
+  }
+  return p;
+}
+if (!existsSync(OUT)) mkdirSync(OUT, { recursive: true });
 const PORT = 9226;
 const profile = mkdtempSync(join(tmpdir(), "cdp5-"));
 
@@ -79,7 +90,7 @@ await sleep(900);
 
 const shot = async (name) => {
   const png = await send("Page.captureScreenshot", { format: "png" });
-  writeFileSync(join(OUT, name), Buffer.from(png.result.data, "base64"));
+  writeFileSync(safeOut(name), Buffer.from(png.result.data, "base64"));
 };
 
 // 滚到校勘流水线

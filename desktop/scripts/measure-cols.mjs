@@ -3,13 +3,24 @@
 // 把表头复制成 3 行数据行,填上不同状态的 chip,再在各宽度下量 getBoundingClientRect。
 // 样式、grid 模板、折叠规则全部走真实产物 CSS,量的就是用户实际看到的结果。
 import { spawn } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const CHROME = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 const URL_TARGET = process.argv[2] || "http://localhost:4173/";
-const OUT = process.argv[3] || ".smoke";
+// 产物落到 desktop/.smoke/(已 gitignore),按本文件位置推算,不看 cwd
+const DESKTOP = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const OUT = join(DESKTOP, ".smoke");
+function safeOut(name) {
+  const p = resolve(OUT, name);
+  if (p !== OUT && !p.startsWith(OUT + sep)) {
+    throw new Error(`拒绝写入预期目录之外的路径: ${p}`);
+  }
+  return p;
+}
+if (!existsSync(OUT)) mkdirSync(OUT, { recursive: true });
 const PORT = 9225;
 const profile = mkdtempSync(join(tmpdir(), "cdp4-"));
 
@@ -158,7 +169,7 @@ for (const w of widths) {
     };
   })()`);
   const png = await send("Page.captureScreenshot", { format: "png" });
-  writeFileSync(join(OUT, `narrow-${w}.png`), Buffer.from(png.result.data, "base64"));
+  writeFileSync(safeOut(`narrow-${w}.png`), Buffer.from(png.result.data, "base64"));
   results.push({ w, ...info });
 }
 
@@ -166,7 +177,7 @@ console.log("\n宽度 | 表格宽 | 可见列 | 表头各列宽 | 行各列宽 |
 for (const r of results) {
   console.log(`${String(r.w).padStart(4)} | ${String(r.tableW).padStart(5)} | ${r.visibleCols}/${r.totalCols} | ${JSON.stringify(r.headerW)} | ${JSON.stringify(r.rowW)} | ${r.overflow ? "是!" : "否"}`);
 }
-writeFileSync(join(OUT, "narrow-result.json"), JSON.stringify(results, null, 1));
+writeFileSync(safeOut("narrow-result.json"), JSON.stringify(results, null, 1));
 
 ws.close();
 chrome.kill();

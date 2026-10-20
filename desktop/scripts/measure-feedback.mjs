@@ -10,11 +10,22 @@
 import { spawn } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const CHROME = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 const URL_TARGET = process.argv[2] || "http://localhost:4173/";
-const OUT = process.argv[3] || ".smoke";
+// 产物落到 desktop/.smoke/(已 gitignore)。路径按本文件位置推算,不看 cwd ——
+// 早先写作 ".smoke",从仓库根启动就会在根下另建一个 .smoke。
+const DESKTOP = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const OUT = join(DESKTOP, ".smoke");
+function safeOut(name) {
+  const p = resolve(OUT, name);
+  if (p !== OUT && !p.startsWith(OUT + sep)) {
+    throw new Error(`拒绝写入预期目录之外的路径: ${p}`);
+  }
+  return p;
+}
 if (!existsSync(OUT)) mkdirSync(OUT, { recursive: true });
 const PORT = 9229;
 const profile = mkdtempSync(join(tmpdir(), "cdp5-"));
@@ -208,7 +219,7 @@ await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: box.x, y: box
 console.log("按下态:", JSON.stringify(pressed));
 
 const png = await send("Page.captureScreenshot", { format: "png", clip: { x: 0, y: 0, width: 1200, height: 620, scale: 1 } });
-writeFileSync(join(OUT, "feedback.png"), Buffer.from(png.result.data, "base64"));
+writeFileSync(safeOut("feedback.png"), Buffer.from(png.result.data, "base64"));
 
 // 断言
 const bad = [];
@@ -224,7 +235,7 @@ if (!focusRule) bad.push("缺少 button:not(:disabled):focus-visible 规则");
 if (pressed.transform === "none") bad.push("按下态没有位移反馈");
 
 console.log("\n" + (bad.length === 0 ? "全部通过" : "失败:\n - " + bad.join("\n - ")));
-writeFileSync(join(OUT, "feedback-result.json"), JSON.stringify({ geom, focusRule, pressed, bad }, null, 1));
+writeFileSync(safeOut("feedback-result.json"), JSON.stringify({ geom, focusRule, pressed, bad }, null, 1));
 
 ws.close();
 chrome.kill();
