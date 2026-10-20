@@ -59,9 +59,17 @@ Along the way it also deals with the usual PDF and OCR problems: page numbers, r
 | --- | --- |
 | ![convert, light theme](docs/screenshot-convert-light.png) | ![convert, dark theme](docs/screenshot-convert-dark.png) |
 
+Each file in the queue gets its own stage strip (detect → extract → clean → build → verify)
+and a persistent progress line (failed = red, done = green, skipped = blue, running = cinnabar),
+visible even when the row details are collapsed.
+
 ### Settings
 
 ![settings](docs/screenshot-settings-light.png)
+
+### Library
+
+![library](docs/screenshot-library-light.png)
 
 The desktop app uses a letterpress-inspired layout and splits the work into three workspaces:
 

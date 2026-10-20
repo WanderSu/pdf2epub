@@ -60,9 +60,16 @@ pdf2epub 是一个面向电子书阅读的 PDF → EPUB 转换工具。
 | --- | --- |
 | ![转换界面](docs/screenshot-convert-light.png) | ![转换界面](docs/screenshot-convert-dark.png) |
 
+队列里每个文件都有独立的工序条（制版 → 检字 → 校勘 → 付印 → 核验）和一条常驻进度线
+（失败红、完成绿、跳过蓝、进行中朱砂），收起详情也能看到进度。
+
 ### 设置
 
 ![设置界面](docs/screenshot-settings-light.png)
+
+### 书目
+
+![书目界面](docs/screenshot-library-light.png)
 
 桌面端采用「铅字工坊」的界面设计，将转换过程分成几个比较直观的步骤：
 
