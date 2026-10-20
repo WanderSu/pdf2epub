@@ -787,7 +787,9 @@ cd desktop && npm run build           # frontend type check and build
 
 Design notes and the reasoning behind some of the technical choices are in:
 
-[IDEA.md](IDEA.md) (Chinese)
+[docs/design.md](https://github.com/WanderSu/pdf2epub/blob/main/docs/design.md) (Chinese)
+
+> Uses an absolute URL rather than a relative path: the release archive ships only `README.md`, not `docs/`, so a relative link would be broken inside the download.
 
 ---
 

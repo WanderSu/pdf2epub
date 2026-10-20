@@ -814,7 +814,9 @@ PDF2EPUB_LIVE_OCR=1 uv run pytest tests/test_live_ocr_footnotes.py -q
 
 项目中的设计思路和一些技术取舍可以参考：
 
-[IDEA.md](IDEA.md)
+[docs/design.md](https://github.com/WanderSu/pdf2epub/blob/main/docs/design.md)
+
+> 用完整 URL 而非相对路径：发布包里只带 `README.md`，不带 `docs/`，相对链接在下载包的目录里是断的。
 
 ---
 

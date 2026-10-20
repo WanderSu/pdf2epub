@@ -2,7 +2,8 @@
 
 Windows 下的 PDF → EPUB 转换工具：把电子版 PDF、扫描版 PDF 与已 OCR 的 Markdown 统一转成高质量 EPUB。
 
-本文件只讲**架构与取舍**；安装、用法、配置项、已知限制见 [README.md](README.md)。
+**读者是维护者**。本文件只讲**架构与取舍**——为什么这样判定、为什么这条规则必须排在那个前面。
+安装、用法、配置项、已知限制见 [README.md](../README.md)。
 
 > **贯穿全文的三条验收基线**
 > 1. 图片与公式是硬性验收项 —— 要真的在阅读器里能看，不能因为命令跑成功就算过。
@@ -159,7 +160,9 @@ src/
   paths.py        # 路径与凭证
 config/           # config.yaml + book.css
 desktop/          # Tauri 2 壳（React + Tailwind）
-tests/            # pytest（样本现场生成，不依赖真实书籍）
+samples/          # 测试样本（入库：现场生成的 PDF 与真实书籍小样本）
+tests/            # pytest（多数样本现场生成；test_epub_realbook.py 跑 samples/ 下的真实书）
+docs/             # design.md（本文件）+ 阶段档案 + 评审记录
 scripts/          # 样本生成 / 端到端 / 校验 / 版本与打包
 ```
 
