@@ -11,12 +11,17 @@
 状态判定:output/<name>.epub 存在、容器写完整、且 mtime ≥ 源文件 mtime → 已完成
 (只看「存在 + 非空 + 更新」会把截断/写坏的产物判成完成,见 is_done)。
 失败产物会被移出 output/(改名加 .failed),避免下一次运行把它当成已完成而跳过。
+重转(--force)时若新一轮「构建成功但校验失败」,上一轮**完整可读**的成品会还原回
+原位(见 preserve_previous_output):失败的是新一轮,不该连上一轮的书一起赔进去。
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
+import shutil
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass
@@ -24,13 +29,16 @@ from datetime import datetime
 from pathlib import Path
 
 from backends import get_backend
-from backends.base import file_fingerprint, is_retryable
+from backends.base import (VARIANT_ORIGINAL, collect_evidence, file_fingerprint,
+                           is_retryable)
+from clean import CleanEngineError, CleanOutcome, clean_book_md
+from clean.options import CleanOptions, resolve_options
 from convert import convert_auto, load_config
 from epub.content import verify_content
 from epub.pandoc import MISSING_PANDOC_HINT, PandocMissingError, build_epub, pandoc_available
-from epub.verify import VerifyResult, archive_issue, verify_epub
+from epub.verify import (VerifyResult, archive_issue, fatal_issue, verify_epub)
+from ir import Producer
 from lang_detect import resolve_language
-from markdown.cleaner import CleanOptions, clean_file, resolve_options
 from detector.pdf_detector import PDFType
 from paths import config_file
 import events
@@ -118,6 +126,16 @@ SUPPORTED_SUFFIXES = {".pdf", ".md"}
 
 class VerifyError(RuntimeError):
     """EPUB 结构校验未通过(--strict)。确定性失败:不重试。"""
+
+
+class VerifyStageError(RuntimeError):
+    """校验**过程**自己出错(不是「校验不通过」),如校验器内部异常、读盘失败。
+
+    与 :class:`VerifyError` 的区别:后者是确定性结论(同一份产物再验还是不过),
+    重试只会把整条链路——含云端 OCR 额度——白跑一遍;前者可能是临时故障,保留
+    重试机会。错误码仍归 ``verify_failed``:问题出在校验阶段,报成「转换失败」
+    会让使用者去查 pandoc,而 pandoc 其实已经写出了产物。
+    """
 
 
 def sanitize_name(name: str) -> str:
@@ -299,15 +317,79 @@ def discard_failed_output(epub: Path, before: tuple[int, float] | None) -> Path 
     return target
 
 
+def preserve_previous_output(epub: Path) -> Path | None:
+    """在**覆盖之前**把上一轮的有效成品另存一份;无需保全时返回 None。
+
+    为什么需要它:pandoc 是**就地**写 ``output/<名>.epub`` 的。``--force`` 重转时
+    只要新一轮「构建成功但校验失败」,上一轮那个能打开的书就已经被新字节盖掉了;
+    而失败产物又要改名移出 output/(见 :func:`discard_failed_output`)—— 于是用户
+    重转一次,output/ 里只剩一个 ``.failed``,**原本能读的那本书没了**。「重转失
+    败」正确的结果是回到「还有上一本」,而不是连上一本一起赔进去。
+
+    只保全**上一轮产物本身是完整 EPUB 包**的情况:残缺产物(``archive_issue``
+    非空)本来就该被重转覆盖,不值得留,留着还会被 ``is_done()`` 判成已完成。
+    """
+    if not epub.is_file():
+        return None
+    if archive_issue(epub) is not None:
+        return None
+    try:
+        handle, tmp = tempfile.mkstemp(prefix=f"{epub.stem}.", suffix=".epub.previous")
+        os.close(handle)
+    except OSError as e:
+        logger.warning("上一轮成品无法备份(本次失败后将不做保全): %s", e)
+        return None
+    try:
+        shutil.copy2(epub, tmp)
+    except OSError as e:
+        logger.warning("上一轮成品无法备份(本次失败后将不做保全): %s", e)
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        return None
+    return Path(tmp)
+
+
+def restore_previous_output(epub: Path, backup: Path | None) -> bool:
+    """把备份的上一轮成品放回原位;确实放回了才返回 True。
+
+    原位那份**本来还是好的**就不动它 —— 失败发生在构建之前时正是这种情况
+    (``discard_failed_output`` 也不会动它)。还原后它是完整 EPUB,``is_done()``
+    照旧按「完整 + 不早于源文件」判断,不会因为被还原就蒙混过关。
+    """
+    if backup is None or not backup.is_file():
+        return False
+    if epub.is_file() and archive_issue(epub) is None:
+        return False
+    try:
+        shutil.copy2(backup, epub)
+    except OSError as e:
+        logger.error("上一轮成品恢复失败(%s): %s 可能需要重新转换", e, epub)
+        return False
+    logger.warning("已恢复上一轮的成品 %s(本次产物未通过校验,改名保留在 .failed)",
+                   epub.name)
+    return True
+
+
+def _drop_previous_backup(backup: Path | None) -> None:
+    """任务结束后清掉备份(它只在失败的那一瞬间有用)。"""
+    if backup is None:
+        return
+    with contextlib.suppress(OSError):
+        backup.unlink()
+
+
 def _fail(result: TaskResult, source: Path, error: Exception, *, code: str,
-          out_epub: Path, before_output: tuple[int, float] | None) -> TaskResult:
-    """统一的失败收尾:标记失败 → 移走本次的失败产物 → 发事件 + 日志。"""
+          out_epub: Path, before_output: tuple[int, float] | None,
+          backup: Path | None = None) -> TaskResult:
+    """统一的失败收尾:标记失败 → 移走本次的失败产物 → 还原上一轮成品 → 发事件 + 日志。"""
     result.status = "failed"
     result.error = str(error)
     result.epub = None                    # 失败产物不是交付物
     quarantined = discard_failed_output(out_epub, before_output)
     if quarantined is not None:
         result.error += f"(失败产物已移到 {quarantined.name},不会被当成已完成)"
+    if restore_previous_output(out_epub, backup):
+        result.error += f"(已恢复上一轮的成品 {out_epub.name})"
     events.emit("error", code=events.error_code(error, default=code), message=str(error),
                 file=source.name)
     logger.error("失败: %s → %s", source.name, result.error)
@@ -322,22 +404,47 @@ def verify_output(epub: Path, *, strict: bool = False,
     - 结构:容器 / manifest / 链接 / 图片 / 公式 / CSS(verify_epub)
     - 内容:对照源 Markdown 检查有无内容丢失(book_md 非空时追加)
 
-    默认只告警(不打断既有流程);strict=True 时只要有 error 就抛 VerifyError,
-    使该任务判 failed。
+    **致命问题(``error`` 级)在任何模式下都判失败**(抛 :class:`VerifyError`):
+    产物残缺这件事不因为没加 ``--strict`` 就变成"成功" —— 旧行为把带断链的
+    EPUB 留在 output/ 里、退出码还是 0,调用方无从发现(P7 R-1),现在收敛为:
+    判失败 + 退出码非 0 + 失败产物改名移出完成判定视野(见 ``_fail``)。
+
+    ``strict=True`` 额外把**内容对照类** warning(疑似缩水/数量减少)也判失败;
+    排版与格式类提示(孤立图片、空章节、封面顺序…)在两种模式下都只提示,
+    不升级成错误 —— 否则正常书每次都会被判失败,用户很快学会忽略提示。
+
+    校验结论(含失败)都会先发 ``verify`` 事件再抛:调用方要看得到失败项。
+
+    校验器**自己**抛异常时(不是「校验不通过」):``verify`` 阶段同样要发 ``done``
+    收尾 —— 前端按 start/done 配对算进度,只有 start 没有 done 会永久卡在 95%;
+    异常包成 :class:`VerifyStageError`,错误码归 ``verify_failed``(问题出在校验
+    阶段,不是 pandoc 构建),重试语义保持不变(可能是临时故障)。
     """
-    result = verify_epub(epub)
-    if book_md is not None and Path(book_md).exists():
-        content = verify_content(book_md, epub, expected_pages=expected_pages)
-        result.issues.extend(content.issues)
-        result.stats.update(content.stats)
+    try:
+        result = verify_epub(epub)
+        if book_md is not None and Path(book_md).exists():
+            content = verify_content(book_md, epub, expected_pages=expected_pages)
+            result.issues.extend(content.issues)
+            result.stats.update(content.stats)
+    except Exception as e:                   # noqa: BLE001 - 校验器内部错误也要收尾
+        events.stage("verify", "done", failed=True)
+        raise VerifyStageError(f"EPUB 校验过程出错: {e}") from e
     for issue in result.issues:
         log = logger.warning if issue.level == "warning" else logger.error
         log("[verify] %s", issue.message)
     logger.info("[verify] %s", result.summary())
-    if strict and result.errors:
+    events.emit("verify", errors=len(result.errors), warnings=len(result.warnings),
+                message=result.errors[0].message if result.errors else
+                        (result.warnings[0].message if result.warnings else ""))
+    fatal = fatal_issue(result, strict=strict)
+    if fatal is not None:
+        events.stage("verify", "done", failed=True,
+                     errors=len(result.errors), warnings=len(result.warnings))
         raise VerifyError(
-            f"EPUB 校验未通过({result.summary()}): {result.errors[0].message}"
+            f"EPUB 校验未通过({result.summary()}): {fatal.message}"
         )
+    events.stage("verify", "done",
+                 errors=len(result.errors), warnings=len(result.warnings))
     return result
 
 
@@ -386,61 +493,121 @@ def process_one(
 
     # 失败时用它判断 out_epub 是不是本次运行写出来的(见 discard_failed_output)
     before_output = stat_signature(out_epub)
+    # 重转(--force / 源比产物新)会就地覆盖 output/<名>.epub:先把上一轮的有效
+    # 成品备份下来,失败时放回原位(见 preserve_previous_output)。
+    previous_backup = preserve_previous_output(out_epub)
 
-    # 环境缺失(未安装 pandoc)必须在昂贵阶段之前暴露:否则提取(含云端 OCR)全跑完
-    # 才发现生成不了 EPUB,重跑还得再花一次额度。
-    if not pandoc_available():
-        return _fail(
-            result, source,
-            PandocMissingError(f"{MISSING_PANDOC_HINT};本次未执行提取与 OCR"),
-            code="missing_dependency", out_epub=out_epub, before_output=before_output,
-        )
+    try:
+        # 环境缺失(未安装 pandoc)必须在昂贵阶段之前暴露:否则提取(含云端 OCR)全跑完
+        # 才发现生成不了 EPUB,重跑还得再花一次额度。
+        if not pandoc_available():
+            return _fail(
+                result, source,
+                PandocMissingError(f"{MISSING_PANDOC_HINT};本次未执行提取与 OCR"),
+                code="missing_dependency", out_epub=out_epub,
+                before_output=before_output, backup=previous_backup,
+            )
 
-    attempt = 0
-    last_error: Exception | None = None
-    while attempt <= retries:
-        attempt += 1
-        try:
-            if source.suffix.lower() == ".md":
-                result.backend, result.pdf_type = "markdown", "markdown"
-                result = _process_markdown(source, work_root, output_dir, t0, result,
-                                           safe_stem, out_epub.stem, clean_options, strict,
-                                           lang_override)
-            else:
-                result = _process_pdf(source, config, work_root, output_dir,
-                                      backend_override, t0, result, safe_stem, out_epub.stem,
-                                      clean_options, strict, lang_override)
-            result.status = "done"
-            return result
-        except VerifyError as e:
-            # 校验失败是确定性结果:重试只会重复整条链路(含云端 OCR 额度),直接判失败
-            last_error = e
-            break
-        except PandocMissingError as e:
-            # 环境缺失(如运行中 PATH 变了)同样是确定性失败,重试只是再撞一次墙
-            last_error = e
-            break
-        except Exception as e:  # noqa: BLE001 - 批处理需兜住所有失败
-            last_error = e
-            # 后端会明确标注「确定性失败」(认证/参数/配额/输入文件错误/云端任务判死):
-            # 这类错误重试改变不了结果,扫描书还会重复上传、重复消耗额度
-            if not is_retryable(e):
-                logger.error("不可重试的失败,不再重试: %s", e)
+        attempt = 0
+        last_error: Exception | None = None
+        while attempt <= retries:
+            attempt += 1
+            try:
+                if source.suffix.lower() == ".md":
+                    result.backend, result.pdf_type = "markdown", "markdown"
+                    result = _process_markdown(source, work_root, output_dir, t0, result,
+                                               safe_stem, out_epub.stem, clean_options, strict,
+                                               lang_override)
+                else:
+                    result = _process_pdf(source, config, work_root, output_dir,
+                                          backend_override, t0, result, safe_stem, out_epub.stem,
+                                          clean_options, strict, lang_override)
+                result.status = "done"
+                return result
+            except VerifyError as e:
+                # 校验失败是确定性结果:重试只会重复整条链路(含云端 OCR 额度),直接判失败
+                last_error = e
                 break
-            logger.warning("第 %d 次尝试失败(%s): %s", attempt, source.name, e)
-            if attempt <= retries:
-                sleep = 2 ** attempt
-                # 重试对用户可见(否则「卡住不动」与「正在重试」在界面上无法区分)
-                events.emit("retry", attempt=attempt, retries=retries, wait=sleep,
-                            message=str(e), file=source.name)
-                logger.info("  %ds 后重试...", sleep)
-                time.sleep(sleep)
+            except PandocMissingError as e:
+                # 环境缺失(如运行中 PATH 变了)同样是确定性失败,重试只是再撞一次墙
+                last_error = e
+                break
+            except CleanEngineError as e:
+                # 清理是确定性的(同一份 md + 同一份证据必然同样结果),重试只会
+                # 重复整条链路(含云端 OCR 额度);而且清理失败就意味着产物不可信,
+                # 必须判失败 —— 不静默降级成"没清理就出书"
+                logger.error("清理失败(IR 引擎),不再重试: %s", e)
+                last_error = e
+                break
+            except Exception as e:  # noqa: BLE001 - 批处理需兜住所有失败
+                last_error = e
+                # 后端会明确标注「确定性失败」(认证/参数/配额/输入文件错误/云端任务判死):
+                # 这类错误重试改变不了结果,扫描书还会重复上传、重复消耗额度
+                if not is_retryable(e):
+                    logger.error("不可重试的失败,不再重试: %s", e)
+                    break
+                logger.warning("第 %d 次尝试失败(%s): %s", attempt, source.name, e)
+                if attempt <= retries:
+                    sleep = 2 ** attempt
+                    # 重试对用户可见(否则「卡住不动」与「正在重试」在界面上无法区分)
+                    events.emit("retry", attempt=attempt, retries=retries, wait=sleep,
+                                message=str(e), file=source.name)
+                    logger.info("  %ds 后重试...", sleep)
+                    time.sleep(sleep)
 
-    code = ("verify_failed" if isinstance(last_error, VerifyError)
-            else "missing_dependency" if isinstance(last_error, PandocMissingError)
-            else "convert_failed")
-    return _fail(result, source, last_error, code=code, out_epub=out_epub,
-                 before_output=before_output)
+        code = ("verify_failed" if isinstance(last_error, VerifyError)
+                else "missing_dependency" if isinstance(last_error, PandocMissingError)
+                else "clean_failed" if isinstance(last_error, CleanEngineError)
+                else "convert_failed")
+        return _fail(result, source, last_error, code=code, out_epub=out_epub,
+                     before_output=before_output, backup=previous_backup)
+    finally:
+        _drop_previous_backup(previous_backup)
+
+
+def clean_stage(book_md: Path, *, backend: str, work: Path, source: Path,
+                total_pages: int = 0, options: CleanOptions | None = None,
+                images_dir: Path | None = None) -> CleanOutcome:
+    """正式清理阶段(IR 引擎的唯一入口)。
+
+    P6 起没有第二条路:清理只有 ``clean.clean_book_md`` 一条实现,失败就抛
+    :class:`CleanEngineError` 并让该文件判失败 —— **不回退到旧引擎**(旧引擎已删除),
+    也不允许"清理没做成但照样出 EPUB"。清理结果(逐条 Patch + 页账)落在
+    ``work/<书>/ir/`` 里,事后可复核、可撤销。
+
+    参数都是**显式**的,因为这些正是"清理看得到什么"的全部:
+
+    - ``backend``:这份 md 是哪个后端产出的(``hybrid(paddleocr)`` 这类复合名原样传);
+    - ``source`` + 内容指纹:回放时据此判断"这份 IR 对应的还是不是同一个 PDF";
+    - ``total_pages``:后端/检测给出的真实页数(页账的分母),没有就交给证据层;
+    - ``evidence``:段缓存里的 ``content_list``,页归属与跨块删除的唯一结构依据。
+    """
+    events.stage("clean", "start")
+    bundle = collect_evidence(work, backend=backend)
+    if bundle.note:
+        logger.debug("[clean] 证据层: %s", bundle.note)
+    producer = Producer.from_backend(
+        backend, source=str(source), source_sha256=file_fingerprint(source),
+        variant=VARIANT_ORIGINAL,
+    )
+    try:
+        outcome = clean_book_md(
+            book_md, backend=backend, evidence=list(bundle.items),
+            total_pages=total_pages or bundle.total_pages,
+            variant=VARIANT_ORIGINAL, source=str(source), producer=producer,
+            options=options, images_dir=images_dir,
+        )
+    except CleanEngineError:
+        events.stage("clean", "done", failed=True)
+        raise
+    for issue in outcome.issues:
+        logger.info("[clean] %s", issue)
+    logger.info("[clean] %s", outcome.summary())
+    events.stage("clean", "done", issues=len(outcome.issues),
+                 applied=outcome.applied, suggested=outcome.suggested,
+                 failed=outcome.failed,
+                 chars=[len(outcome.md_before), len(outcome.md_after)])
+    return outcome
 
 
 def _process_pdf(source, config, work_root, output_dir, backend_override, t0, result,
@@ -471,12 +638,11 @@ def _process_pdf(source, config, work_root, output_dir, backend_override, t0, re
                         message=f"{detection.suspicious_pages}/{detection.total_pages} 页疑似文字层损坏",
                         pages=detection.total_pages, suspicious_pages=detection.suspicious_pages)
 
-    # Markdown 清理(按 clean_options 开关)
-    events.stage("clean", "start")
-    report = clean_file(conv.book_md, options=clean_options)
-    for issue in report.issues:
-        logger.info("[clean] %s", issue)
-    events.stage("clean", "done", issues=len(report.issues))
+    # Markdown 清理(IR 引擎;按 clean_options 开关,失败即判该文件失败)
+    clean_stage(conv.book_md, backend=conv.backend, work=work, source=source,
+                total_pages=(getattr(detection, "total_pages", None)
+                             or int(conv.stats.get("pages") or 0)),
+                options=clean_options, images_dir=conv.images_dir)
 
     events.stage("build", "start")
     title, author = parse_title_author(source.stem)
@@ -493,10 +659,6 @@ def _process_pdf(source, config, work_root, output_dir, backend_override, t0, re
         expected_pages=getattr(detection, "total_pages", None) or conv.stats.get("pages"),
     )
     result.verify = verify.summary()
-    events.emit("verify", errors=len(verify.errors), warnings=len(verify.warnings),
-                message=verify.errors[0].message if verify.errors else
-                        (verify.warnings[0].message if verify.warnings else ""))
-    events.stage("verify", "done")
     result.elapsed = time.time() - t0
     events.emit("complete", file=source.name, epub=epub.name, backend=result.backend,
                 pdf_type=result.pdf_type, verify=result.verify,
@@ -524,11 +686,10 @@ def _process_markdown(source, work_root, output_dir, t0, result, safe_stem, out_
 
     # Markdown 输入没有「提取」这一步(只是复制),extract 直接以 skipped 收尾
     events.stage("extract", "done", backend="markdown", skipped=True)
-    events.stage("clean", "start")
-    report = clean_file(book_md, options=clean_options)
-    for issue in report.issues:
-        logger.info("[clean] %s", issue)
-    events.stage("clean", "done", issues=len(report.issues))
+    # 现成的 md 没有证据层(没有 content_list):页账记 undecided,
+    # 需要结构证据的跨块拼接/删除只产建议 —— 不猜、不补页号
+    clean_stage(book_md, backend="markdown", work=work, source=source,
+                options=clean_options, images_dir=work / "images")
     events.stage("build", "start")
     title, author = parse_title_author(source.stem)
     epub = build_epub(book_md, work, output_dir, title=title, author=author, out_name=out_name,
@@ -540,10 +701,6 @@ def _process_markdown(source, work_root, output_dir, t0, result, safe_stem, out_
     events.stage("verify", "start")
     verify = verify_output(epub, strict=strict, book_md=book_md)
     result.verify = verify.summary()
-    events.emit("verify", errors=len(verify.errors), warnings=len(verify.warnings),
-                message=verify.errors[0].message if verify.errors else
-                        (verify.warnings[0].message if verify.warnings else ""))
-    events.stage("verify", "done")
     result.elapsed = time.time() - t0
     events.emit("complete", file=source.name, epub=epub.name, backend="markdown",
                 pdf_type="markdown", verify=result.verify,
@@ -572,8 +729,10 @@ def process_batch(
     传入的开关会先落到 config(如关闭 bold 等价于 pymupdf.bold_fonts 为空),
     再逐文件生效。
 
-    strict=True → 每个 EPUB 生成后做结构 + 内容校验,有 error 即判该任务 failed
-    (默认 False:只告警,不打断既有流程)。
+    校验不通过(致命问题:结构破损 / 内容丢失)一律判该任务失败 —— 默认模式也不
+    例外(残缺产物不能报成功)。
+    strict=True → 额外把内容对照的「疑似缩水」类警告也判失败;排版/格式类提示
+    任何模式下都只提示。
 
     lang → EPUB dc:language 的显式覆盖(CLI `--lang`);为 None 时用配置 `language:`
     再回退到正文脚本检测。

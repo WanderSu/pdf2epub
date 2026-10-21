@@ -176,7 +176,7 @@ Go to:
 and download the latest Windows archive, for example:
 
 ```text
-pdf2epub-v0.4.4-win-x64.zip
+pdf2epub-v0.5.0-win-x64.zip
 ```
 
 The version number in the file name changes with each release. Unzip it and run:
@@ -600,7 +600,18 @@ Every conversion runs a basic EPUB check covering:
 * CSS
 * image references
 
-If you want a failed check to fail the conversion, use `--strict`:
+Findings come in two levels: **fatal problems** (broken structure, lost content) fail
+that file in any mode — the failed artefact is renamed to `<name>.epub.failed` so the
+next run cannot mistake it for "already done"; **non-fatal warnings** (orphan images, empty
+chapters, unlinked styles) are recorded but never block the conversion.
+
+When a re-run (`--force`) builds a new EPUB that then fails verification, the previous
+readable artefact is restored to `output/<name>.epub` (the failed one is kept as `.failed`)
+— losing the book you already had is not an acceptable price for a failed re-conversion.
+A previous artefact that was itself broken is *not* restored.
+
+`--strict` is the stricter level: content-comparison warnings (text/formulas/tables/
+footnotes shrinking) also fail the file.
 
 ```bash
 .venv/Scripts/ebook-converter.exe "my-book.pdf" -o output --strict
@@ -624,7 +635,7 @@ ebook-converter <file-or-dir>... [-o output-dir] [options]
 | `--retries N` | Retries per file, default 2 |
 | `--force` | Ignore the "already done" state and convert again |
 | `--clean-disable LIST` | Turn off Markdown cleanup rules (comma separated, repeatable) |
-| `--strict` | Fail the file when the EPUB check reports an error; default is to warn only |
+| `--strict` | Strict mode: content-comparison warnings also fail the file (default is warn only). Fatal check errors fail the file in any mode |
 | `--lang LANG` | EPUB language (`zh-CN`, `en`, `ja`, ...); detected from the text by default |
 | `--dry-run` | Preflight only, no files are written |
 | `--json` | With `--dry-run`, print the preflight result as JSON |
@@ -718,7 +729,9 @@ If you want to work on the code, these are the folders to start from:
 src/
 ├── backends/       # PDF / OCR backends
 ├── detector/       # PDF type detection
-├── markdown/       # Markdown cleanup
+├── clean/          # Markdown cleanup (IR engine: rules → patches → report)
+├── ir/             # IR (blocks / alignment / round-trip render)
+├── markdown/       # cleanup predicates & thresholds
 ├── epub/           # EPUB generation and checks
 ├── batch.py        # batch processing
 ├── cli.py          # CLI

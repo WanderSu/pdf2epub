@@ -1,0 +1,15 @@
+{
+  "note": "page_markers 样本的结构证据层(OCR 后端的 content_list 形态)。",
+  "why": "跨页断行拼接要删除「被吸收的那一段」;按契约删除必须有结构证据,\n     没有证据层的输入(如手写的 md)只产建议、不改正文。这个样本因此自带\n     一段最小证据:两半正文在 content_list 里本就是两条结构块,各自对齐到页。",
+  "backend": "paddleocr",
+  "total_pages": 23,
+  "items": [
+    { "type": "text", "text": "这一段正文被页边界断开了,前半句写到这里", "page_idx": 19 },
+    { "type": "text", "text": "后半句在下一页接着写,并以句号结尾。", "page_idx": 20 },
+    { "type": "text", "text": "第三章标题", "page_idx": 21 },
+    { "type": "text", "text": "列表项一", "page_idx": 21 },
+    { "type": "text", "text": "引用的一行", "page_idx": 21 },
+    { "type": "text", "text": "床前明月光\n疑是地上霜", "page_idx": 21 },
+    { "type": "text", "text": "举头望明月\n低头思故乡", "page_idx": 22 }
+  ]
+}

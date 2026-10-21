@@ -106,7 +106,9 @@ def progress(stage_name: str, current: int, total: int, **fields: Any) -> None:
 #: 这里反向 import 会形成循环;对应的真实异常类在测试里逐一钉住(改名会当场失败)。
 ERROR_CODE_BY_TYPE: dict[str, str] = {
     "PandocMissingError": "missing_dependency",   # 环境缺失(pandoc 不在 PATH)
-    "VerifyError": "verify_failed",               # 产物校验未通过(--strict)
+    "VerifyError": "verify_failed",               # 产物校验未通过(致命问题,非 --strict 同样报)
+    "VerifyStageError": "verify_failed",          # 校验过程自身出错(不是「不通过」:可重试)
+    "CleanEngineError": "clean_failed",           # IR 清理失败(不回退,不静默放过)
     "MinerUError": "ocr_failed",
     "PaddleOCRError": "ocr_failed",
     "BackendError": "backend_failed",

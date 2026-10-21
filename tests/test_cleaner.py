@@ -1,31 +1,46 @@
-"""清理器规则单测(计划 1.3)。
+"""清理规则单测(计划 1.3 / P6 起跑在 IR 引擎上)。
 
 每个启发式规则都要有「该改的」和「不该改的」两类用例 —— 误伤比漏改更严重。
+
+迁移说明:本文件原先直接调用 legacy 清理器(P6 已删除),现在走正式入口
+``clean.clean_text``(IR → 规则提案 → Patch → 渲染),与转换流程同一条代码路径。
+
+两处因此显式变化:
+
+1. **结尾换行**:IR 保留它(往返契约 ``render(parse(md)) == md`` 要求一个字节都不能
+   丢),旧引擎会丢。所以期望值里多了一个结尾换行 —— 这是早先就记录在案的已知分歧。
+2. **跨块的改动需要结构证据**:跨越页码注释/空行的拼接会删除一个块,按契约必须拿到
+   证据层链接才提候选。需要跨块行为的用例显式传 ``evidence=[...]``(真实 OCR 流程
+   里它来自 BACKEND 的 ``content_list``),没有证据的用例断言「不动 + 留下建议」。
 """
 from __future__ import annotations
 
 import pytest
 
-from markdown.cleaner import (
-    CLEAN_KEYS,
-    CleanOptions,
-    clean_markdown,
-    normalize_clean_keys,
-    resolve_options,
-)
+from clean import clean_text
+from clean.options import (CLEAN_KEYS, CleanOptions, normalize_clean_keys,
+                           resolve_options)
 
 
 def clean(text: str, **kwargs) -> str:
-    """按指定开关清理文本(未指定的项用默认值)。"""
-    return clean_markdown(text, options=CleanOptions(**kwargs))
+    """按指定开关清理文本(未指定的项用默认值)。
+
+    ``evidence=[...]`` 用来给「跨块删除」提供结构证据;不给它,跨块的拼接/删除
+    只会留下 ``suggested`` 建议 —— 这是闸门,不是短路。
+    """
+    evidence = kwargs.pop("evidence", None)
+    return clean_text(text, source="unit.md", options=CleanOptions(**kwargs),
+                      evidence=evidence).md_after
 
 
 def only(text: str, **enabled: bool) -> str:
     """只开启指定项,其余全关 —— 用来隔离单条规则的行为。"""
+    evidence = enabled.pop("evidence", None)
     opts = CleanOptions(**{k: False for k in CLEAN_KEYS})
     for k, v in enabled.items():
         setattr(opts, k, v)
-    return clean_markdown(text, options=opts)
+    return clean_text(text, source="unit.md", options=opts,
+                      evidence=evidence).md_after
 
 
 # ---------------------------------------------------------------- 页眉页脚
@@ -158,7 +173,7 @@ def test_fenced_code_is_byte_identical() -> None:
 def test_fenced_code_keeps_digit_lines() -> None:
     """代码块里的独立数字行不是页码。"""
     out = clean("```text\n123\n\n32\n```\n")
-    assert out == "```text\n123\n\n32\n```"
+    assert out == "```text\n123\n\n32\n```\n"
 
 
 def test_fenced_code_keeps_repeated_short_lines() -> None:
@@ -170,18 +185,18 @@ def test_fenced_code_keeps_repeated_short_lines() -> None:
 def test_fenced_code_headings_untouched() -> None:
     """代码块里的 `#` 注释不是标题(空标题删除 / 层级收敛都不得生效)。"""
     out = clean("```text\n# 注释\n###\n#### 二级\n```\n")
-    assert out == "```text\n# 注释\n###\n#### 二级\n```"
+    assert out == "```text\n# 注释\n###\n#### 二级\n```\n"
 
 
 def test_fenced_code_trailing_whitespace_kept() -> None:
     out = clean("```text\n代码   尾部空白   \n```\n")
-    assert out == "```text\n代码   尾部空白   \n```"
+    assert out == "```text\n代码   尾部空白   \n```\n"
 
 
 def test_inline_code_untouched() -> None:
     """行内代码里的空格是代码的一部分,不能被中文空格修正删掉。"""
     out = clean("用 `git 中文 命令` 试一下。\n")
-    assert out == "用 `git 中文 命令` 试一下。"
+    assert out == "用 `git 中文 命令` 试一下。\n"
 
 
 def test_unterminated_fence_protected_to_end() -> None:
@@ -191,12 +206,10 @@ def test_unterminated_fence_protected_to_end() -> None:
 
 
 def test_fence_content_never_triggers_reports() -> None:
-    """代码块不该产生「诗行/页眉/OCR 空格」之类的清理报告。"""
-    from markdown.cleaner import CleanReport
-
-    report = CleanReport()
-    clean_markdown(HAZARDOUS_FENCE + "\n", report=report)
-    assert report.issues == []
+    """代码块不该产生「诗行/页眉/OCR 空格」之类的清理报告(也不产生 Patch)。"""
+    outcome = clean_text(HAZARDOUS_FENCE + "\n", source="unit.md")
+    assert outcome.report.patches == ()
+    assert list(outcome.issues) == []
 
 
 def test_input_with_nul_byte_is_not_fatal() -> None:
@@ -208,10 +221,19 @@ def test_input_with_nul_byte_is_not_fatal() -> None:
 # ---------------------------------------------------------------- 页码注释(跨页)
 
 def test_paragraph_joined_across_page_marker() -> None:
-    """被页边界断开的正文必须拼回去 —— 页码注释不是段落边界。"""
+    """被页边界断开的正文必须拼回去 —— 页码注释不是段落边界。
+
+    跨块删除需要结构证据(见模块 docstring),所以这里给出最小 content_list:
+    两半正文在后端眼里本来就是两条结构块。
+    """
     md = ("<!-- page 12 -->\n正文前半句一直写到了这一行的末尾为止,还没写完\n\n"
           "<!-- page 13 -->\n后半句在下一页接上,并以句号结尾。\n")
-    out = clean(md)
+    evidence = [
+        {"type": "text", "text": "正文前半句一直写到了这一行的末尾为止,还没写完",
+         "page_idx": 11},
+        {"type": "text", "text": "后半句在下一页接上,并以句号结尾。", "page_idx": 12},
+    ]
+    out = clean(md, evidence=evidence)
     assert "正文前半句一直写到了这一行的末尾为止,还没写完后半句在下一页接上,并以句号结尾。" in out
 
 
@@ -234,7 +256,7 @@ def test_poem_not_joined_across_page_marker() -> None:
 def test_verse_run_across_marker_without_blank_line() -> None:
     """注释直接夹在诗行之间时也透明:该补的硬换行不能少。"""
     out = clean("床前明月光\n<!-- page 9 -->\n疑是地上霜\n")
-    assert out == "床前明月光  \n<!-- page 9 -->\n疑是地上霜"
+    assert out == "床前明月光  \n<!-- page 9 -->\n疑是地上霜\n"
 
 
 @pytest.mark.parametrize("block, tail", [
@@ -257,7 +279,7 @@ def test_block_structure_not_joined_across_marker(block: str, tail: str) -> None
 def test_ordered_list_items_not_joined() -> None:
     """`3. ` 起的条目也是列表项 —— 曾经只认 `1. ` `2. `,第 3 条起会被拼成一行。"""
     md = "# 目录\n\n1. 第一项/3\n\n2. 第二项/8\n\n3. 第三项/27\n4. 第四项/30\n\nIV\n\n5. 第五项/35\n"
-    assert clean(md) == md.rstrip("\n")
+    assert clean(md) == md
 
 
 def test_ordered_list_parenthesis_style() -> None:
@@ -288,22 +310,22 @@ def test_verse_threshold_is_verse_max_chars() -> None:
     注意 `VERSE_MAX_CHARS`(18)与 `JOIN_MIN_CHARS`(20)之间有一条窄缝(19 字):
     这种长度既不算诗行、也够不着「排满一行」,按保守处理**不拼接**(宁可少拼)。
     """
-    from markdown.cleaner import JOIN_MIN_CHARS, VERSE_MAX_CHARS
+    from markdown.textrules import JOIN_MIN_CHARS, VERSE_MAX_CHARS
 
     inside = clean(f"{_line(VERSE_MAX_CHARS)}\n{_line(VERSE_MAX_CHARS)}\n")
-    assert inside == f"{_line(VERSE_MAX_CHARS)}  \n{_line(VERSE_MAX_CHARS)}"
+    assert inside == f"{_line(VERSE_MAX_CHARS)}  \n{_line(VERSE_MAX_CHARS)}\n"
 
     outside = clean(f"{_line(JOIN_MIN_CHARS + 1)}\n{_line(JOIN_MIN_CHARS + 1)}\n")
-    assert outside == _line(JOIN_MIN_CHARS + 1) + _line(JOIN_MIN_CHARS + 1)
+    assert outside == _line(JOIN_MIN_CHARS + 1) + _line(JOIN_MIN_CHARS + 1) + "\n"
 
     gap = clean(f"{_line(VERSE_MAX_CHARS + 1)}\n{_line(VERSE_MAX_CHARS + 1)}\n")
-    assert gap == f"{_line(VERSE_MAX_CHARS + 1)}\n{_line(VERSE_MAX_CHARS + 1)}"
+    assert gap == f"{_line(VERSE_MAX_CHARS + 1)}\n{_line(VERSE_MAX_CHARS + 1)}\n"
 
 
 def test_body_line_is_joined_to_its_continuation() -> None:
     """排满一行的正文断行照旧拼接(这是 join_lines 存在的理由)。"""
     out = clean("他走进屋子看了看四周,桌上放着一封没有署名的信\n纸上只有一句话:明天中午老地方见。\n")
-    assert out == "他走进屋子看了看四周,桌上放着一封没有署名的信纸上只有一句话:明天中午老地方见。"
+    assert out == "他走进屋子看了看四周,桌上放着一封没有署名的信纸上只有一句话:明天中午老地方见。\n"
 
 
 def test_short_line_with_end_punctuation_is_not_joined() -> None:
@@ -312,7 +334,7 @@ def test_short_line_with_end_punctuation_is_not_joined() -> None:
     这是本次专项收紧的取舍:真实扫描书里被误拼的正是 11-19 字的短行。
     """
     out = clean("他走进屋子看看\n桌上放着一封信。\n")
-    assert out == "他走进屋子看看\n桌上放着一封信。"
+    assert out == "他走进屋子看看\n桌上放着一封信。\n"
 
 
 def test_two_short_lines_without_punctuation_treated_as_verse() -> None:
@@ -323,7 +345,7 @@ def test_two_short_lines_without_punctuation_treated_as_verse() -> None:
     真实书籍里排满的正文行普遍 20 字以上,与诗行之间有很宽的间隔。
     """
     out = clean("他走进屋子看看\n桌上放着一封信\n")
-    assert out == "他走进屋子看看  \n桌上放着一封信"
+    assert out == "他走进屋子看看  \n桌上放着一封信\n"
 
 
 # ---------------------------------------------------------------- 页码边界
@@ -366,7 +388,7 @@ def test_footnote_definitions_not_joined_into_body() -> None:
 def test_footnote_cases_survive_cleaning(md: str) -> None:
     """五类脚注样本:清理前后引用与定义都在,且定义块逐字节不变。"""
     out = clean(md)
-    assert out == md.rstrip("\n")
+    assert out == md
 
 
 def test_footnote_multiline_indent_kept() -> None:
@@ -383,25 +405,25 @@ def test_footnote_content_is_not_rewritten() -> None:
     `Py Mu PDF` 之类的 OCR 空格会留着,这是刻意的保守选择。
     """
     md = "正文正文正文正文正文[^1]\n\n[^1]: 脚注 里 的 空格 与 Py Mu PDF 保持原样\n"
-    assert clean(md) == md.rstrip("\n")
+    assert clean(md) == md
 
 
 def test_inline_footnote_ref_untouched() -> None:
     """行内的 `[^1]` 引用不是块结构,正文照常清理。"""
     out = clean("正文 中文 之间 有空格[^1]。\n")
-    assert out == "正文中文之间有空格[^1]。"
+    assert out == "正文中文之间有空格[^1]。\n"
 
 
 def test_footnote_syntax_inside_code_fence_untouched() -> None:
     """代码块里的 `[^1]: …` 是示例文本,既不当脚注也不被改写。"""
     md = "```text\n[^1]: 代码里的示例\n    缩进续行\n```\n\n正文正文正文正文正文[^1]。\n"
-    assert clean(md) == md.rstrip("\n")
+    assert clean(md) == md
 
 
 def test_footnote_syntax_inside_inline_code_untouched() -> None:
     """行内代码里的脚注语法不参与掩码(否则还原顺序会留下未还原的占位符)。"""
     md = "正文正文正文正文正文[^1]。\n\n[^1]: 见 `x = 1` 与 `[^2]: 不是脚注` 的说明。\n"
-    assert clean(md) == md.rstrip("\n")
+    assert clean(md) == md
 
 
 def test_underindented_footnote_continuation_is_normal_text() -> None:
@@ -418,10 +440,12 @@ def test_unpunctuated_line_breaks_are_kept() -> None:
     修复前这类行会因「上一行没有句末标点」被拼成一行;现在只加硬换行保住分行。
     """
     cases = [
-        ("春风吹过山岗\n河水流向远方\n", "春风吹过山岗  \n河水流向远方"),        # 两行都短
-        ("这是第一行\n这是第二行\n这是第三行\n", "这是第一行  \n这是第二行  \n这是第三行"),
-        ("第一项\n第二项\n第三项\n", "第一项  \n第二项  \n第三项"),
-        ("两个黄鹂鸣翠柳\n一行白鹭上青天\n", "两个黄鹂鸣翠柳  \n一行白鹭上青天"),  # 七言
+        ("春风吹过山岗\n河水流向远方\n", "春风吹过山岗  \n河水流向远方\n"),     # 两行都短
+        ("这是第一行\n这是第二行\n这是第三行\n",
+         "这是第一行  \n这是第二行  \n这是第三行\n"),
+        ("第一项\n第二项\n第三项\n", "第一项  \n第二项  \n第三项\n"),
+        ("两个黄鹂鸣翠柳\n一行白鹭上青天\n",
+         "两个黄鹂鸣翠柳  \n一行白鹭上青天\n"),                                   # 七言
     ]
     for md, expected in cases:
         assert clean(md) == expected, md
@@ -474,8 +498,8 @@ def test_note_block_keeps_one_note_per_line() -> None:
 
 def test_heading_keeps_internal_spaces() -> None:
     """标题行里的空格是序号与标题的分隔,不得被中文空格修正删掉。"""
-    assert clean("# 第一章 测试\n") == "# 第一章 测试"
-    assert clean("## 一 历史的回顾\n") == "# 一 历史的回顾"
+    assert clean("# 第一章 测试\n") == "# 第一章 测试\n"
+    assert clean("## 一 历史的回顾\n") == "# 一 历史的回顾\n"
 
 
 def test_layout_lines_keep_field_spaces() -> None:
@@ -487,20 +511,32 @@ def test_layout_lines_keep_field_spaces() -> None:
     md = ("人民出版社出版 新華書店发行\n\n"
           "787×1092毫米32开本 2.25印张 43.000字\n\n"
           "书号 3001·1505 定价 0.15 元\n")
-    assert clean(md) == md.rstrip("\n")
+    assert clean(md) == md
 
 
 def test_body_lines_still_get_space_cleanup() -> None:
     """反例的另一半:正文行照旧做空格修正(长行、或以标点收尾的行)。"""
-    assert clean("这是 中文 排版 空格修正的例子。\n") == "这是中文排版空格修正的例子。"
+    assert clean("这是 中文 排版 空格修正的例子。\n") == "这是中文排版空格修正的例子。\n"
     assert clean("这是一行足够长的中文正文,里面 插了 位置奇怪的 空格。\n") \
-        == "这是一行足够长的中文正文,里面插了位置奇怪的空格。"
+        == "这是一行足够长的中文正文,里面插了位置奇怪的空格。\n"
 
 
 def test_real_page_break_is_still_joined() -> None:
-    """反误伤不能把主功能一起收掉:排满一行的真正跨页断行仍要拼接。"""
+    """反误伤不能把主功能一起收掉:排满一行的真正跨页断行仍要拼接(有证据层时)。"""
     md = "上一段在这里被断开了,前半句一直写到了这一行末尾为止\n\n下一行继续,并以句号结尾。\n"
-    assert clean(md) == "上一段在这里被断开了,前半句一直写到了这一行末尾为止下一行继续,并以句号结尾。"
+    evidence = [
+        {"type": "text", "text": "上一段在这里被断开了,前半句一直写到了这一行末尾为止",
+         "page_idx": 0},
+        {"type": "text", "text": "下一行继续,并以句号结尾。", "page_idx": 1},
+    ]
+    joined = "上一段在这里被断开了,前半句一直写到了这一行末尾为止下一行继续,并以句号结尾。\n"
+    assert clean(md, evidence=evidence) == joined
+
+
+def test_cross_block_join_is_only_a_suggestion_without_evidence() -> None:
+    """没有证据层,同一份断行一个字都不动 —— 建议留在报告里,等人工确认。"""
+    md = "上一段在这里被断开了,前半句一直写到了这一行末尾为止\n\n下一行继续,并以句号结尾。\n"
+    assert clean(md) == md
 
 
 # ---------------------------------------------------------------- 行间数学块
@@ -513,13 +549,13 @@ def test_math_block_is_protected_verbatim() -> None:
     校验据此给**正常产物**报「硬换行减少」的假警告。单行块与 `\\[ … \\]` 同理。
     """
     block = "$$\na^2+b^2=c^2\n$$\n"
-    assert clean(block) == block.rstrip("\n")
+    assert clean(block) == block
 
     single = "$$E = mc^2$$\n"
-    assert clean(single) == single.rstrip("\n")
+    assert clean(single) == single
 
     bracket = "\\[\nE = mc^2\n\\]\n"
-    assert clean(bracket) == bracket.rstrip("\n")
+    assert clean(bracket) == bracket
 
 
 def test_math_block_is_not_joined_with_following_paragraph() -> None:
@@ -538,8 +574,8 @@ $$
 这里是正文,应当与公式分开成段。
 """
     out = clean(md)
-    assert out == md.rstrip("\n")
-    assert out.count("\n") == md.rstrip("\n").count("\n")   # 行数不变:没有被压平
+    assert out == md
+    assert out.count("\n") == md.count("\n")                  # 行数不变:没有被压平
     assert "\n\n这里是正文" in out                           # 公式与正文仍是两个结构
     assert "\\end{aligned}$$这里是正文" not in out
     assert clean(out) == out                               # 幂等(硬换行不会叠加)

@@ -243,8 +243,9 @@ def test_cleaned_footnotes_survive_into_the_epub(tmp_path: Path) -> None:
     import re
     import zipfile
 
+    from clean import clean_text
+    from clean.options import CleanOptions
     from epub.pandoc import build_epub as pandoc_build_epub
-    from markdown.cleaner import CleanOptions, clean_markdown
 
     src = tmp_path / "src"
     src.mkdir(parents=True, exist_ok=True)
@@ -253,7 +254,7 @@ def test_cleaned_footnotes_survive_into_the_epub(tmp_path: Path) -> None:
            "[^1]: 第一条脚注,内容是中文,长度足够长\n"
            "[^2]: 第二条脚注,内容也是中文,同样足够长\n\n"
            "结论段落正文正文正文正文正文[^2],以句号结尾。\n")
-    cleaned = clean_markdown(raw, options=CleanOptions())
+    cleaned = clean_text(raw, source="footnote.md", options=CleanOptions()).md_after
     assert markdown_footnote_defs(cleaned) == 2          # 定义没被吃掉
 
     book_md = src / "book.md"
@@ -358,17 +359,19 @@ def test_orphan_image_warns(tmp_path: Path) -> None:
 
 # ---------------------------------------------------------------- 与转换流程接线
 
-def test_verify_output_merges_content_check_and_strict_raises(tmp_path: Path) -> None:
-    """batch.verify_output 带上源 Markdown 后,--strict 必须因内容丢失而失败。"""
+def test_verify_output_merges_content_check_and_raises(tmp_path: Path) -> None:
+    """batch.verify_output 带上源 Markdown 后,内容丢失(致命)必须判失败。
+
+    内容对照是**结构校验发现不了**的那一类损坏:包完全合法,正文却少了几章、
+    图片少了大半。它属于致命问题,默认模式(不只是 --strict)就要判失败。
+    """
     src = tmp_path / "src"
     epub = build_epub(src, tmp_path / "few.epub", title="样本书", with_image=False)
     md = tmp_path / "book.md"
     md.write_text("# 样本书\n\n正文,句号结尾。\n\n![图](images/a.png)\n", encoding="utf-8")
 
-    result = batch.verify_output(epub, book_md=md)          # 默认只告警
-    assert any(i.code == "content_images_lost" for i in result.issues)
-    assert not result.ok
-
+    with pytest.raises(batch.VerifyError, match="图片丢失"):
+        batch.verify_output(epub, book_md=md)            # 默认模式:同样判失败
     with pytest.raises(batch.VerifyError, match="图片丢失"):
         batch.verify_output(epub, book_md=md, strict=True)
 

@@ -94,12 +94,15 @@ def test_error_code_maps_real_exception_types() -> None:
     from backends.mineru_backend import MinerUError
     from backends.paddleocr_backend import PaddleOCRError
     from batch import VerifyError
+    from clean import CleanEngineError
     from epub.pandoc import PandocMissingError
     import pymupdf
 
     cases: list[tuple[BaseException, str]] = [
         (PandocMissingError("未找到 pandoc"), "missing_dependency"),
         (VerifyError("EPUB 校验未通过"), "verify_failed"),
+        # IR 清理失败:前端要能说「清理这一步失败了」,而不是笼统的转换失败
+        (CleanEngineError("IR 构造失败"), "clean_failed"),
         (MinerUError("解析失败"), "ocr_failed"),
         (PaddleOCRError("提交异常"), "ocr_failed"),
         (BackendError("其他后端错误"), "backend_failed"),

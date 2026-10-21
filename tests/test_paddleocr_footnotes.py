@@ -250,8 +250,8 @@ def test_old_cache_without_structured_result_still_merges(tmp_path, fake) -> Non
 
 def test_paddleocr_footnotes_reach_the_epub_as_native_footnotes(tmp_path, fake) -> None:
     """PaddleOCR → 统一脚注层 → Cleaner → Pandoc → EPUB:产物里是原生脚注。"""
+    from clean import clean_text
     from epub.pandoc import build_epub
-    from markdown.cleaner import clean_markdown
 
     markdown, blocks = body_page("甲处引用①,乙处引用②,内容足够长以便成段。",
                                  ["① 甲的注释:内容足够长,用来生成真脚注。",
@@ -261,7 +261,8 @@ def test_paddleocr_footnotes_reach_the_epub_as_native_footnotes(tmp_path, fake) 
     result = _adapter().convert(make_pdf(tmp_path / "扫描书.pdf", pages=1), work)
 
     assert result.stats["footnotes_linked"] == 2
-    cleaned = clean_markdown(result.book_md.read_text(encoding="utf-8"))
+    cleaned = clean_text(result.book_md.read_text(encoding="utf-8"),
+                         source=str(result.book_md)).md_after
     assert "[^1]" in cleaned and "[^1]: 甲的注释" in cleaned
     (work / "book.md").write_text(cleaned, encoding="utf-8")
 

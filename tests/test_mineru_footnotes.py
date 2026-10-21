@@ -277,8 +277,8 @@ def test_structured_footnotes_reach_the_epub_as_native_footnotes(tmp_path: Path)
     """
     import zipfile
 
+    from clean import clean_text
     from epub.pandoc import build_epub as pandoc_build_epub
-    from markdown.cleaner import clean_markdown
 
     md, blocks = build({
         0: (f"{BODY}甲处引用①,乙处引用②。", ["① 甲的注释:内容足够长,用来生成真脚注。",
@@ -287,7 +287,7 @@ def test_structured_footnotes_reach_the_epub_as_native_footnotes(tmp_path: Path)
     rebuilt = reconstruct_footnotes(md, blocks)
     assert rebuilt.stats["linked"] == 2
 
-    cleaned = clean_markdown(rebuilt.md)                 # Cleaner 不能把生成的脚注打散
+    cleaned = clean_text(rebuilt.md, source="rebuilt.md").md_after   # 清理不得打散脚注
     assert "[^1]" in cleaned and "[^1]: 甲的注释" in cleaned
 
     work = tmp_path / "work"

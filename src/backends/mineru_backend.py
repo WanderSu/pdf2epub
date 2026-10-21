@@ -40,10 +40,12 @@ from .base import (
     OcrPart,
     PartStore,
     TaskCache,
+    VARIANT_ORIGINAL,
     _safe_part_name,
     file_fingerprint,
     normalize_image_refs,
     params_fingerprint,
+    rendered_variant,
 )
 from page_result import page_marker_from_range
 from paths import load_api_key
@@ -167,20 +169,24 @@ class MinerUAdapter(Backend):
             raise MinerUError(f"文件不存在: {pdf_path}", retryable=False)
 
         try:
-            result = self._convert_inner(pdf_path, work_dir, variant="original")
+            result = self._convert_inner(pdf_path, work_dir, variant=VARIANT_ORIGINAL)
         except MinerUError as e:
             # 伪文字层等结构异常的文件 MinerU 会解析失败,降级为渲染纯图后重试;
             # 其他错误(网络、额度、格式不支持)直接抛 —— 重试只是白跑一轮
             if not _is_parse_failure(e.err_msg):
                 raise
             print("[mineru] 原文件解析失败(可能为伪文字层),降级为渲染纯图后重试 ...")
-            self._cache(work_dir).clear()   # 原文件那批任务已判死,缓存作废
             rendered = self._render_to_image_pdf(pdf_path, work_dir)
+            variant = rendered_variant()
+            # 原文件那批任务已判死:任务缓存作废(渲染变体自己那份也清一次,
+            # 上一次中断留下的渲染批次同样不可信)
+            self._cache(work_dir, VARIANT_ORIGINAL).clear()
+            self._cache(work_dir, variant).clear()
             try:
                 # source_pdf=原文件:段缓存指纹跟着原始 PDF,降级只重做真正解析失败的
                 # 那些段,已经成功的段照样复用
                 result = self._convert_inner(
-                    rendered, work_dir, variant="rendered", source_pdf=pdf_path
+                    rendered, work_dir, variant=variant, source_pdf=pdf_path
                 )
                 print("[mineru] 降级 OCR 成功(渲染纯图版)")
             finally:
@@ -191,8 +197,8 @@ class MinerUAdapter(Backend):
         return result
 
     @staticmethod
-    def _cache(work_dir: Path) -> TaskCache:
-        return TaskCache(work_dir, MinerUAdapter.name)
+    def _cache(work_dir: Path, variant: str = VARIANT_ORIGINAL) -> TaskCache:
+        return TaskCache(work_dir, MinerUAdapter.name, variant=variant)
 
     def _params_fp(self) -> str:
         """OCR 参数指纹:换模型/语言/开关后不能复用旧结果。"""
@@ -208,25 +214,29 @@ class MinerUAdapter(Backend):
         self,
         pdf_path: Path,
         work_dir: Path,
-        variant: str = "original",
+        variant: str = VARIANT_ORIGINAL,
         source_pdf: Path | None = None,
     ) -> ConversionResult:
         """核心转换:按段提交云端任务,段结果落盘,重跑只补缺失的段。
 
         variant/source_pdf:降级重试时 pdf_path 是本地渲染的纯图临时文件,而段缓存 /
         任务缓存的内容指纹要跟着**原始 PDF**(临时文件每次重渲染字节可能不同)。
-        variant 只记录在段元信息里,不进缓存键 —— 段的身份是「哪本书的哪几页 + OCR
-        参数」,换上传变体(原文件 / 渲染纯图)不影响已取得的那几页结果的价值。
+
+        variant **进缓存键、也进段目录名**(见 ``PartStore``):同一个段 id 的
+        「原文件」与「渲染纯图」是两次不同的 OCR,不能互相命中、更不能互相覆盖。
+        代价是同一段换变体要重新计费一次 —— 这正是"省一次请求"与"用错结果"之间
+        必须选对的地方。
         """
         source = source_pdf or pdf_path
-        cache = self._cache(work_dir)
+        cache = self._cache(work_dir, variant)
         params_fp = self._params_fp()
-        store = PartStore(work_dir, self.name, file_fingerprint(source), resume=self.resume)
+        store = PartStore(work_dir, self.name, file_fingerprint(source),
+                          resume=self.resume, variant=variant)
 
         total_pages = self._count_pages(pdf_path)
         parts = self._plan_parts(total_pages)
         sharded = len(parts) > 1
-        kind = "渲染纯图版" if variant == "rendered" else "原文件"
+        kind = "渲染纯图版" if variant.startswith("rendered") else "原文件"
 
         # 1. 续跑:上一次「已提交但未取回」的批次先等完(不重新上传)
         task_id = self._resume_batch(cache, store, params_fp, variant, source, parts,

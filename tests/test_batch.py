@@ -24,7 +24,10 @@ from batch import (
     sanitize_name,
     verify_output,
 )
-from conftest import corrupt_zip_member, make_pdf, rewrite_epub, truncate_file
+from conftest import (corrupt_zip_member, make_pdf, rewrite_epub, truncate_file,
+                      write_png)
+from ir.model import text_sha256
+from ir.model import text_sha256
 
 from epub import pandoc
 from epub.verify import VerifyResult, verify_epub
@@ -107,14 +110,258 @@ def test_markdown_input_pipeline(tmp_path: Path) -> None:
     assert results[0].epub is not None and results[0].epub.exists()
 
 
+# ---------------------------------------------------------------- 清理接线(P6)
+
+def test_conversion_runs_the_ir_clean_engine_and_leaves_an_audit_trail(tmp_path: Path) -> None:
+    """正式转换流程走的是 IR 清理引擎,且留下可复核的报告(P6 的接线验收)。
+
+    「引擎单测全绿」和「引擎真的接进了转换流程」是两件事:这里跑的是
+    ``process_batch`` → ``_process_markdown`` → ``clean_stage``,断言的落点是
+    **产物目录**(``work/<书名>/ir/``)与**清理后的 book.md**,而不是函数返回值。
+    """
+    raw = "# 手记\n\n正文第一段,句号结尾。\n\n12\n\n正文第二段,句号结尾。\n"
+    md = tmp_path / "src" / "清理接线.md"
+    md.parent.mkdir(parents=True, exist_ok=True)
+    md.write_text(raw, encoding="utf-8")
+
+    results = process_batch(
+        [md], config=dict(CFG),
+        work_root=tmp_path / "work", output_dir=tmp_path / "out", force=True,
+    )
+    assert [r.status for r in results] == ["done"]
+
+    work = tmp_path / "work" / "清理接线"
+    ir_dir = work / "ir"
+    for name in ("meta.json", "blocks.jsonl", "clean-report.json", "clean.diff"):
+        assert (ir_dir / name).exists(), f"缺少 IR 产物 {name}"
+
+    report = json.loads((ir_dir / "clean-report.json").read_text(encoding="utf-8"))
+    assert report["engine"] == "ir"                       # 不是旧引擎,也不是"没跑"
+    assert report["run"]["backend"] == "markdown"
+    assert report["run"]["source_md_sha256"] == text_sha256(raw)   # 记的是清理前的输入
+    assert "page_numbers" in report["stats"]["by_rule"]  # 独立页码行确实被提了案
+    assert all(p["status"] == "applied" for p in report["patches"])
+
+    # 清理真的写回了 book.md(Pandoc 吃的是清理后的这一份)
+    cleaned = (work / "book.md").read_text(encoding="utf-8")
+    assert "\n12\n" not in cleaned
+    assert "正文第一段,句号结尾。" in cleaned
+
+
+def test_clean_failure_fails_the_file_without_falling_back(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """清理失败 = 该文件失败:错误码 clean_failed、不重试、不产出"没清理过的书"。
+
+    P6 删掉旧引擎后,「清理出问题就走另一条路」不再是选项 —— 静默产出一本没清理的
+    书比失败更糟(用户会把噪声当成产物缺陷)。这里把引擎打桩成必然失败,验证批处理
+    侧的反应。
+    """
+    from clean import CleanEngineError
+
+    md = tmp_path / "src" / "清理失败.md"
+    md.parent.mkdir(parents=True, exist_ok=True)
+    md.write_text("# 手记\n\n正文,句号结尾。\n", encoding="utf-8")
+
+    calls = {"n": 0}
+
+    def boom(*args, **kwargs):
+        calls["n"] += 1
+        raise CleanEngineError("IR 构造失败(模拟)")
+
+    monkeypatch.setattr(batch, "clean_book_md", boom)
+    monkeypatch.setattr(batch.time, "sleep", lambda *_: None)
+
+    result = process_one(md, config=dict(CFG), work_root=tmp_path / "work",
+                         output_dir=tmp_path / "out", retries=2, force=True)
+    assert result.status == "failed"
+    assert calls["n"] == 1                       # 确定性失败:不重试
+    assert "IR 构造失败(模拟)" in result.error
+    assert result.epub is None
+    assert not list((tmp_path / "out").glob("*.epub"))     # 没有半成品交付物
+
+
+# ---------------------------------------------------------------- 清理接线(P6)
+
+def test_conversion_runs_the_ir_clean_engine_and_leaves_an_audit_trail(tmp_path: Path) -> None:
+    """正式转换流程走的是 IR 清理引擎,且留下可复核的报告(P6 的接线验收)。
+
+    「引擎单测全绿」和「引擎真的接进了转换流程」是两件事:这里跑的是
+    ``process_batch`` → ``_process_markdown`` → ``clean_stage``,断言的落点是
+    **产物目录**(``work/<书名>/ir/``)与**清理后的 book.md**,而不是函数返回值。
+    """
+    raw = "# 手记\n\n正文第一段,句号结尾。\n\n12\n\n正文第二段,句号结尾。\n"
+    md = tmp_path / "src" / "清理接线.md"
+    md.parent.mkdir(parents=True, exist_ok=True)
+    md.write_text(raw, encoding="utf-8")
+
+    results = process_batch(
+        [md], config=dict(CFG),
+        work_root=tmp_path / "work", output_dir=tmp_path / "out", force=True,
+    )
+    assert [r.status for r in results] == ["done"]
+
+    work = tmp_path / "work" / "清理接线"
+    ir_dir = work / "ir"
+    for name in ("meta.json", "blocks.jsonl", "clean-report.json", "clean.diff"):
+        assert (ir_dir / name).exists(), f"缺少 IR 产物 {name}"
+
+    report = json.loads((ir_dir / "clean-report.json").read_text(encoding="utf-8"))
+    assert report["engine"] == "ir"                       # 不是旧引擎,也不是"没跑"
+    assert report["run"]["backend"] == "markdown"
+    assert report["run"]["source_md_sha256"] == text_sha256(raw)   # 记的是清理前的输入
+    assert "page_numbers" in report["stats"]["by_rule"]  # 独立页码行确实被提了案
+    assert all(p["status"] == "applied" for p in report["patches"])
+
+    # 清理真的写回了 book.md(Pandoc 吃的是清理后的这一份)
+    cleaned = (work / "book.md").read_text(encoding="utf-8")
+    assert "\n12\n" not in cleaned
+    assert "正文第一段,句号结尾。" in cleaned
+
+
+def test_clean_failure_fails_the_file_without_falling_back(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """清理失败 = 该文件失败:错误码 clean_failed、不重试、不产出"没清理过的书"。
+
+    P6 删掉旧引擎后,「清理出问题就走另一条路」不再是选项 —— 静默产出一本没清理的
+    书比失败更糟(用户会把噪声当成产物缺陷)。这里把引擎打桩成必然失败,验证批处理
+    侧的反应。
+    """
+    from clean import CleanEngineError
+
+    md = tmp_path / "src" / "清理失败.md"
+    md.parent.mkdir(parents=True, exist_ok=True)
+    md.write_text("# 手记\n\n正文,句号结尾。\n", encoding="utf-8")
+
+    calls = {"n": 0}
+
+    def boom(*args, **kwargs):
+        calls["n"] += 1
+        raise CleanEngineError("IR 构造失败(模拟)")
+
+    monkeypatch.setattr(batch, "clean_book_md", boom)
+    monkeypatch.setattr(batch.time, "sleep", lambda *_: None)
+
+    result = process_one(md, config=dict(CFG), work_root=tmp_path / "work",
+                         output_dir=tmp_path / "out", retries=2, force=True)
+    assert result.status == "failed"
+    assert calls["n"] == 1                       # 确定性失败:不重试
+    assert "IR 构造失败(模拟)" in result.error
+    assert result.epub is None
+    assert not list((tmp_path / "out").glob("*.epub"))     # 没有半成品交付物
+
+
 # ---------------------------------------------------------------- 校验门禁
 
-def test_verify_output_reports_and_strict_raises(sample_epub: Path, tmp_path: Path) -> None:
+def test_fatal_verify_error_fails_in_default_mode_too(sample_epub: Path, tmp_path: Path) -> None:
+    """致命校验错误:**默认模式**也必须判失败(P8)。
+
+    旧行为:默认模式只把 error 写进日志,任务照旧判成功、退出码 0,残缺 EPUB
+    留在 output/ 里 —— 调用方(桌面端/CI)无从发现。P7 记为 R-1,这里收敛。
+    """
     broken = rewrite_epub(sample_epub, tmp_path / "broken.epub", drop_suffixes=(".png",))
-    result = verify_output(broken)                      # 默认只告警
-    assert result.ok is False
     with pytest.raises(VerifyError, match="EPUB 校验未通过"):
-        verify_output(broken, strict=True)
+        verify_output(broken)                        # 默认模式:同样判失败
+    with pytest.raises(VerifyError, match="EPUB 校验未通过"):
+        verify_output(broken, strict=True)           # 严格模式:判失败
+
+
+def _fake_verify(monkeypatch: pytest.MonkeyPatch,
+                 issues: tuple[tuple[str, str, str], ...],
+                 *, strict: bool = False) -> VerifyResult:
+    """把 ``batch.verify_epub`` 换成"只产出指定 issue"的假校验器后跑 verify_output。"""
+    def fake(epub, **kwargs):
+        result = VerifyResult()
+        for level, code, message in issues:
+            result.add(level, code, message)
+        return result
+
+    monkeypatch.setattr(batch, "verify_epub", fake)
+    return verify_output(Path("whatever.epub"), strict=strict)
+
+
+@pytest.mark.parametrize("code", ["image_orphan", "empty_chapters", "cover_not_first",
+                                  "content_text_less", "content_headings_lost"])
+def test_non_fatal_warnings_are_tolerated_by_default(monkeypatch: pytest.MonkeyPatch,
+                                                     code: str) -> None:
+    """非致命警告:默认只记录,不判失败 —— 不能把 warning 一律升级成错误。"""
+    result = _fake_verify(monkeypatch, (("warning", code, f"模拟 {code}"),))
+    assert result.ok
+    assert [i.code for i in result.warnings] == [code]
+
+
+def test_strict_upgrades_only_content_warnings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--strict`` 只升级**内容对照**类警告:排版/格式类提示仍然只是提示。
+
+    "严格"不等于"所有 warning 都判失败":正常书几乎总带几条格式提示,一律升级
+    会让每本书都失败,用户随即学会忽略提示 —— 报警的价值也就没了。
+    """
+    with pytest.raises(VerifyError, match="模拟 content_text_less"):
+        _fake_verify(monkeypatch,
+                     (("warning", "content_text_less", "模拟 content_text_less"),),
+                     strict=True)
+    tolerated = _fake_verify(monkeypatch, (("warning", "image_orphan", "孤立图片"),),
+                             strict=True)
+    assert tolerated.ok
+
+
+def _image_md(path: Path, names: tuple[str, ...]) -> Path:
+    """一篇引用若干图片的 Markdown(正文够长,免得被判空章节)。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = "\n\n".join(f"![插图 {i}](images/{name})" for i, name in enumerate(names, 1))
+    path.write_text(f"# 图册\n\n这是一段足够长的正文,用来说明图片之外的正文也完整无缺。\n\n{body}\n",
+                    encoding="utf-8")
+    return path
+
+
+def test_missing_images_directory_fails_in_default_mode(tmp_path: Path) -> None:
+    """`images/` 整个目录不存在:默认模式必须判失败,且不留可被误认成功的产物。"""
+    md = _image_md(tmp_path / "src" / "整批缺图.md", ("a.png", "b.png"))
+    out = tmp_path / "out"
+    result = process_one(md, config=dict(CFG), work_root=tmp_path / "work",
+                         output_dir=out, force=True)
+    assert result.status == "failed"
+    assert result.epub is None
+    assert "图片" in result.error
+    assert not (out / "整批缺图.epub").exists(), "残缺产物不能留在成功输出位置"
+    assert (out / "整批缺图.epub.failed").is_file(), "失败产物改名保留现场,便于排查"
+
+
+def test_single_missing_image_fails_in_default_mode(tmp_path: Path) -> None:
+    """只缺一张图:同样判失败;清理阶段还要在报告里如实记一条「图片引用缺失」。"""
+    md = _image_md(tmp_path / "src" / "缺一张.md", ("a.png", "b.png"))
+    images = md.parent / "images"
+    images.mkdir(parents=True, exist_ok=True)
+    write_png(images / "a.png")
+    out = tmp_path / "out"
+    result = process_one(md, config=dict(CFG), work_root=tmp_path / "work",
+                         output_dir=out, force=True)
+    assert result.status == "failed"
+    assert not (out / "缺一张.epub").exists()
+    assert (out / "缺一张.epub.failed").is_file()
+
+    report = json.loads((tmp_path / "work" / "缺一张" / "ir" / "clean-report.json")
+                        .read_text(encoding="utf-8"))
+    assert any("图片引用缺失" in issue and "b.png" in issue for issue in report["issues"])
+
+
+def test_verifier_exception_never_reports_success(tmp_path: Path,
+                                                  monkeypatch: pytest.MonkeyPatch) -> None:
+    """校验器自己抛异常:不能因为异常没被识别成"校验失败"就把任务报成成功。"""
+    def boom(epub, **kwargs):
+        raise RuntimeError("校验器内部错误(模拟)")
+
+    monkeypatch.setattr(batch, "verify_epub", boom)
+    monkeypatch.setattr(batch.time, "sleep", lambda *_: None)
+    md = tmp_path / "src" / "校验炸了.md"
+    md.parent.mkdir(parents=True, exist_ok=True)
+    md.write_text("# 校验炸了\n\n正文,句号结尾。\n", encoding="utf-8")
+    out = tmp_path / "out"
+    result = process_one(md, config=dict(CFG), work_root=tmp_path / "work",
+                         output_dir=out, retries=0, force=True)
+    assert result.status == "failed"
+    assert "校验器内部错误" in result.error
+    assert result.epub is None
+    assert not list(out.glob("*.epub"))
 
 
 def test_verify_error_is_not_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -344,6 +591,101 @@ def test_previous_good_output_is_kept_when_force_run_fails_early(tmp_path: Path,
     assert result.status == "failed"
     assert out.is_file() and (out.stat().st_size, out.stat().st_mtime) == before
     assert not list((tmp_path / "out").glob("*.failed"))
+
+
+# ------------------------------------------- P9 旧成品保全(重转失败的代价)
+
+def _good_md(path: Path, title: str = "重转书") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"# {title}\n\n这是一段足够长的正文,用来保证产物本身是合格的成品。\n",
+                    encoding="utf-8")
+    return path
+
+
+def _failing_verify(monkeypatch: pytest.MonkeyPatch) -> None:
+    """让新一轮「构建成功、校验失败」——最容易被忽略的覆盖旧成品的场景。"""
+    def fake(epub, **kwargs):
+        result = VerifyResult()
+        result.fail("chapters_empty_mass", "模拟校验失败")
+        return result
+
+    monkeypatch.setattr(batch, "verify_epub", fake)
+
+
+def test_previous_good_epub_survives_a_failing_reconversion(tmp_path: Path,
+                                                            monkeypatch: pytest.MonkeyPatch) -> None:
+    """新一轮**构建成功但校验失败**时,上一轮能读的那本书必须还在(P9)。
+
+    pandoc 是就地写 ``output/<名>.epub`` 的:旧行为下旧成品先被新字节盖掉,失败产物
+    再被改名移走 —— 用户重转一次,output/ 里只剩一个 ``.failed``,原本能读的书没了。
+    重转失败的正确结果是「回到还有上一本」,而不是连上一本一起赔进去。
+    """
+    kw = _batch_kwargs(tmp_path)
+    md = _good_md(tmp_path / "src" / "重转书.md")
+    assert process_one(md, force=True, retries=0, **kw).status == "done"
+    out = tmp_path / "out" / "重转书.epub"
+    good = out.read_bytes()
+
+    _failing_verify(monkeypatch)
+    result = process_one(md, force=True, retries=0, **kw)
+    assert result.status == "failed"
+    assert result.epub is None                       # 失败产物不是交付物
+    assert out.is_file(), "上一轮能读的书不能因为重转失败而消失"
+    assert out.read_bytes() == good, "还原的必须是上一轮那个字节不差的成品"
+    assert batch.archive_issue(out) is None          # 还原物本身完好,可被后续复用
+    assert (tmp_path / "out" / "重转书.epub.failed").is_file()   # 失败现场另行保留
+    assert "已恢复上一轮的成品" in result.error      # 且不静默
+
+
+def test_incomplete_previous_epub_is_not_restored(tmp_path: Path,
+                                                  monkeypatch: pytest.MonkeyPatch) -> None:
+    """上一轮产物本身就是残缺的:没有保全价值,不该被放回 output/ 冒充完成。"""
+    kw = _batch_kwargs(tmp_path)
+    md = _good_md(tmp_path / "src" / "残书.md")
+    assert process_one(md, force=True, retries=0, **kw).status == "done"
+    out = tmp_path / "out" / "残书.epub"
+    truncate_file(out)                               # 上一轮就是半截产物
+
+    _failing_verify(monkeypatch)
+    result = process_one(md, force=True, retries=0, **kw)
+    assert result.status == "failed"
+    assert not out.exists(), "残缺旧产物不该被还原回成功输出位置"
+    assert (tmp_path / "out" / "残书.epub.failed").is_file()
+    assert "已恢复上一轮的成品" not in result.error
+
+
+def test_verifier_exception_closes_verify_stage_and_is_coded_verify_failed(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """校验器自己抛异常:`verify` 阶段要有 done 收尾,错误码归 verify_failed(P9)。
+
+    只有 start 没有 done 时前端会永久停在 95%;报成 ``convert_failed`` 则会让人去查
+    pandoc,而 pandoc 这一步其实已经写出了产物。
+    """
+    kw = _batch_kwargs(tmp_path)
+    md = _good_md(tmp_path / "src" / "校验炸了.md", title="校验炸了")
+
+    def boom(epub, **kwargs):
+        raise RuntimeError("校验器内部错误(模拟)")
+
+    monkeypatch.setattr(batch, "verify_epub", boom)
+    monkeypatch.setattr(batch.time, "sleep", lambda *_: None)
+
+    buf = io.StringIO()
+    events.configure(stream=buf)
+    try:
+        result = process_one(md, retries=0, force=True, **kw)
+    finally:
+        events.configure(False)
+
+    assert result.status == "failed"
+    assert "校验器内部错误" in result.error
+    lines = [json.loads(line) for line in buf.getvalue().splitlines() if line.strip()]
+    stages = [(e["name"], e["state"], bool(e.get("failed")))
+              for e in lines if e.get("event") == "stage"]
+    assert ("verify", "start", False) in stages
+    assert ("verify", "done", True) in stages, "校验异常也要收尾,否则前端进度卡死"
+    codes = [e["code"] for e in lines if e.get("event") == "error"]
+    assert codes == ["verify_failed"]
 
 
 # ------------------------------------------- P2-3 Pandoc 缺失(环境缺失,不是临时故障)

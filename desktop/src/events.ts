@@ -64,6 +64,7 @@ const ERROR_KIND: Record<string, ErrorKind> = {
   ocr_failed: "ocr",
   backend_failed: "ocr",
   verify_failed: "output",    // 产物校验未通过
+  clean_failed: "output",     // Markdown 清理失败(IR 引擎,不回退)
   output_error: "output",     // 写盘/占用
   convert_failed: "unknown",
 };

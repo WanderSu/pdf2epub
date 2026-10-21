@@ -18,7 +18,7 @@ import convert
 from backends.base import ConversionResult
 from conftest import make_mixed_pdf, write_png
 from detector.pdf_detector import PDFDetector, PDFType
-from markdown.cleaner import clean_markdown
+from clean import clean_text
 from page_result import (
     PageResult,
     contiguous_runs,
@@ -172,11 +172,8 @@ def test_ocr_images_merge_into_images_dir_and_refs_are_valid(tmp_path: Path,
     assert all((work / ref).exists() for ref in refs)
 
     # 清理阶段(清理管线是 hybrid 与纯文字版共用的那一条)不得报图片缺失
-    from markdown.cleaner import CleanReport
-
-    report = CleanReport()
-    clean_markdown(md, images_dir=work / "images", report=report)
-    assert [i for i in report.issues if "图片引用缺失" in i] == []
+    issues = clean_text(md, backend="hybrid(paddleocr)", images_dir=work / "images").issues
+    assert [i for i in issues if "图片引用缺失" in i] == []
 
 
 IMAGES_NAME = "fig.png"

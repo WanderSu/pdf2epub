@@ -15,9 +15,9 @@ from datetime import datetime
 from pathlib import Path
 
 from batch import process_batch, setup_logging
+from clean.options import CLEAN_KEYS, resolve_options
 from convert import load_config
 from detector.pdf_detector import PDFDetector
-from markdown.cleaner import CLEAN_KEYS, resolve_options
 from paths import config_file
 import events
 
@@ -39,7 +39,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-resume", action="store_true",
                    help="不复用云端 OCR 已提交的任务(默认中断后可续跑,不重新上传)")
     p.add_argument("--strict", action="store_true",
-                   help="EPUB 生成后做结构 + 内容校验,有失败项即判该文件失败(默认只告警)")
+                   help="严格模式:内容对照的「疑似缩水」也判失败(默认只告警);"
+                        "致命校验错误(结构破损/内容丢失)在任何模式下都判失败")
     p.add_argument("--lang", default=None,
                    help="EPUB 语言(如 zh-CN/en/ja/ko);默认按正文脚本自动检测")
     p.add_argument("--jsonevents", "--json-events", dest="json_events", action="store_true",
@@ -48,6 +49,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="预检:只检测类型/页数/计划后端/分片与额度,不产出任何文件")
     p.add_argument("--json", action="store_true",
                    help="配合 --dry-run:以 JSON 输出预检结果(桌面端解析用)")
+    p.add_argument("--dump-ir", action="store_true",
+                   help="把输入的 Markdown 切成 IR 并写到 <work>/<书名>/ir/(预览用,不生成 EPUB)")
     p.add_argument("--log", default=None, help="日志文件(默认 logs/batch-<时间>.log)")
     p.add_argument("--no-log", action="store_true", help="不写日志文件(仅控制台)")
     p.add_argument("--verbose", "-v", action="store_true", help="详细日志")
@@ -97,6 +100,10 @@ def main(argv: list[str] | None = None) -> int:
     disabled = [k for k in CLEAN_KEYS if not getattr(clean_options, k)]
     if args.clean_disable and disabled:
         print(f"[clean] 已关闭清理项: {', '.join(disabled)}")
+
+    # IR 预览(--dump-ir):只切片与落盘,不转换、不联网、不改 EPUB 输出
+    if args.dump_ir:
+        return _dump_ir(paths, Path(args.work))
 
     # 预检(--dry-run):只检测与规划,不建目录、不调后端、不产出文件
     if args.dry_run:
@@ -165,6 +172,39 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  ✗ {r.source.name}: {r.error}")
         return 1
     return 0
+
+
+def _dump_ir(paths: list[Path], work_root: Path) -> int:
+    """为 Markdown 输入生成 IR 并落盘(P1 的验收入口,不参与 EPUB 输出)。
+
+    PDF 输入要等 IR 接进转换链路(P2)才支持 —— 现在只接受 Markdown,
+    免得给出「看起来能用」的假路径。
+    """
+    from ir import Producer, build_ir, dump_ir, render_ir
+
+    failed = 0
+    for path in paths:
+        if path.suffix.lower() not in {".md", ".markdown"}:
+            print(f"跳过 {path}:--dump-ir 目前只接受 Markdown(接入转换链路在 P2)",
+                  file=sys.stderr)
+            failed += 1
+            continue
+        md = path.read_text(encoding="utf-8")
+        ir = build_ir(
+            md, source=str(path), backend="markdown",
+            # 这份 md 是磁盘上现成的文件,产出方记 markdown 而不是猜某个 OCR 后端
+            producer=Producer.from_backend("markdown", source=str(path),
+                                           variant="original"),
+        )
+        # work/<书名>/book.md 这种布局用书名当目录名,别都落到 book/ 里
+        slug = path.parent.name if path.stem.lower() in {"book", "output"} else path.stem
+        out = dump_ir(ir, work_root / slug)
+        same = render_ir(ir) == md
+        print(f"[ir] {path} → {out}({len(ir.editable_blocks)} 块,"
+              f"往返{'一致' if same else '不一致'})")
+        if not same:
+            failed += 1
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

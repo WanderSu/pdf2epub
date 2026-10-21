@@ -118,6 +118,40 @@ class VerifyResult:
         return f"{len(self.errors)} 失败 {len(self.warnings)} 警告"
 
 
+#: 内容对照类问题的 code 前缀(``epub.content.verify_content`` 产出)
+CONTENT_CODE_PREFIX = "content_"
+
+
+def is_fatal(issue: VerifyIssue, *, strict: bool = False) -> bool:
+    """这条问题是否应让本次转换判失败(P8 的等级定义)。
+
+    三个等级:
+
+    ====================  ==================================================
+    ``error``(致命)      产物残缺:包打不开 / 结构破损 / 内容丢失。
+                         **任何模式**都判失败 —— 默认模式不能把残缺 EPUB 报成成功。
+    ``warning``(非致命)  可疑但不影响打开与阅读(孤立图片、空章节、样式未引用…)。
+                         默认容忍,只记录不阻断;
+                         ``strict=True`` 时**只有内容对照类**才升级为失败
+                         (严格模式不放过"疑似缩水",但不把排版/格式类提示一律
+                         升级成错误 —— 那会让正常书每次都失败)。
+    (无问题)              通过
+    ====================  ==================================================
+    """
+    if issue.level == "error":
+        return True
+    return (strict and issue.level == "warning"
+            and issue.code.startswith(CONTENT_CODE_PREFIX))
+
+
+def fatal_issue(result: VerifyResult, *, strict: bool = False) -> VerifyIssue | None:
+    """第一条致命问题(没有则 None = 可交付)。"""
+    for issue in result.issues:
+        if is_fatal(issue, strict=strict):
+            return issue
+    return None
+
+
 def archive_issue(epub_path: str | Path) -> str | None:
     """EPUB **容器级**检查:包写完整了就返回 None,否则返回一句人类可读的原因。
 
