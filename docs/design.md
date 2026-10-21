@@ -61,7 +61,7 @@ Windows 下的 PDF → EPUB 转换工具：把电子版 PDF、扫描版 PDF 与�
 
 ## 4. 提取后端
 
-统一 `Backend` 接口，具体服务与后续流程解耦（见 §11）。凭证读取顺序：显式参数 → 环境变量（`MINERU_API_TOKEN` / `PADDLEOCR_TOKEN`）→ 项目根 `apikey.json`（gitignore，用户维护）；**Token 不打印、不进日志、不进会话记录**。
+统一 `Backend` 接口，具体服务与后续流程解耦（见 §11）。凭证读取顺序：显式参数 → 环境变量（`MINERU_API_TOKEN` / `PADDLEOCR_TOKEN`）→ 项目根 `apikey.json`（用户维护）；**Token 不打印、不进日志、不进会话记录，也绝不提交到版本库**。
 
 - **PyMuPDF4LLM（本地）**：逐页提取，图片按需导出。行间公式是矢量绘制，会被渲染成 PNG（见 §6 公式一节）。
 - **云端（MinerU / PaddleOCR-VL）**：输出 LaTeX + images。单任务有页数上限，超过时按 `page_ranges` 分片提交到同一 batch，结果按段序合并为统一的 `book.md` + `images/`（跨段重名图片：内容相同则复用同一份，内容不同才加前缀并改引用），并写入真实页码注释。PaddleOCR-VL 的版面标签过滤**默认忽略 `footnote`**（脚注整批不出现在返回的 Markdown 里），必须显式覆盖成「过滤页眉页脚/页码/边注、保留脚注」；该过滤列表与模型/开关一样参与 OCR 参数指纹，否则改配置后会命中旧结果的缓存。
@@ -141,12 +141,13 @@ Tauri 2 壳 + React，UI 按设计稿实现；**业务逻辑全部在引擎里**
 ebook-converter <文件|目录>... -o output
     [--backend auto|pymupdf|mineru|paddleocr] [--retries N] [--force]
     [--clean-disable LIST] [--strict] [--lang zh-CN] [--json-events]
-    [--dry-run [--json]] [--no-resume] [--verbose] [--no-log]
+    [--dry-run [--json]] [--dump-ir] [--no-resume]
+    [--log FILE|--no-log] [--verbose]
 ```
 
 默认自动判定类型，也可显式指定后端；`.md` 输入跳过 OCR。
 
-批处理语义：单文件失败不中断整体；失败按指数退避重试，但**确定性失败一次即止**（认证/参数/配额、输入文件错误、云端判死、环境缺失、校验失败）—— 重试改变不了结果，扫描书还会重复消耗云端额度；已完成的文件跳过（断点续跑，完成判据含产物容器完整性 —— 截断/写坏的 EPUB 不算完成，会重新转换）；失败产物改名 `.failed` 移出 `output/`，既保留现场又不被下次运行当成完成结果；重转（`--force`）若「构建成功但校验失败」，上一轮**完整可读**的成品会还原回原位（残缺的旧产物不还原），重转失败的代价不是「连上一本一起没了」；；环境缺失（如未安装 pandoc）在提取/OCR 之前即判失败，不重试、不消耗云端额度；默认不并发，优先稳定性。`--dry-run` 只做预检（类型 / 页数 / 计划后端 / 分片数 / 当日额度），不建目录、不写日志文件。
+批处理语义：单文件失败不中断整体；失败按指数退避重试，但**确定性失败一次即止**（认证/参数/配额、输入文件错误、云端判死、环境缺失、校验失败）—— 重试改变不了结果，扫描书还会重复消耗云端额度；已完成的文件跳过（断点续跑，完成判据含产物容器完整性 —— 截断/写坏的 EPUB 不算完成，会重新转换）；失败产物改名 `.failed` 移出 `output/`，既保留现场又不被下次运行当成完成结果；重转（`--force`）若「构建成功但校验失败」，上一轮**完整可读**的成品会还原回原位（残缺的旧产物不还原），重转失败的代价不是「连上一本一起没了」；环境缺失（如未安装 pandoc）在提取/OCR 之前即判失败，不重试、不消耗云端额度；默认不并发，优先稳定性。`--dry-run` 只做预检（类型 / 页数 / 计划后端 / 分片数 / 当日额度），不建目录、不写日志文件；`--dump-ir` 只写入 Markdown 切分后的 IR 预览，不生成 EPUB。
 
 ## 9.5 文件落点约定
 
@@ -170,6 +171,7 @@ src/
   detector/       # PDF 类型检测（含伪文字层识别）
   backends/       # base（抽象）/ pymupdf / mineru / paddleocr
   clean/          # IR 清理引擎（options / rules / engine / patch / report / pipeline）
+  ir/             # IR 模型、解析、对齐、存储与渲染
   markdown/       # textrules（判定与阈值）/ bold（强调字体 → 粗体）
   epub/           # pandoc（封装）/ verify（结构）/ content（内容对照）
   page_result.py  # 页单元：页码、排序、页码注释、扫描区段规划
@@ -184,7 +186,7 @@ config/           # config.yaml + book.css
 desktop/          # Tauri 2 壳（React + Tailwind）
 samples/          # 测试样本（入库：现场生成的 PDF 与真实书籍小样本）
 tests/            # pytest（多数样本现场生成；test_epub_realbook.py 跑 samples/ 下的真实书）
-docs/             # design.md（本文件）+ 阶段档案 + 评审记录
+docs/             # design.md（本文件）+ 阶段档案 + README 截图
 scripts/          # 样本生成 / 端到端 / 校验 / 版本与打包
 ```
 
@@ -200,7 +202,7 @@ scripts/          # 样本生成 / 端到端 / 校验 / 版本与打包
 6. 每条启发式规则「默认保守 + 可单独关闭 + 配不该改的测试」；正常产物零提示。
 7. 检测不可靠时（伪文字层）由用户决定，不强行自动判定。
 8. 状态只能来自结构化事件，不从人类文案解析。
-9. 凭证只存环境变量或 `apikey.json`（gitignore），绝不入库、不打印、不进会话记录。
+9. 凭证只存环境变量或 `apikey.json`，绝不入库、不打印、不进会话记录；项目不会以忽略规则替代这一约束。
 10. 改动要有可复现的验证：测试全绿是底线；调阈值或改启发式之前，先加能复现问题的样本。
 11. 发现架构问题先说明问题与影响，再动手；优先简单、可靠、可维护，而不是功能堆砌。
 

@@ -27,6 +27,7 @@ It handles digital PDFs, scanned PDFs, mixed PDFs, and existing Markdown files. 
 - [FAQ](#faq)
 - [CLI options](#cli-options)
 - [Known limitations](#known-limitations)
+- [Project layout](#project-layout)
 - [Running from source](#running-from-source)
 - [Reporting issues](#reporting-issues)
 
@@ -283,16 +284,12 @@ cd pdf2epub
 uv sync
 ```
 
-The command is then available as:
-
-```text
-.venv/Scripts/ebook-converter.exe
-```
+The examples below use `uv run ebook-converter`. It automatically uses the project's locked Python environment and works on Windows, macOS and Linux.
 
 ### Convert a PDF
 
 ```bash
-.venv/Scripts/ebook-converter.exe "my-book.pdf" -o output
+uv run ebook-converter "my-book.pdf" -o output
 ```
 
 The PDF type is detected automatically.
@@ -300,13 +297,13 @@ The PDF type is detected automatically.
 ### Batch conversion
 
 ```bash
-.venv/Scripts/ebook-converter.exe samples/pdfs/ -o output
+uv run ebook-converter samples/pdfs/ -o output
 ```
 
 ### Convert Markdown
 
 ```bash
-.venv/Scripts/ebook-converter.exe "my-book.md" -o output
+uv run ebook-converter "my-book.md" -o output
 ```
 
 Images referenced by the Markdown go in an `images/` folder next to it:
@@ -323,7 +320,7 @@ If the Markdown was produced by a tool such as MinerU, rename its `full.md` to `
 To see how a PDF would be handled before converting anything:
 
 ```bash
-.venv/Scripts/ebook-converter.exe "my-book.pdf" --dry-run
+uv run ebook-converter "my-book.pdf" --dry-run
 ```
 
 It writes no EPUB and submits no OCR task. It reports:
@@ -339,7 +336,7 @@ It writes no EPUB and submits no OCR task. It reports:
 For example, to use MinerU:
 
 ```bash
-.venv/Scripts/ebook-converter.exe "scanned.pdf" -o output --backend mineru
+uv run ebook-converter "scanned.pdf" -o output --backend mineru
 ```
 
 `--backend paddleocr` and `--backend pymupdf` work the same way.
@@ -392,7 +389,7 @@ OCR is a cloud service and is normally billed per page.
 Before a real conversion you can run:
 
 ```bash
-.venv/Scripts/ebook-converter.exe "scanned.pdf" --dry-run
+uv run ebook-converter "scanned.pdf" --dry-run
 ```
 
 The desktop app also shows how many OCR pages a book is expected to need before it starts.
@@ -422,6 +419,8 @@ work/
     ├── book.md
     └── images/
 ```
+
+Logs are written to `logs/batch-<timestamp>.log` by default. Archive them by book or task as needed; deleting a book's `work/` directory also removes its resumable intermediate state.
 
 If you want to fix something by hand, edit `book.md` and build the EPUB again. That is convenient for books with unusual typography.
 
@@ -578,7 +577,7 @@ If the file name does not follow that pattern, the file name is used as the titl
 Use `--force`:
 
 ```bash
-.venv/Scripts/ebook-converter.exe "my-book.pdf" -o output --force
+uv run ebook-converter "my-book.pdf" -o output --force
 ```
 
 By default the program skips files that are already done.
@@ -614,7 +613,7 @@ A previous artefact that was itself broken is *not* restored.
 footnotes shrinking) also fail the file.
 
 ```bash
-.venv/Scripts/ebook-converter.exe "my-book.pdf" -o output --strict
+uv run ebook-converter "my-book.pdf" -o output --strict
 ```
 
 </details>
@@ -640,6 +639,7 @@ ebook-converter <file-or-dir>... [-o output-dir] [options]
 | `--dry-run` | Preflight only, no files are written |
 | `--json` | With `--dry-run`, print the preflight result as JSON |
 | `--json-events` | Emit stage events as JSON Lines (used by the desktop app) |
+| `--dump-ir` | Write a Markdown-to-IR preview to `<work>/<title>/ir/`; does not build an EPUB |
 | `--no-resume` | Do not reuse a cloud OCR task that was already submitted |
 | `--log FILE` | Log file, default `logs/batch-<timestamp>.log` |
 | `--no-log` | Do not write a log file |
@@ -743,9 +743,17 @@ config/
 └── book.css        # EPUB stylesheet
 
 desktop/             # Windows desktop app
-docs/                # screenshots
-scripts/             # test, verification and build scripts
+docs/                # screenshots, design notes and acceptance material
+samples/             # versioned PDF / Markdown test samples
+scripts/             # build, release, verification and end-to-end scripts
 tests/               # automated tests
+
+# Generated locally while running or building
+output/              # completed EPUB files
+work/                # resumable and editable intermediate files
+logs/                # runtime logs
+dist_release/        # local release packages
+build_cli/ dist_cli/ # PyInstaller temporary files and CLI build output
 ```
 
 ---

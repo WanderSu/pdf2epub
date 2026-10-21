@@ -1,7 +1,7 @@
 """发布包自检(计划 1.4):解压 → 实跑引擎 → 结构校验。
 
-    uv run python scripts/check_release.py dist_release/pdf2epub-v0.2.4-win-x64.zip
-    uv run python scripts/check_release.py dist_release/v0.2.4        # 也可给已解压目录
+    uv run python scripts/check_release.py dist_release/pdf2epub-v0.5.0-win-x64.zip
+    uv run python scripts/check_release.py dist_release/v0.5.0        # 也可给已解压目录
 
 检查项:
   1. 包内必备文件齐全(pdf2epub.exe / cli.exe / config/config.yaml / config/book.css)

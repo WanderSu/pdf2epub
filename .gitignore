@@ -7,48 +7,19 @@ venv/
 # uv
 # .python-version 保留提交(固定项目 Python 版本)
 
-# 输出与日志
-output/
+# 日志
 logs/
 
-# 中间工作目录(Markdown + images)
-work/
-
-# 测试样本已统一收在 samples/ 并入库(tests/test_epub_realbook.py 依赖它)。
-# 早先的 books/ 与此处 samples/pdfs/ 内容重复,且被这里忽略 —— 干净 clone 的
-# 机器上真实书验收测试会被静默 skip。不要再加类似的大目录忽略规则。
-
 # 测试产物(测试代码入库,tests/ 下的中间产物不入库)
-tests/__pycache__/
 tests/_artifacts/
 
 # 需要临时目录时只许落在仓库内这几处(或系统 %TEMP%),别再往仓库外建目录:
-# 字面量 /tmp 的落点取决于调用方认不认 MSYS 映射,不可控。详见 docs/design.md §9.5。
 /.smoke/
 
-# 本地 API 凭证(绝对不入库)
-apikey.json
-
-# Tauri 桌面端构建产物
-desktop/node_modules/
-desktop/src-tauri/target/
-desktop/dist/
-
 # 测试产物
-tests/.pytest_cache/
 .pytest_cache/
 
-# IDE
-.idea/
-.vscode/
-
-# 桌面端构建产物(绿色版 exe)
-/pdf2epub.exe
-desktop/src-tauri/target/
 desktop/src-tauri/gen/
-
-# 书库数据库(exe 同级运行时生成,含本机绝对路径)
-/library.json
 
 # PyInstaller CLI 打包产物(发布用,不入库;cli.spec 是构建输入,需要入库)
 dist_cli/
@@ -57,16 +28,9 @@ build_cli/
 # 发布包输出(打好的 zip 与 staging 目录,不入库)
 dist_release/
 
-# 本地计划/路线图(Agent 工作文件,只留本地,不进远程仓库)
 .hermes/
-
-# Agent 工作目录：整目录只留本地，不进远程仓库
-#   阶段验收报告、离线验收脚本、临时产物、P0 基线、工作笔记都在这里
 .workbuddy/
-
-# 前端冒烟测试输出
+.idea/
+.vscode/
 desktop/.smoke/
-
-# 前端单测缓存(Vitest / Vite 依赖预打包)
-desktop/node_modules/.vite-test/
 desktop/coverage/

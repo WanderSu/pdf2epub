@@ -28,6 +28,7 @@
 - [常见问题](#常见问题)
 - [CLI 参数](#cli-参数)
 - [已知限制](#已知限制)
+- [项目结构](#项目结构)
 - [从源码运行](#从源码运行)
 - [反馈问题](#反馈问题)
 
@@ -291,16 +292,12 @@ cd pdf2epub
 uv sync
 ```
 
-安装完成后可以使用：
-
-```text
-.venv/Scripts/ebook-converter.exe
-```
+后续示例使用 `uv run ebook-converter`：它会自动使用项目锁定的 Python 环境，适用于 Windows、macOS 和 Linux。
 
 ### 转换 PDF
 
 ```bash
-.venv/Scripts/ebook-converter.exe "我的书.pdf" -o output
+uv run ebook-converter "我的书.pdf" -o output
 ```
 
 程序会自动判断 PDF 类型。
@@ -308,13 +305,13 @@ uv sync
 ### 批量转换
 
 ```bash
-.venv/Scripts/ebook-converter.exe samples/pdfs/ -o output
+uv run ebook-converter samples/pdfs/ -o output
 ```
 
 ### 转换 Markdown
 
 ```bash
-.venv/Scripts/ebook-converter.exe "我的书.md" -o output
+uv run ebook-converter "我的书.md" -o output
 ```
 
 Markdown 里引用的图片放在同目录的 `images/` 文件夹中：
@@ -331,7 +328,7 @@ images/
 如果只是想先看看 PDF 会采用什么处理方式，可以使用：
 
 ```bash
-.venv/Scripts/ebook-converter.exe "我的书.pdf" --dry-run
+uv run ebook-converter "我的书.pdf" --dry-run
 ```
 
 它不会生成 EPUB，也不会提交 OCR 任务。
@@ -349,7 +346,7 @@ images/
 例如使用 MinerU：
 
 ```bash
-.venv/Scripts/ebook-converter.exe "扫描书.pdf" -o output --backend mineru
+uv run ebook-converter "扫描书.pdf" -o output --backend mineru
 ```
 
 也可以使用 `--backend paddleocr` 或 `--backend pymupdf`。
@@ -402,7 +399,7 @@ OCR 是云端服务，通常按照页面消耗额度。
 在开始正式转换之前，可以先运行：
 
 ```bash
-.venv/Scripts/ebook-converter.exe "扫描书.pdf" --dry-run
+uv run ebook-converter "扫描书.pdf" --dry-run
 ```
 
 桌面端也会在开始转换前显示预计需要处理的 OCR 页面数量。
@@ -436,6 +433,8 @@ work/
 如果需要手动修改转换结果，可以直接编辑 `book.md`，然后再次生成 EPUB。
 
 这对于处理特殊排版的书籍比较方便。
+
+日志默认写入 `logs/batch-<时间>.log`。可以按书籍或任务自行归档；删除 `work/` 会使对应任务失去可继续使用的中间结果。
 
 ---
 
@@ -592,7 +591,7 @@ pdf2epub 默认会尝试合并跨页断行。
 使用 `--force`：
 
 ```bash
-.venv/Scripts/ebook-converter.exe "我的书.pdf" -o output --force
+uv run ebook-converter "我的书.pdf" -o output --force
 ```
 
 默认情况下，程序会尽量跳过已经完成的文件。
@@ -625,7 +624,7 @@ pdf2epub 默认会尝试合并跨页断行。
 `--strict` 是更严的一档：内容对照的「疑似缩水」（正文/公式/表格/脚注数量减少）也判失败。
 
 ```bash
-.venv/Scripts/ebook-converter.exe "我的书.pdf" -o output --strict
+uv run ebook-converter "我的书.pdf" -o output --strict
 ```
 
 </details>
@@ -653,6 +652,7 @@ ebook-converter <文件或目录>... [-o 输出目录] [选项]
 | `--dry-run` | 只进行转换前检查，不生成文件 |
 | `--json` | 配合 `--dry-run`，以 JSON 输出预检结果 |
 | `--json-events` | 以 JSON Lines 输出阶段事件，供桌面端使用 |
+| `--dump-ir` | 将 Markdown 切分后的 IR 预览写入 `<work>/<书名>/ir/`，不生成 EPUB |
 | `--no-resume` | 不继续之前提交的 OCR 任务 |
 | `--log FILE` | 指定日志文件，默认 `logs/batch-<时间>.log` |
 | `--no-log` | 不写日志文件 |
@@ -760,9 +760,17 @@ config/
 └── book.css        # EPUB 样式
 
 desktop/             # Windows 桌面端
-docs/                # 截图
-scripts/             # 测试、验证和构建脚本
+docs/                # 截图、设计与验收资料
+samples/             # 入库的 PDF / Markdown 测试样本
+scripts/             # 构建、发布、验证与端到端脚本
 tests/               # 自动化测试
+
+# 以下目录会在运行或构建时生成
+output/              # 转换完成的 EPUB
+work/                # 可用于续跑和人工编辑的中间文件
+logs/                # 运行日志
+dist_release/        # 本地发布包
+build_cli/ dist_cli/ # PyInstaller 临时目录和 CLI 成品
 ```
 
 ---

@@ -1,14 +1,14 @@
 """一键出发布包(计划 1.4)。
 
-    uv run python scripts/build_release.py 0.2.4                 # 构建 + 打包 + 自检
-    uv run python scripts/build_release.py 0.2.4 --skip-build    # 复用已有产物,只打包
-    uv run python scripts/build_release.py 0.2.4 --no-check      # 不做发布包自检
+    uv run python scripts/build_release.py 0.5.0                 # 构建 + 打包 + 自检
+    uv run python scripts/build_release.py 0.5.0 --skip-build    # 复用已有产物,只打包
+    uv run python scripts/build_release.py 0.5.0 --no-check      # 不做发布包自检
 
 产物: dist_release/pdf2epub-v<版本>-win-x64.zip
     内含 pdf2epub.exe(壳) + cli.exe(引擎) + config/ + README.md
 
 **版本守卫**:四处版本号(pyproject / tauri.conf.json / Cargo.toml / App.tsx)必须与
-传入版本一致,否则拒绝打包 —— 防止「界面写着 v0.2.4、实际是 v0.2.3 的产物」。
+传入版本一致,否则拒绝打包 —— 防止「界面写着 v0.5.0、实际是旧版本的产物」。
 """
 from __future__ import annotations
 
