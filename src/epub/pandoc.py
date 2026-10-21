@@ -11,6 +11,9 @@
   - `<br>` / `<img>` 等空元素:HTML 允许省略斜杠,XHTML(EPUB 的正文格式)不允许 ——
     pandoc 原样透传原始 HTML,一个 `<br>` 就足以让整章 XHTML 不再是良构 XML,
     严格阅读器会拒绝渲染(云端 OCR 的图片文字块就带 `<br>`)。
+  - `<repetitio est mater studiorum>` 这类**正文里的尖括号文字**:pandoc 把它当成
+    「带裸属性的原始 HTML 标签」原样透传,既没转义也没闭合,同样毁掉整章;见
+    `escape_pseudo_html`。
 """
 from __future__ import annotations
 
@@ -70,6 +73,73 @@ VOID_TAG_RE = re.compile(
 )
 
 
+#: 允许**原样透传**给 pandoc 的原始 HTML 标签(内联 + 结构)。白名单之外的 `<…>`
+#: 一律按正文文字转义,理由见 :func:`escape_pseudo_html`。
+RAW_HTML_TAGS = frozenset("""
+a abbr b big blockquote br center cite code dd del details div dl dt em figcaption
+figure font h1 h2 h3 h4 h5 h6 hr i img ins kbd li mark ol p pre q rp rt ruby s samp
+small span strike strong sub summary sup table tbody td tfoot th thead tr tt u ul var
+""".split())
+
+#: 形如标签的尖括号片段:`<name …>` / `</name>`(名字之后到下一个尖括号之前的任意内容)
+TAG_LIKE_RE = re.compile(r"<(?P<close>/?)(?P<name>[A-Za-z][A-Za-z0-9:_.-]*)(?P<rest>[^<>]*)>")
+#: 良构的属性串(XHTML 不接受裸属性名):`class="x" id='y'` 以及结尾可选的 ` /`
+ATTRS_RE = re.compile(r"""(?:\s+[A-Za-z_:][A-Za-z0-9_:.-]*\s*=\s*(?:"[^"]*"|'[^']*'))*\s*/?""")
+#: 自动链接(`<https://…>` / `<a@b.c>`):pandoc 会把它渲染成 `<a>`,不是文字
+AUTOLINK_RE = re.compile(r"<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^<>]*>|<[^<>@\s]+@[^<>\s]+>")
+#: 受保护片段:行内代码与数学。那里的尖括号是示例文本或比较运算符,加反斜杠会改动内容。
+#: 第一个捕获组是行内代码的反引号,`\1` 回指同一串。
+PROTECTED_RE = re.compile(
+    r"(`+)(?:.+?)\1|\$\$.+?\$\$|\$[^$\n]+\$|\\\[.+?\\\]|\\\(.+?\\\)", re.S)
+
+
+def _escaped(match: re.Match) -> str:
+    """`<foo bar>` → `\\<foo bar\\>`,pandoc 据此写出 `&lt;foo bar&gt;` 的文字。"""
+    return "\\<" + match.group(0)[1:-1] + "\\>"
+
+
+def escape_pseudo_html(text: str) -> str:
+    r"""把「长得像标签、其实不是 HTML」的尖括号片段转义成正文文字。
+
+    **被钉住的缺陷**:正文里的书名/拉丁引语用尖括号括起来(实测真实书籍里的
+    `<repetitio est mater studiorum>`、`<Value, price and profit>`),pandoc 的
+    Markdown reader 把它当成「带裸属性的原始 HTML 标签」原样写进 XHTML —— 尖括号
+    没被转义、标签也没有闭合,整份 XHTML 不再是良构 XML,一本 70 页的书就此判失败。
+    反向地,`<b>加粗` 这种**没闭合的真标签**有同样的后果。
+
+    判据(保守,宁多转义一句、不让整本打不开):名字在 :data:`RAW_HTML_TAGS` 里、
+    属性串良构、且开/闭标签在全文里找得到配对,才原样透传;其余加反斜杠转义。
+    围栏代码块、行内代码、数学片段与自动链接整体跳过。
+    """
+    lowered = text.lower()
+
+    def fix(match: re.Match) -> str:
+        name = match.group("name").lower()
+        rest = match.group("rest")
+        if AUTOLINK_RE.fullmatch(match.group(0)):
+            return match.group(0)
+        if name not in RAW_HTML_TAGS or not ATTRS_RE.fullmatch(rest):
+            return _escaped(match)
+        if match.group("close"):
+            # `</div>` 没有对应的开标签同样不是良构 XML
+            return match.group(0) if f"<{name}" in lowered else _escaped(match)
+        if name not in VOID_TAGS and f"</{name}" not in lowered:
+            return _escaped(match)
+        return match.group(0)
+
+    parts = FENCE_RE.split(text)
+    # 奇数下标是围栏代码块;每段再按行内代码/数学切开,只改「光裸的正文」
+    for i in range(0, len(parts), 2):
+        piece, out, pos = parts[i], [], 0
+        for m in PROTECTED_RE.finditer(piece):
+            out.append(TAG_LIKE_RE.sub(fix, piece[pos:m.start()]))
+            out.append(m.group(0))
+            pos = m.end()
+        out.append(TAG_LIKE_RE.sub(fix, piece[pos:]))
+        parts[i] = "".join(out)
+    return "".join(parts)
+
+
 def normalize_math_tags(text: str) -> str:
     r"""把 ``\tag{n}`` / ``\tag*{n}`` 换成**可见**的编号。
 
@@ -123,7 +193,7 @@ def normalize_xhtml_voids(text: str) -> str:
 
 def prepare_pandoc_markdown(text: str) -> str:
     """把 Markdown 归一化成「Pandoc 能写出合法 EPUB3」的形式(见模块 docstring)。"""
-    return normalize_xhtml_voids(normalize_math_tags(text))
+    return normalize_xhtml_voids(escape_pseudo_html(normalize_math_tags(text)))
 
 
 def infer_title(book_md: Path, fallback: str | None = None) -> str:

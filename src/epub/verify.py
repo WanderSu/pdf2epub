@@ -184,6 +184,21 @@ def archive_issue(epub_path: str | Path) -> str | None:
     return None
 
 
+def _error_snippet(content: str, err: Exception) -> str:
+    """XML 报错位置的原文片段(前后各留一段),用于「一眼看出元凶」。"""
+    pos = getattr(err, "position", None)
+    if not pos:
+        return ""
+    line_no, col = pos
+    lines = content.splitlines()
+    if not 1 <= line_no <= len(lines):
+        return ""
+    line = lines[line_no - 1]
+    start = max(0, col - 40)
+    frag = line[start:col + 60].strip()
+    return f";出错处: …{frag}…" if frag else ""
+
+
 def verify_epub(
     epub_path: str | Path,
     *,
@@ -379,8 +394,11 @@ def verify_epub(
             try:
                 ET.fromstring(zf.read(hf_posix))
             except ET.ParseError as e:
+                # 报错只说「line 92, column 35」等于没说:附带出错处的原文片段,
+                # 才能一眼看出元凶是哪个尖括号/裸 `&`(否则要解包产物去翻那一行)。
                 result.fail("xhtml_invalid",
-                            f"{hf} 不是良构 XHTML(阅读器可能拒绝渲染): {e}")
+                            f"{hf} 不是良构 XHTML(阅读器可能拒绝渲染): {e}"
+                            f"{_error_snippet(content, e)}")
             except KeyError:
                 continue
             hf_dir = opf_dir_parts + [p for p in Path(hf).parent.parts if p not in ("", ".")]

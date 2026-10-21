@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from conftest import build_epub as pandoc_epub
-from epub.pandoc import build_epub, normalize_xhtml_voids
+from epub.pandoc import build_epub, escape_pseudo_html, normalize_xhtml_voids
 from epub.verify import verify_epub
 
 #: 实测形态:云端 OCR 的「图片文字」块,出版社名后跟着换行标记与注释
@@ -97,6 +97,10 @@ def test_pandoc_alone_leaves_bare_br_and_verifier_catches_it(tmp_path: Path) -> 
 
     assert any(i.code == "xhtml_invalid" for i in result.errors)
     assert not result.ok
+    # 报错要能看出元凶:只给「line 92, column 35」等于没说
+    # (片段取的是 XML 报错位置那一行 —— 错配标签常比元凶晚一点,但已落在同一行)
+    bad = next(i for i in result.errors if i.code == "xhtml_invalid")
+    assert "出错处" in bad.message and "picture text" in bad.message
 
 
 def test_source_markdown_is_not_rewritten(tmp_path: Path) -> None:
@@ -200,3 +204,51 @@ def test_subprocess_file_not_found_is_environment_error(tmp_path: Path,
 
     with pytest.raises(PandocMissingError):
         build_epub(md, work, tmp_path / "out", title="样本书")
+
+# ---------------------------------------------------------------- 伪标签
+
+def test_angle_bracket_book_title_is_escaped() -> None:
+    """真实书籍形态:书名用尖括号括起来(pandoc 会当成带裸属性的原始 HTML)。"""
+    src = "以(<Value, price and profit>)为题于1898年首次发表。"
+    assert escape_pseudo_html(src) == "以(\\<Value, price and profit\\>)为题于1898年首次发表。"
+
+
+def test_latin_phrase_in_angle_brackets_is_escaped() -> None:
+    src = "确信一句拉丁谚语:<repetitio est mater studiorum>(复习是学业之母)。"
+    assert "\\<repetitio est mater studiorum\\>" in escape_pseudo_html(src)
+
+
+def test_real_html_is_passed_through() -> None:
+    """白名单内的标签(含空元素与成对标签)必须原样留给 pandoc。"""
+    src = '第一行<br>图<img src="a.png" alt="图"><div class="x">正文</div><sup>注</sup>'
+    assert escape_pseudo_html(src) == src
+
+
+def test_unclosed_real_tag_is_escaped() -> None:
+    """没闭合的 `<b>` 一样会毁掉整章 —— 转义比让整本书打不开好。"""
+    assert escape_pseudo_html("文字 <b>裸标签 没闭合") == "文字 \\<b\\>裸标签 没闭合"
+
+
+def test_code_math_and_autolink_are_untouched() -> None:
+    src = ("行内 `<repetitio est>` 与公式 $a<b$ 与链接 <https://example.com/x>;\n"
+           "```html\n<repetitio est> 示例\n```\n")
+    assert escape_pseudo_html(src) == src
+
+
+def test_epub_with_pseudo_html_is_well_formed(tmp_path: Path) -> None:
+    """端到端:伪标签章节转出的 XHTML 良构,且尖括号以文字形式保留。"""
+    work = tmp_path / "work"
+    work.mkdir()
+    md = work / "book.md"
+    md.write_text(
+        "# 样本书\n\n"
+        "我们的朋友确信一句拉丁谚语:<repetitio est mater studiorum>(复习是学业之母)。\n",
+        encoding="utf-8")
+
+    epub = build_epub(md, work, tmp_path / "out", title="样本书")
+
+    for _, data in _xhtml_docs(epub):
+        ET.fromstring(data)
+    assert verify_epub(epub).ok
+    chapter = next(d.decode("utf-8") for _, d in _xhtml_docs(epub) if "repetitio" in d.decode("utf-8"))
+    assert "&lt;repetitio est mater studiorum&gt;" in chapter
