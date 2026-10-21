@@ -118,7 +118,7 @@ export interface RecentEntry {
   at: number;
 }
 
-export const APP_VERSION = "v0.4.4";
+export const APP_VERSION = "v0.5.0";
 export const RECENT_KEY = "pdf2epub.recent";
 export const MAX_RECENT = 8;
 
