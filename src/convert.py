@@ -89,7 +89,7 @@ def convert_auto(
     elif detection.pdf_type == PDFType.SCANNED:
         events.emit("plan", backend=ocr_name, pages=detection.total_pages,
                     ocr_pages=detection.total_pages, ocr_runs=1,
-                    shards=_planned_shards(detection.total_pages, ocr_cfg))
+                    shards=_planned_shards(detection.total_pages, ocr_name, ocr_cfg))
         events.stage("extract", "start", backend=ocr_name)
         result = get_backend(ocr_name, ocr_cfg).convert(pdf_path, work_dir)
     else:
@@ -100,7 +100,7 @@ def convert_auto(
         runs = plan_ocr_runs(scanned, limit)
         events.emit("plan", backend=f"hybrid({ocr_name})", pages=detection.total_pages,
                     ocr_pages=len(scanned), ocr_runs=len(runs),
-                    shards=sum(_planned_shards(len(r), ocr_cfg) for r in runs))
+                    shards=sum(_planned_shards(len(r), ocr_name, ocr_cfg) for r in runs))
         events.stage("extract", "start", backend=f"hybrid({ocr_name})")
         result = _convert_hybrid(
             pdf_path, work_dir, ocr_name, ocr_cfg, detection,
@@ -112,11 +112,15 @@ def convert_auto(
     return result, detection
 
 
-def _planned_shards(pages: int, ocr_cfg: dict) -> int:
-    """按后端单任务页数上限估算云端任务数(与实际提交口径一致,见 dryrun)。"""
+def _planned_shards(pages: int, ocr_name: str, ocr_cfg: dict) -> int:
+    """按后端单任务页数上限估算云端任务数(与实际提交口径一致,见 dryrun)。
+
+    口径必须跟着**实际后端**走:以前写死 ``{"mineru": ocr_cfg}``,PaddleOCR
+    (整本一次提交、不分片)被按 mineru 的 200 页上限估成多段,预检与实际不符。
+    """
     from dryrun import estimate_shards, max_pages_per_task
 
-    return estimate_shards(pages, max_pages_per_task({"mineru": ocr_cfg}, "mineru"))
+    return estimate_shards(pages, max_pages_per_task({ocr_name: ocr_cfg}, ocr_name))
 
 
 def _convert_hybrid(
@@ -165,9 +169,17 @@ def _convert_hybrid(
     if runs:
         ocr = get_backend(ocr_name, ocr_cfg)
         for i, run in enumerate(runs, start=1):
-            events.progress("extract", i, len(runs), detail="hybrid_ocr",
+            # 进度报「已完成的段数」:段开始前是 i-1,不是 i —— 报 i 会让进度在
+            # 最后一段刚开始就跳到 100%,然后长时间不动(实测 60% 卡死感的来源)。
+            events.progress("extract", i - 1, len(runs), detail="hybrid_ocr",
                             page=run[0] + 1)
-            results.append(_ocr_run(ocr, pdf_path, work_dir, images_abs, run))
+            # 段内后端(如 MinerU)还会按自己的分片自报 (c,t) —— 不折算的话
+            # 1/1 会被前端「取峰值」当成 extract 全段完成,进度条提前跳满。
+            with events.progress_window("extract", i, len(runs)):
+                results.append(_ocr_run(ocr, pdf_path, work_dir, images_abs, run))
+        # 收尾报满:段循环按「开始前报已完成数」的口径,最后一段完成后补一条
+        # (N, N),前端的分帖计数与进度条才能走到 extract 的真实终点。
+        events.progress("extract", len(runs), len(runs), detail="hybrid_ocr")
 
     print(
         f"[hybrid] 文字页 {len(text_idxs)} 页, 扫描页 {len(scanned_idxs)} 页"

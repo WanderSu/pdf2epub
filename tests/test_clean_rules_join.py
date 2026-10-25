@@ -342,3 +342,20 @@ def test_proposal_on_clean_text_is_empty() -> None:
     ir = _ir(md)
     proposal = propose_join_lines(ir)
     assert proposal.patches == ()
+
+
+def test_indented_code_block_is_atomic() -> None:
+    """4 空格缩进代码块 = 代码,不是正文:join_lines 一个提案都不许提。
+
+    回归:旧 _classify 只认 ``` 围栏,缩进代码被判成 text,于是
+    ``    def hello():`` 被拼接成 ``def hello():  ``(缩进去掉 + 诗行硬换行)。
+    技术书的 .md 输入必踩。
+    """
+    md = ("# 书名\n\n正文段落,句号结尾。\n\n"
+          "    def hello():\n"
+          "        print(\"hi\")\n"
+          "        return 1\n"
+          "\n又是一段以句号结尾的正文。\n")
+    ir = _ir(md)
+    assert render_ir(ir) == md                     # 往返不变量先守住
+    assert propose_join_lines(ir).patches == ()

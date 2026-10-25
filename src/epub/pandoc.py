@@ -46,6 +46,17 @@ class PandocMissingError(RuntimeError):
     """
 
 
+class PandocError(RuntimeError):
+    """pandoc 执行失败(进程非零退出 / 声称成功却没写出产物)。
+
+    与 :class:`PandocMissingError` 同样是**确定性失败**:同一份输入再跑一遍
+    只会得到同一个非零退出码。旧实现抛裸 ``RuntimeError``,批处理按「未知异常
+    宁可重试」重跑 3 次整条链路(含云端 OCR 额度)。
+    """
+
+    retryable = False
+
+
 def pandoc_available() -> bool:
     """pandoc 是否在 PATH 里(只探测,不执行)。"""
     return shutil.which(PANDOC) is not None
@@ -353,11 +364,11 @@ def build_epub(
         # 这同样是环境缺失,不是「临时故障」—— 归成可重试错误会让整条链路白跑。
         raise PandocMissingError(f"{MISSING_PANDOC_HINT}(执行 pandoc 失败: {e})") from e
     if proc.returncode != 0:
-        raise RuntimeError(f"Pandoc 失败(exit={proc.returncode}): {proc.stderr[:500]}")
+        raise PandocError(f"Pandoc 失败(exit={proc.returncode}): {proc.stderr[:500]}")
     # 退出码 0 不等于「写出了产物」:产物缺失或 0 字节都是硬失败,不能把空文件
     # 当成功结果交给上层(is_done 只认容器完整性,空文件会在这里就暴露)。
     if not epub.exists() or epub.stat().st_size == 0:
-        raise RuntimeError(f"Pandoc 返回成功但没有写出 EPUB(产物缺失或为空): {epub}")
+        raise PandocError(f"Pandoc 返回成功但没有写出 EPUB(产物缺失或为空): {epub}")
     # 脚注回链:pandoc 的 epub3 writer 不写 doc-backlink,产物侧补上(没有脚注就不动文件)
     add_footnote_backlinks(epub)
     return epub

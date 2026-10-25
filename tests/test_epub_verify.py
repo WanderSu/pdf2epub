@@ -207,6 +207,44 @@ def test_broken_ncx_link_is_an_error(sample_epub: Path, tmp_path: Path) -> None:
     assert any(i.code == "ncx_link_broken" for i in result.errors)
 
 
+def test_cross_chapter_anchor_is_not_a_false_warning(tmp_path: Path) -> None:
+    """跨章锚点(ch001 → ch002.xhtml#id)目标真实存在 → 不允许报 anchor_missing。
+
+    回归:旧实现拿相对**源文档目录**的 href(``ch002.xhtml``)去查以
+    **相对 OPF** 路径为键的 doc_ids(``text/ch002.xhtml``),永远查不到,
+    每本带章内目录/交叉引用的书都报一条假警告。
+    """
+    body = ("# 第一章 导引\n\n"
+            "先参见[第二章的公式节](#第二章-数学公式),再往下读。正文段落,句号结尾。\n\n"
+            "# 第二章 数学公式\n\n"
+            "这一章是被跨章引用的目标,内容足够长以避免被判为空章节。")
+    epub = build_epub(tmp_path / "w", tmp_path / "xref.epub", body=body,
+                      with_image=False, with_math=False)
+
+    result = verify_epub(epub)
+
+    codes = [i.code for i in result.errors + result.warnings]
+    assert "anchor_missing" not in codes, [i.message for i in result.warnings]
+
+
+def test_truly_missing_anchor_still_warns(tmp_path: Path) -> None:
+    """目标章存在但锚点 id 不存在 → 仍要报 anchor_missing(修复不能把真警告也吞掉)。"""
+    body = ("# 第一章 导引\n\n"
+            "先参见[第二章的公式节](#第二章-数学公式),再往下读。正文段落,句号结尾。\n\n"
+            "# 第二章 数学公式\n\n"
+            "这一章是被跨章引用的目标,内容足够长以避免被判为空章节。")
+    epub = build_epub(tmp_path / "w", tmp_path / "xref2.epub", body=body,
+                      with_image=False, with_math=False)
+    # pandoc 会把跨章链接写成 ch003.xhtml#第二章-数学公式;把锚点改成不存在的 id
+    broken = rewrite_epub(epub, tmp_path / "xref2-bad.epub",
+                          replace=(("ch003.xhtml#第二章-数学公式",
+                                    "ch003.xhtml#没有这一节"),))
+
+    result = verify_epub(broken)
+
+    assert any(i.code == "anchor_missing" for i in result.warnings)
+
+
 def test_missing_toc_warns(tmp_path: Path) -> None:
     """nav 里没有 toc 段(有正文标题却给不出目录)→ 告警,并且不当成链接断裂。"""
     src = tmp_path / "src"

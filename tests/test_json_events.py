@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 import events
+from epub.pandoc import PandocError
 from cli import main as cli_main
 from conftest import make_paged_pdf, make_pdf
 
@@ -112,7 +113,7 @@ def test_error_code_maps_real_exception_types() -> None:
         (PermissionError("拒绝访问"), "output_error"),
         (OSError("磁盘已满"), "output_error"),
         (ValueError("未知清理项: nope"), "config_error"),
-        (RuntimeError("Pandoc 失败(exit=3): boom"), "pandoc_error"),
+        (PandocError("Pandoc 失败(exit=3): boom"), "pandoc_error"),
         (RuntimeError("别的意外"), "convert_failed"),
         (TypeError("意外类型"), "convert_failed"),
     ]
@@ -174,6 +175,38 @@ def test_retry_is_reported_as_an_event(tmp_path: Path, monkeypatch) -> None:
     assert retries[0]["attempt"] == 1 and retries[0]["retries"] == 2
     assert retries[0]["wait"] == 2          # 2 ** 1 的退避
     assert events_of(items, "error")[0]["code"] == "verify_failed"
+
+
+def test_pandoc_failure_is_not_retried_and_reports_pandoc_error(tmp_path: Path,
+                                                               monkeypatch) -> None:
+    """pandoc 执行失败是确定性失败:一次判死、不发 `retry`、错误码是 `pandoc_error`。
+
+    回归:`PandocError` 加了 `retryable=False`,但 `ERROR_CODE_BY_TYPE` 里没登记它,
+    而旧的「类名是 RuntimeError 且文案含 pandoc」兜底在换成专属类后**静默失效** ——
+    错误码退化成 `convert_failed`,前端于是从 PANDOC 变成 UNKNOWN。
+    """
+    import batch as batch_mod
+
+    pdf = make_pdf(tmp_path / "生成失败.pdf")
+    monkeypatch.setattr(
+        batch_mod, "build_epub",
+        lambda *a, **k: (_ for _ in ()).throw(PandocError("Pandoc 失败(exit=43): boom")),
+    )
+
+    buf = io.StringIO()
+    events.configure(stream=buf)
+    try:
+        result = batch_mod.process_one(pdf, config={"pymupdf": {}},
+                                       work_root=tmp_path / "work",
+                                       output_dir=tmp_path / "out", retries=2)
+    finally:
+        events.configure(False)
+
+    items = parse_json_lines(buf.getvalue())
+    assert result.status == "failed"
+    assert events_of(items, "retry") == [], [i["event"] for i in items]
+    errs = events_of(items, "error")
+    assert len(errs) == 1 and errs[0]["code"] == "pandoc_error"
 
 
 def test_skip_is_its_own_terminal_event(tmp_path: Path) -> None:
@@ -375,7 +408,9 @@ def test_hybrid_reports_real_ocr_runs(tmp_path: Path, monkeypatch, capsys) -> No
     assert plan["backend"].startswith("hybrid(")
     assert plan["ocr_pages"] == 2 and plan["ocr_runs"] == 2     # 两段独立扫描页
     prog = events_of(items, "progress")
-    assert [p["current"] for p in prog] == [1, 2]
+    # 口径:段开始前报「已完成段数」(0, N),全部完成后补 (N, N) —— 进度
+    # 不再在最后一段刚开始就顶满(extract 权重 0.6,旧口径会直接跳 60%)。
+    assert [p["current"] for p in prog] == [0, 1, 2]
     assert all(p["total"] == 2 and p["detail"] == "hybrid_ocr" for p in prog)
     assert events_of(items, "complete")[0]["pdf_type"] == "hybrid"
 
@@ -398,3 +433,41 @@ def test_mineru_reports_shards_and_progress(tmp_path: Path, monkeypatch, capsys)
     assert shards["ranges"] == ["1-200", "201-400", "401-450"]
     prog = events_of(items, "progress")
     assert [p["current"] for p in prog] == [1, 2, 3] and all(p["total"] == 3 for p in prog)
+
+
+def test_progress_window_rescales_inner_reports(capsys) -> None:
+    """progress_window:段内后端自报的 (c,t) 折算进第 i/N 段份额。
+
+    回归(hybrid 进度条提前跳满):MinerU 在 hybrid 的每个区段里自报 (1,1),
+    前端取峰值 → extract 直接 100%,然后长时间不动。窗口内必须折算成
+    (i-1+c/t)/N;窗口外的事件不受影响。
+    """
+    import events
+    buf = io.StringIO()
+    events.configure(stream=buf)
+    try:
+        with events.progress_window("extract", 2, 4):      # 第 2/4 段
+            events.progress("extract", 1, 1, detail="mineru")
+            events.progress("extract", 1, 2, detail="mineru")
+        events.progress("extract", 3, 4, detail="hybrid_ocr")   # 窗口外原样
+        events.progress("clean", 1, 2)                          # 别的 stage 不受影响
+    finally:
+        events.configure(False)
+    items = parse_json_lines(buf.getvalue())
+    prog = [e for e in items if e["event"] == "progress"]
+    assert (prog[0]["current"], prog[0]["total"]) == (2000, 4000)     # (1+1)/4
+    assert (prog[1]["current"], prog[1]["total"]) == (1500, 4000)     # (1+0.5)/4
+    assert (prog[2]["current"], prog[2]["total"]) == (3, 4)
+    assert (prog[3]["current"], prog[3]["total"]) == (1, 2)
+    # 嵌套窗口:内层退出后恢复外层
+    events.configure(stream=(buf := io.StringIO()))
+    try:
+        with events.progress_window("extract", 1, 2):
+            with events.progress_window("extract", 1, 4):
+                events.progress("extract", 1, 1)
+            events.progress("extract", 1, 1)
+    finally:
+        events.configure(False)
+    prog = [e for e in parse_json_lines(buf.getvalue()) if e["event"] == "progress"]
+    assert (prog[0]["current"], prog[0]["total"]) == (1000, 4000)
+    assert (prog[1]["current"], prog[1]["total"]) == (1000, 2000)

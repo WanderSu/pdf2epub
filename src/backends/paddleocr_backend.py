@@ -170,6 +170,9 @@ class PaddleOCRAdapter(Backend):
     #: 本后端一次提交整本文件,段标识固定
     PART_ID = "whole"
 
+    #: 不分片:整本一次提交,预检的分片数必须与此一致(不再按 200 页估算)
+    DEFAULT_MAX_PAGES_PER_TASK: int | None = None
+
     def __init__(
         self,
         token: str | None = None,

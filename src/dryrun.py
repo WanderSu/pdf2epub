@@ -26,21 +26,35 @@ DAILY_OCR_PAGE_QUOTA = 1000
 DEFAULT_MAX_PAGES_PER_TASK = 200
 
 
-def estimate_shards(pages: int, per_task: int) -> int:
-    """按「每任务页数上限」估算云端分片数(0 页 → 0 段)。"""
+def estimate_shards(pages: int, per_task: int | None) -> int:
+    """按「每任务页数上限」估算云端分片数(0 页 → 0 段;不分片 → 整本 1 段)。"""
     if pages <= 0:
         return 0
+    if per_task is None:             # 后端不分片:整本一次提交
+        return 1
     per_task = max(1, int(per_task or DEFAULT_MAX_PAGES_PER_TASK))
     return math.ceil(pages / per_task)
 
 
-def max_pages_per_task(config: dict, backend: str) -> int:
-    """该后端单任务页数上限(config 里可覆盖,默认 200)。"""
+def max_pages_per_task(config: dict, backend: str) -> int | None:
+    """该后端单任务页数上限;``None`` = 该后端不分片(整本一次提交)。
+
+    默认值取自后端类自己声明的 ``DEFAULT_MAX_PAGES_PER_TASK``(真实提交口径的
+    唯一出处)。以前这里对任何后端都兜底 200 页:PaddleOCR 明明整本一次提交,
+    预检却报「3 段」。config 里 ``<backend>.max_pages_per_task`` 可显式覆盖
+    (只对支持分片的后端有意义)。
+    """
     value = (config.get(backend) or {}).get("max_pages_per_task")
-    try:
-        return int(value) if value else DEFAULT_MAX_PAGES_PER_TASK
-    except (TypeError, ValueError):
-        return DEFAULT_MAX_PAGES_PER_TASK
+    if value:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            pass
+    from backends import _BACKENDS   # 延迟导入:与工厂模块同层,避免顶层循环依赖
+    cls = _BACKENDS.get(backend)
+    if cls is not None:
+        return cls.DEFAULT_MAX_PAGES_PER_TASK
+    return DEFAULT_MAX_PAGES_PER_TASK
 
 
 def hybrid_ocr_runs(detection, config: dict) -> list[list[int]] | None:
@@ -130,11 +144,14 @@ def plan_source(
             item.shards = sum(estimate_shards(len(r), per_task) for r in runs)
             item.notes.append(
                 f"扫描页分 {len(runs)} 个连续区段,各一次云端任务"
-                f"(单段 >{per_task} 页再分片)"
+                + (f"(单段 >{per_task} 页再分片)" if per_task else "(该后端整段一次提交,不分片)")
             )
         else:
             item.shards = estimate_shards(item.ocr_pages, per_task)
-            item.notes.append(f"按 {per_task} 页/任务分片")
+            item.notes.append(
+                f"按 {per_task} 页/任务分片" if per_task
+                else "该后端整本一次提交,不分片"
+            )
     return item
 
 

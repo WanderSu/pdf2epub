@@ -29,13 +29,14 @@ from datetime import datetime
 from pathlib import Path
 
 from backends import get_backend
-from backends.base import (VARIANT_ORIGINAL, collect_evidence, file_fingerprint,
-                           is_retryable)
+from backends.base import (VARIANT_ORIGINAL, BackendError, collect_evidence,
+                           file_fingerprint, is_retryable)
 from clean import CleanEngineError, CleanOutcome, clean_book_md
 from clean.options import CleanOptions, resolve_options
 from convert import convert_auto, load_config
 from epub.content import verify_content
-from epub.pandoc import MISSING_PANDOC_HINT, PandocMissingError, build_epub, pandoc_available
+from epub.pandoc import (MISSING_PANDOC_HINT, PandocError, PandocMissingError,
+                        build_epub, pandoc_available)
 from epub.verify import (VerifyResult, archive_issue, fatal_issue, verify_epub)
 from ir import Producer
 from lang_detect import resolve_language
@@ -191,12 +192,16 @@ def name_conflicts(sources: list[Path]) -> dict[str, list[Path]]:
     撞名时不猜谁该赢、也不覆盖:显式列出冲突,由 process_batch 判失败。
 
     返回 ``{源文件身份键: [与之撞名的其它源文件]}``;同一条路径重复传入不算冲突。
+
+    键要按大小写归一(``casefold``):Windows/macOS 默认文件系统大小写不敏感,
+    ``Book.pdf`` 与 ``book.pdf`` 会写进同一个 ``work/Book/`` 与 ``output/Book.epub``;
+    不归一的话这种「只差大小写」的撞名漏检,后一本照旧被 ``is_done`` 静默跳过。
     """
     def work_key(p: Path) -> str:
-        return f"work:{sanitize_name(p.stem)}"
+        return f"work:{sanitize_name(p.stem).casefold()}"
 
     def out_key(p: Path) -> str:
-        return f"out:{output_stem(p.stem)}"
+        return f"out:{output_stem(p.stem).casefold()}"
 
     conflicts: dict[str, list[Path]] = {}
     for key_of in (work_key, out_key):          # 工作目录名与输出名各自判重
@@ -241,15 +246,44 @@ class TaskResult:
     verify: str = ""          # 结构校验摘要,如 "0 失败 0 警告"
 
 
+#: 目录递归时的排除清单:产物/环境/工程目录里的 .md/.pdf 不是「用户要转的书」
+#: (实测 `ebook-converter <目录>` 在项目根上命中 771 个文件,含 work/ 的中间产物、
+#: README 与 docs;撞名还会显式失败,把一次误操作变成一堆错误)。
+_SKIP_SOURCE_DIRS = frozenset({
+    "work", "output", "node_modules", "desktop", "tests", "docs", "__pycache__",
+    "dist", "build", "dist_cli", "dist_release", "build_cli",
+})
+
+#: 目录递归时按**文件名**跳过的仓库文档(README / CHANGELOG 这类不是书)。
+#: 只作用于「扫目录」:显式把文件路径交给 CLI 时照常转换 —— 真有一本书叫
+#: `readme.md`,直传路径就能转。
+_SKIP_SOURCE_NAMES = frozenset({
+    "readme.md", "readme.en.md", "changelog.md", "contributing.md",
+    "license.md", "security.md", "code_of_conduct.md",
+})
+
+
 def iter_sources(paths: list[Path]) -> list[Path]:
-    """展开输入:文件直接收,目录递归收集支持的扩展名。"""
+    """展开输入:文件直接收,目录递归收集支持的扩展名。
+
+    递归时跳过产物/环境/工程目录(``_SKIP_SOURCE_DIRS`` 与一切 ``.`` 开头的
+    目录):那些地方的 .md 是转换中间产物(work/*/book.md)或文档,不是输入。
+    """
     sources: list[Path] = []
     for p in paths:
         p = Path(p)
         if p.is_dir():
-            for f in sorted(p.rglob("*")):
-                if f.is_file() and f.suffix.lower() in SUPPORTED_SUFFIXES:
-                    sources.append(f)
+            for dirpath, dirnames, filenames in os.walk(p):
+                dirnames[:] = sorted(
+                    d for d in dirnames
+                    if d not in _SKIP_SOURCE_DIRS and not d.startswith(".")
+                )
+                for name in sorted(filenames):
+                    f = Path(dirpath) / name
+                    if name.casefold() in _SKIP_SOURCE_NAMES:
+                        continue
+                    if f.suffix.lower() in SUPPORTED_SUFFIXES:
+                        sources.append(f)
         elif p.is_file():
             sources.append(p)
         else:
@@ -423,7 +457,9 @@ def verify_output(epub: Path, *, strict: bool = False,
     try:
         result = verify_epub(epub)
         if book_md is not None and Path(book_md).exists():
-            content = verify_content(book_md, epub, expected_pages=expected_pages)
+            # 结构结果已算好,传进去复用 —— 否则同一本 EPUB 的结构校验跑两遍
+            content = verify_content(book_md, epub, expected_pages=expected_pages,
+                                     structure=result)
             result.issues.extend(content.issues)
             result.stats.update(content.stats)
     except Exception as e:                   # noqa: BLE001 - 校验器内部错误也要收尾
@@ -557,6 +593,7 @@ def process_one(
 
         code = ("verify_failed" if isinstance(last_error, VerifyError)
                 else "missing_dependency" if isinstance(last_error, PandocMissingError)
+                else "pandoc_error" if isinstance(last_error, PandocError)
                 else "clean_failed" if isinstance(last_error, CleanEngineError)
                 else "convert_failed")
         return _fail(result, source, last_error, code=code, out_epub=out_epub,
@@ -667,13 +704,51 @@ def _process_pdf(source, config, work_root, output_dir, backend_override, t0, re
     return result
 
 
+def _read_markdown_source(source: Path) -> str:
+    """读取用户提供的 .md 输入,带编码兜底。
+
+    之前是 ``utf-8 + errors="replace"``:UTF-8 BOM 会把首个 ``# 标题`` 顶成
+    ``\\ufeff# 标题``(不再被识别为标题),GBK 存盘的书则整篇变 ``# ``
+    **照常转换出一本乱码书、零告警**。口径:
+    - BOM → utf-8-sig(剥掉 BOM);
+    - 严格 UTF-8 成功 → 直接用;
+    - 失败 → 回退 GB18030(中文 Windows 最常见的误存编码)并告警;
+    - 都解不出 → 明确失败(编码错误是输入问题,重试无意义)。
+    """
+    raw = Path(source).read_bytes()
+    if raw.startswith(b"\xef\xbb\xbf"):
+        text = raw.decode("utf-8-sig")
+        return _normalize_newlines(text)
+    try:
+        return _normalize_newlines(raw.decode("utf-8"))
+    except UnicodeDecodeError:
+        pass
+    try:
+        text = raw.decode("gb18030")
+    except UnicodeDecodeError as e:
+        # 输入编码是事实问题,重试不会改变字节 → 确定性失败(不占用重试次数)
+        raise BackendError(
+            f"Markdown 文件编码无法识别(既非 UTF-8 也非 GB18030): {source.name} — {e}",
+            retryable=False,
+        ) from e
+    logger.warning("%s 不是 UTF-8 编码,已按 GB18030 解码(建议另存为 UTF-8)", source.name)
+    events.emit("warning", code="encoding_fallback", file=source.name,
+                message="非 UTF-8 编码,已按 GB18030 解码")
+    return _normalize_newlines(text)
+
+
+def _normalize_newlines(text: str) -> str:
+    """换行符归一为 ``\\n``(read_bytes 不做通用换行转换,CRLF 原样残留会改变正文哈希)。"""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def _process_markdown(source, work_root, output_dir, t0, result, safe_stem, out_name,
                       clean_options=None, strict=False, lang_override=None) -> TaskResult:
     work = work_root / safe_stem
     work.mkdir(parents=True, exist_ok=True)
     # 已有 Markdown:复制到统一 work 目录(连同 images/)
     book_md = work / "book.md"
-    book_md.write_text(source.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+    book_md.write_text(_read_markdown_source(source), encoding="utf-8")
     src_images = source.parent / "images"
     if src_images.is_dir():
         import shutil

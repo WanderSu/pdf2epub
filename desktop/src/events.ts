@@ -234,7 +234,9 @@ function applyEvent(state: EventState, ev: EngineEvent): EventState {
       const current = num(ev["current"]);
       const total = num(ev["total"]);
       if (key && key === st.active) st = { ...st, detail: { current, total } };
-      if (st.signatures && current > st.signatures.current) {
+      // 分帖计数只认「总量与 shards 一致」的进度事件:hybrid 段内后端的进度
+      // 会被引擎折算放大(如 1000/2000),直接拿来当分帖数会显示成 1000/2。
+      if (st.signatures && current > st.signatures.current && total === st.signatures.total) {
         st = { ...st, signatures: { ...st.signatures, current } };
       }
       return st;

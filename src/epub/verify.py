@@ -379,10 +379,39 @@ def verify_epub(
             doc_ids[hf] = set(HTML_ID_RE.findall(text))
             return text
 
-        def target_has_anchor(file_part: str, anchor: str) -> bool:
-            """目标文档里是否存在该锚点(含 URL 编码与百分号解码两种写法)。"""
+        def resolve_opf_key(rel: str, base_dir: list[str]) -> str | None:
+            """把相对 ``base_dir``(zip 根视角的目录)的 href 解析成**相对 OPF** 的键。
+
+            ``doc_ids``/``manifest`` 的键空间是「相对 OPF 的路径」;而 XHTML 里的
+            href 是相对**该文档所在目录**的。不归一到同一键空间就去查 ``doc_ids``,
+            跨章锚点(``ch001.xhtml#…`` → 键是 ``text/ch001.xhtml``)永远查不到,
+            于是每本带章内目录/交叉引用的书都报一条假警告。
+            """
+            parts: list[str] = list(base_dir)
+            for seg in Path(rel).parts:
+                if seg in ("", "."):
+                    continue
+                if seg == "..":
+                    if not parts:
+                        return None
+                    parts.pop()
+                else:
+                    parts.append(seg)
+            if parts[:len(opf_dir_parts)] != opf_dir_parts:
+                return None                    # 逃逸出 OPF 目录,无法核实
+            return "/".join(parts[len(opf_dir_parts):])
+
+        def target_has_anchor(file_part: str, anchor: str, base_dir: list[str]) -> bool:
+            """目标文档里是否存在该锚点(含 URL 编码与百分号解码两种写法)。
+
+            ``file_part`` 是相对 ``base_dir`` 的 href,先归一到相对 OPF 的键再查
+            ``doc_ids``;目标不在已索引的 XHTML 里(无法核实)时不报假警告。
+            """
+            key = resolve_opf_key(file_part, base_dir)
+            if key is None or key not in doc_ids:
+                return True                    # 无法核实的目标不告警
             want = {anchor, unquote(anchor), quote(anchor, safe="")}
-            return bool(want & doc_ids.get(file_part, set()))
+            return bool(want & doc_ids[key])
 
         for index, hf in enumerate(html_files):
             content = xhtml(hf)
@@ -588,7 +617,7 @@ def verify_epub(
                     internal_breaks.append(f"{hf} → {href}")
                     continue
                 if anchor:
-                    if in_zip(file_part, hf_dir) and not target_has_anchor(file_part, anchor):
+                    if in_zip(file_part, hf_dir) and not target_has_anchor(file_part, anchor, hf_dir):
                         missing_anchors.append(f"{hf} → #{anchor}")
         if internal_breaks:
             result.fail("link_broken", f"内部链接断裂: {internal_breaks[:5]}")

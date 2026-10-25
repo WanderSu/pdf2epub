@@ -134,12 +134,15 @@ def verify_content(
     epub_path: str | Path,
     *,
     expected_pages: int | None = None,
+    structure: "VerifyResult | None" = None,
 ) -> VerifyResult:
     """对照 Markdown 源检查 EPUB 的内容完整性,返回 VerifyResult。
 
     stats 里带 `content_` 前缀的计数供报告使用(源与产物的数量对照)。
     expected_pages: 原始 PDF 页数(有则检查页覆盖率;文本版 Markdown 没有页码
     注释时自动跳过)。
+    structure: 调用方已算好的结构校验结果(避免同一次转换把 verify_epub 跑两遍
+    —— 300 章的书上这一遍约占校验耗时的 20%);不传则自己算。
     """
     markdown_path = Path(markdown_path)
     epub_path = Path(epub_path)
@@ -152,7 +155,8 @@ def verify_content(
         result.fail("content_source_unreadable", f"无法读取 Markdown 源: {markdown_path} ({e})")
         return result
 
-    structure = verify_epub(epub_path)
+    if structure is None:
+        structure = verify_epub(epub_path)
     if not structure.readable:
         result.readable = False
         result.fail("content_target_unreadable", f"EPUB 无法读取,无法做内容对照: {epub_path}")

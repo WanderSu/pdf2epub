@@ -126,6 +126,9 @@ if (realFiles.length > 0) {
 }
 
 // ── 2. hybrid 双区段 ────────────────────────────────────────────────────────
+//  引擎口径(v0.5.1 起):段开始前报「已完成段数」(i-1, N);段内后端自报的
+//  (c,t) 由 progress_window 折算进该段份额(放大 1000 倍),不再以 (1,1) 把整个
+//  extract 顶满。判据:单调 + **不越前**(第 1 段完成时只能是 50%,不是 100%)。
 console.log("[hybrid 双区段]");
 {
   const { st, progress } = feed([
@@ -135,8 +138,11 @@ console.log("[hybrid 双区段]");
     `{"event":"plan","backend":"hybrid(mineru)","pages":9,"ocr_pages":2,"ocr_runs":2,"shards":2}`,
     `{"event":"stage","name":"detect","state":"done","type":"hybrid","pages":9}`,
     `{"event":"stage","name":"extract","state":"start","backend":"hybrid(mineru)"}`,
-    `{"event":"progress","stage":"extract","current":1,"total":2,"detail":"hybrid_ocr","page":3}`,
-    `{"event":"progress","stage":"extract","current":2,"total":2,"detail":"hybrid_ocr","page":6}`,
+    `{"event":"progress","stage":"extract","current":0,"total":2,"detail":"hybrid_ocr","page":3}`,
+    `{"event":"progress","stage":"extract","current":1000,"total":2000,"detail":"mineru"}`,
+    `{"event":"progress","stage":"extract","current":1,"total":2,"detail":"hybrid_ocr","page":6}`,
+    `{"event":"progress","stage":"extract","current":2000,"total":2000,"detail":"mineru"}`,
+    `{"event":"progress","stage":"extract","current":2,"total":2,"detail":"hybrid_ocr"}`,
     `{"event":"stage","name":"extract","state":"done","backend":"hybrid(mineru)"}`,
     `{"event":"stage","name":"clean","state":"start"}`,
     `{"event":"stage","name":"clean","state":"done","issues":0}`,
@@ -150,11 +156,14 @@ console.log("[hybrid 双区段]");
   check("类型判定为 HYB", st.kind === "HYB", String(st.kind));
   check("后端判定为 MinerU(取自主干括号内)", st.backend === "MinerU", String(st.backend));
   check("分帖数来自 plan.shards", st.signatures?.total === 2, JSON.stringify(st.signatures));
-  check("分帖进度随 progress 递增", st.signatures?.current === 2, JSON.stringify(st.signatures));
+  check("分帖计数不被折算放大的段内进度污染(1000/2000 ≠ 分帖 1000)",
+    st.signatures?.current === 2, JSON.stringify(st.signatures));
   check("EXTRACT 标为 OCR 工序", st.stages.find(n => n.key === "EXTRACT")?.isOcr === true);
-  check("区段进度让进度条有真实数值(5% → 20% → 35% → 65%)",
-    progress[4] === 5 && progress[5] === 20 && progress[6] === 35 && progress[7] === 65,
+  check("区段进度:第1段完 35%(extract 半程)→ 第2段始 35% → extract 完 65%",
+    progress[7] === 35 && progress[8] === 35 && progress[9] === 65,
     progress.join(","));
+  check("进度不越前:第 1 段完成时不是 extract 100%(旧 bug:段内 1/1 顶满)",
+    progress[7] === 35 && progress[9] === 65, progress.join(","));
   check("进度单调不减且终态 100%", monotonic(progress) && progress.at(-1) === 100);
 }
 

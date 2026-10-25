@@ -33,6 +33,10 @@ class Backend(ABC):
     #: 后端标识名(用于配置切换)
     name: str = "base"
 
+    #: 单个云端任务的默认页数上限(dry-run 分片估算与实际提交共用同一口径)。
+    #: ``None`` = 该后端不分片,整本一次提交(如 PaddleOCR,PART_ID="whole")。
+    DEFAULT_MAX_PAGES_PER_TASK: int | None = 200
+
     @abstractmethod
     def convert(self, pdf_path: str | Path, work_dir: str | Path) -> ConversionResult:
         """将 PDF 转换为 work_dir/book.md + work_dir/images/。"""

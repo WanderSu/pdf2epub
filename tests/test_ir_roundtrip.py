@@ -235,16 +235,28 @@ def test_load_ir_without_meta_is_an_error(tmp_path) -> None:
         load_ir(tmp_path)
 
 
-# ---------------------------------------------------------------- 真实缓存书(本地可选)
+# ---------------------------------------------------------------- 真实缓存书
 
+# 入库夹具:真实转换产物(提取/清理后的 book.md),任何干净 clone 上都能跑。
+# work/ 是 gitignore 的本地缓存,存在时再额外并入 —— 但只有夹具是底线,
+# 否则这条「0.5.0 核心不变量在真实产物上的防线」在 CI/新机器上永久空转
+# (got empty parameter set 静默 skip,见 ee9af7d 的同类教训)。
+FIXTURE_BOOKS = sorted((PROJECT_ROOT / "tests" / "fixtures" / "real_books").glob("*.md"))
 CACHED_BOOKS = sorted(p for p in (PROJECT_ROOT / "work").glob("*/book.md"))
+REAL_BOOKS = FIXTURE_BOOKS + [p for p in CACHED_BOOKS if p.name not in ()]
 
 
-@pytest.mark.parametrize("md_path", CACHED_BOOKS, ids=lambda p: p.parent.name[:24] or "book")
+@pytest.mark.parametrize("md_path", REAL_BOOKS, ids=lambda p: p.stem[:24] or "book")
 def test_real_cached_book_roundtrips(md_path) -> None:
-    """三本真实缓存书 + 样本:往返逐字节一致、切片铺满全文(read-only)。"""
+    """真实书夹具(+本地缓存书):往返逐字节一致、切片铺满全文(read-only)。"""
     md = md_path.read_text(encoding="utf-8")
     ir = build_ir(md, source=str(md_path), backend="mineru", total_pages=0)
     assert render_ir(ir) == md
     ok, why = spans_tile(ir, md)
     assert ok, why
+
+
+def test_real_book_fixtures_are_committed() -> None:
+    """夹具必须真的入库:空目录等于这条防线又空转了(防回归的自我审计)。"""
+    assert len(FIXTURE_BOOKS) >= 3, \
+        "tests/fixtures/real_books/ 为空 —— 真实书往返测试在干净 clone 上会空转"

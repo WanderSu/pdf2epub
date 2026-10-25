@@ -110,6 +110,45 @@ def test_markdown_input_pipeline(tmp_path: Path) -> None:
     assert results[0].epub is not None and results[0].epub.exists()
 
 
+def test_markdown_input_with_utf8_bom_keeps_title(tmp_path: Path) -> None:
+    """UTF-8 BOM 不许把首个 ``# 标题`` 顶成 ``\\ufeff# …``(标题识别失败)。"""
+    md = tmp_path / "bom.md"
+    md.write_text("# 手记\n\n正文段落,句号结尾。\n", encoding="utf-8-sig")
+    results = process_batch(
+        [md], config=dict(CFG),
+        work_root=tmp_path / "work", output_dir=tmp_path / "out", force=True,
+    )
+    assert results[0].status == "done"
+    book_md = (tmp_path / "work" / "bom" / "book.md").read_text(encoding="utf-8")
+    assert book_md.startswith("# 手记")                 # BOM 已剥掉
+
+
+def test_markdown_input_gbk_falls_back_with_warning(tmp_path: Path) -> None:
+    """GBK 存盘的 .md:回退 GB18030 正确解码(不许静默出一本乱码书)。"""
+    md = tmp_path / "gbk.md"
+    md.write_bytes("# 手记\n\n正文段落,句号结尾。\n".encode("gb18030"))
+    results = process_batch(
+        [md], config=dict(CFG),
+        work_root=tmp_path / "work", output_dir=tmp_path / "out", force=True,
+    )
+    assert results[0].status == "done"
+    book_md = (tmp_path / "work" / "gbk" / "book.md").read_text(encoding="utf-8")
+    assert book_md.startswith("# 手记") and "\ufffd" not in book_md
+
+
+def test_markdown_input_undecodable_fails_loudly(tmp_path: Path) -> None:
+    """两种编码都解不出 → 明确失败(编码是事实问题,重试无意义),不出乱码书。"""
+    md = tmp_path / "binary.md"
+    md.write_bytes(b"\xff\xfe\x00\x01not really markdown \x80\x81\x82")
+    results = process_batch(
+        [md], config=dict(CFG),
+        work_root=tmp_path / "work", output_dir=tmp_path / "out", force=True,
+    )
+    assert results[0].status == "failed"
+    assert "编码" in results[0].error
+    assert not list((tmp_path / "out").glob("*.epub"))
+
+
 # ---------------------------------------------------------------- 清理接线(P6)
 
 def test_conversion_runs_the_ir_clean_engine_and_leaves_an_audit_trail(tmp_path: Path) -> None:
@@ -475,6 +514,25 @@ def test_repeated_same_source_is_not_a_conflict(tmp_path: Path) -> None:
     assert [r.status for r in results] == ["done", "skipped"]
 
 
+def test_case_only_name_difference_is_a_conflict(tmp_path: Path) -> None:
+    """只差大小写的文件名(``Book.pdf`` vs ``book.pdf``)也是冲突。
+
+    Windows/macOS 默认文件系统大小写不敏感:两本会写进同一个
+    ``work/Book/`` 与 ``output/Book.epub``,后一本被 ``is_done`` 判成
+    「已完成」静默跳过(交付物少一本、退出码还是 0)。归一键之前,
+    ``work_key``/``out_key`` 因大小写不同而漏检。
+    """
+    make_pdf(tmp_path / "a" / "Book.pdf", pages=1)
+    make_pdf(tmp_path / "b" / "book.pdf", pages=1)
+    results = process_batch(
+        [tmp_path / "a", tmp_path / "b"], config=dict(CFG),
+        work_root=tmp_path / "work", output_dir=tmp_path / "out",
+    )
+    assert [r.status for r in results] == ["failed", "failed"]
+    assert all("重名冲突" in r.error for r in results)
+    assert not list((tmp_path / "out").glob("*.epub"))
+
+
 # ------------------------------------------- P2-1 产物完好性(截断/损坏不算完成)
 
 def _batch_kwargs(tmp_path: Path) -> dict:
@@ -751,3 +809,35 @@ def test_winerror2_from_pandoc_is_classified_as_missing_pandoc(
     md.write_text("# 书\n\n正文。\n", encoding="utf-8")
     with pytest.raises(PandocMissingError, match="pandoc"):
         pandoc.build_epub(md, tmp_path / "work", tmp_path / "out", title="书")
+
+
+def test_iter_sources_skips_artifact_and_env_dirs(tmp_path: Path) -> None:
+    """目录递归不得把产物/环境/工程目录与仓库文档当书(实测在项目根命中 771 个文件)。
+
+    排除:work/ output/ tests/ desktop/ docs/ node_modules/ 等工程目录、一切 `.` 开头
+    目录,以及 README / CHANGELOG 这类**仓库文档文件名**(只在扫目录时按名字跳过)。
+    显式传入的单个文件不受限制 —— 用户指名要它,哪怕是 README;显式把 docs/ 当输入
+    目录也照收(目录跳过只作用于「父目录扫子目录」)。
+    """
+    from batch import iter_sources
+
+    keep = tmp_path / "books" / "真正要转的书.md"
+    keep.parent.mkdir(parents=True)
+    keep.write_text("# 书\n\n正文。\n", encoding="utf-8")
+    for junk in ("work/x/book.md", "output/旧书.md", ".git/notes.md",
+                 ".venv/lib/手册.md", "node_modules/pkg/README.md",
+                 "tests/test_doc.md", "desktop/ui/说明.md",
+                 "docs/guide.md", "docs/stages/notes.pdf",
+                 "README.md", "README.en.md", "CHANGELOG.md"):
+        f = tmp_path / "books" / junk
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("junk", encoding="utf-8")
+
+    assert iter_sources([tmp_path / "books"]) == [keep]
+    # 显式指名的文件照收(哪怕是 README)
+    assert iter_sources([tmp_path / "books" / "README.md"]) == [tmp_path / "books" / "README.md"]
+    # 显式把 docs/ 当输入目录:照收
+    assert iter_sources([tmp_path / "books" / "docs"]) == [
+        tmp_path / "books" / "docs" / "guide.md",
+        tmp_path / "books" / "docs" / "stages" / "notes.pdf",
+    ]

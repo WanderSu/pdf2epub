@@ -464,3 +464,57 @@ def test_backlink_injection_is_idempotent_and_keeps_mimetype_first(tmp_path: Pat
     with zipfile.ZipFile(epub) as zf:
         first = zf.infolist()[0]
     assert first.filename == "mimetype" and first.compress_type == zipfile.ZIP_STORED
+
+
+def test_verify_content_reuses_caller_structure(tmp_path: Path, monkeypatch) -> None:
+    """传入 structure= 时不得再跑一遍 verify_epub(一次转换只校验一次结构)。
+
+    回归:verify_output 先 verify_epub,verify_content 内部又调一次 —— 300 章的
+    书上这一遍约占校验耗时的 20%,结论却一字不差。
+    """
+    import epub.content as content_mod
+    from epub.verify import VerifyResult
+
+    src = tmp_path / "w"
+    epub = build_epub(src, tmp_path / "ok.epub", with_image=False, with_math=False)
+    md = src / "book.md"
+
+    calls = []
+    real_verify = content_mod.verify_epub
+    monkeypatch.setattr(content_mod, "verify_epub",
+                        lambda *a, **k: calls.append(a) or real_verify(*a, **k))
+    verify_content(md, epub)                       # 不传:自己算(兼容旧调用)
+    assert len(calls) == 1
+
+    calls.clear()
+    structure = VerifyResult()                     # 调用方已算好的结构结果
+    structure.stats.update(real_verify(epub).stats)
+    verify_content(md, epub, structure=structure)
+    assert calls == []                             # 传了就不许再算
+
+
+def test_verify_content_reuses_caller_structure(tmp_path: Path, monkeypatch) -> None:
+    """传入 structure= 时不得再跑一遍 verify_epub(一次转换只校验一次结构)。
+
+    回归:verify_output 先 verify_epub,verify_content 内部又调一次 —— 300 章的
+    书上这一遍约占校验耗时的 20%,结论却一字不差。
+    """
+    import epub.content as content_mod
+    from epub.verify import VerifyResult
+
+    src = tmp_path / "w"
+    epub = build_epub(src, tmp_path / "ok.epub", with_image=False, with_math=False)
+    md = src / "book.md"
+
+    calls = []
+    real_verify = content_mod.verify_epub
+    monkeypatch.setattr(content_mod, "verify_epub",
+                        lambda *a, **k: calls.append(a) or real_verify(*a, **k))
+    verify_content(md, epub)                       # 不传:自己算(兼容旧调用)
+    assert len(calls) == 1
+
+    calls.clear()
+    structure = VerifyResult()                     # 调用方已算好的结构结果
+    structure.stats.update(real_verify(epub).stats)
+    verify_content(md, epub, structure=structure)
+    assert calls == []                             # 传了就不许再算

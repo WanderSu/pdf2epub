@@ -71,6 +71,23 @@ def test_preflight_shard_count_matches_the_backend_actual_split(pages: int) -> N
 def test_max_pages_per_task_fallback() -> None:
     assert max_pages_per_task(CFG, "mineru") == 200
     assert max_pages_per_task({}, "mineru") == 200
+
+
+def test_paddleocr_is_not_sharded_by_default() -> None:
+    """PaddleOCR 整本一次提交(PART_ID="whole"):预检不得按 200 页估成多段。
+
+    回归:600 页扫描书 + paddleocr,预检报「3 段」、实际只提交 1 个整本任务。
+    分片口径的默认值以各后端类声明的 DEFAULT_MAX_PAGES_PER_TASK 为准。
+    """
+    assert max_pages_per_task({}, "paddleocr") is None
+    assert estimate_shards(600, max_pages_per_task({}, "paddleocr")) == 1
+    # config 显式覆盖仍然生效(后端是否真分片另说,预检口径要尊重配置)
+    assert max_pages_per_task({"paddleocr": {"max_pages_per_task": 300}},
+                              "paddleocr") == 300
+    assert estimate_shards(600, 300) == 2
+    # mineru 的 config 覆盖不被默认值盖掉
+    assert estimate_shards(600, max_pages_per_task(
+        {"mineru": {"max_pages_per_task": 100}}, "mineru")) == 6
     assert max_pages_per_task({"mineru": {"max_pages_per_task": "50"}}, "mineru") == 50
     assert max_pages_per_task({"mineru": {"max_pages_per_task": "bad"}}, "mineru") == 200
 

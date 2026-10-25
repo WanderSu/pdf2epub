@@ -171,6 +171,14 @@ def parse_markdown(md: str, *, backend: str = "ir", part_id: str = "book",
                     # 宁可漏保护一处公式,也不能让清理器形同失效。
                     j = i + 1
                     kind, level, extra, cls = "text", None, {}, "paragraph"
+        elif cls == "indent_code":
+            # 缩进代码块的续行同样必须缩进;遇空行收尾(空行进 trailer,字节不丢)。
+            # 不并入空行后的续段:宁可拆成相邻两个 code 块,也不能把正文吞进代码。
+            while j < len(lines):
+                nxt, _ = _strip_eol(lines[j])
+                if _is_blank(nxt) or not nxt.startswith(("    ", "\t")):
+                    break
+                j += 1
         elif cls == "table":
             while j < len(lines):
                 nxt, _ = _strip_eol(lines[j])
@@ -244,6 +252,12 @@ def _classify(content: str) -> tuple[str, int | None, dict, str]:
     image = _IMAGE_ONLY_RE.match(content)
     if image:
         return "image", None, {"image_ref": image.group(1)}, "image"
+    if content.startswith(("    ", "\t")):
+        # 缩进代码块(CommonMark:4 空格 / 1 制表符起)。只认围栏的话,技术书里
+        # 整段缩进代码会被判成 text,然后被 join_lines 当正文拼接、被诗行规则补
+        # 硬换行 —— 代码块静默毁容。缩进代码不能打断段落(_starts_block 已保证
+        # 段内缩进行是续行),所以只有空行后的首行缩进才走到这里。
+        return "code", None, {"fence": None, "style": "indented"}, "indent_code"
     return "text", None, {}, "paragraph"
 
 

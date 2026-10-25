@@ -473,6 +473,42 @@ def test_catalog_entry_does_not_swallow_previous_body_line() -> None:
     assert "写到这里一 历史的回顾" not in out
 
 
+def test_year_at_line_end_does_not_block_cross_page_join() -> None:
+    """「以数字结尾的正文行」不是目录条目:年份结尾的跨页断句必须能拼。
+
+    回归(实测):`这次会议一直持续到 1949` + `年十月一日…` 被 ENTRY_TAIL_RE 的
+    裸空格 + 数字分支误判为目录条目,拒绝拼接、跳过中文空格修正。裸空格形式
+    现在只认 1–3 位页码,4 位数字(多为年份)必须有显式分隔符才算目录。
+    """
+    md = ("这次会议从春天一直开到深秋,整整持续了 1949\n"
+          "年十月一日,毛泽东在天安门城楼上宣告中华人民共和国成立。\n")
+    out = clean(md)
+    assert "1949年十月一日" in out
+    # 真目录条目仍然不拼
+    md2 = "第一章 失踪与疯癫/35\n第五章……204\n"
+    out2 = clean(md2)
+    assert "第一章 失踪与疯癫/35" in out2 and "\n第五章……204" in out2
+
+
+def test_prose_line_ending_with_short_number_is_not_a_toc_entry() -> None:
+    """行尾是 1–3 位数字的**正文句**不是目录条目(有句读标点就不是条目)。
+
+    回归:`本书共 12 章，合计 320` + 下一行曾被「裸空格 + 数字」分支判成目录
+    条目,既拒拼又跳过中文空格修正。现在弱形式额外要求整行**没有句读标点**;
+    真目录条目(裸空格引导的 `第一章 绪论 35`)仍然不拼。
+    """
+    md = ("全书一共收录了三百二十七篇文章以及若干附录\uff0c合计 320\n"
+          "页\uff0c其中三分之一是首次发表。\n")
+    out = clean(md)
+    assert "320页" in out
+
+    # 真目录条目(裸空格引导)仍是独立行:不拼接
+    md2 = "第一章 绪论 35\n第二章 研究方法 72\n"
+    out2 = clean(md2)
+    assert "\n第二章 研究方法 72" in out2
+    assert "35第二章" not in out2
+
+
 def test_note_lines_are_not_merged_into_the_next_paragraph() -> None:
     """注释行(圈码序号开头)是独立段落:没有句末标点时也不得被下一段粘走。"""
     md = "① 参见前揭书第三二页\n\n这一段正文足够长,会被跨空行拼接规则看上。\n"
