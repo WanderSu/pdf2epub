@@ -3,7 +3,7 @@
 检查逻辑在 `src/epub/verify.py`(转换流程内也会调用),本脚本只负责
 命令行入口与人类可读的报告输出。
 
-验证项(对应 idea.md §12):
+验证项(对应 docs/design.md §7 质量校验):
 1. EPUB 包结构:container.xml / OPF / nav / 图片 / CSS
 2. 图片:manifest 引用 ↔ 实际文件一一匹配,含中文文件名
 3. 数学公式:MathML <math> 是否真正存在于 XHTML

@@ -1,4 +1,4 @@
-"""ebook-converter CLI(idea.md §14 / Phase 7)。
+"""ebook-converter CLI(见 docs/design.md §9 命令行与批处理)。
 
 用法:
     ebook-converter book.pdf

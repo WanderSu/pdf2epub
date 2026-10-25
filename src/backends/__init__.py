@@ -1,6 +1,6 @@
 """后端工厂:按配置名创建后端实例。
 
-配置(idea.md §13)通过 ocr_backend 字段切换:
+配置(见 docs/design.md §4 提取后端)通过 ocr_backend 字段切换:
     ocr_backend = pymupdf | mineru | paddleocr
 """
 from __future__ import annotations

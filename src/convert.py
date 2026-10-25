@@ -1,4 +1,4 @@
-"""PDF → 统一 Markdown 自动转换入口(idea.md §6 / Phase 6)。
+"""PDF → 统一 Markdown 自动转换入口(见 docs/design.md §3 类型判定与页级路由)。
 
 流程:
   1. PDFDetector 检测类型(text / scanned / hybrid)

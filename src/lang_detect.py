@@ -1,4 +1,4 @@
-"""语言检测(v0.3.2 P1-4):EPUB `dc:language` 不再写死 zh-CN。
+"""语言检测:EPUB `dc:language` 不再写死 zh-CN。
 
 纯统计、零依赖 —— 按 Unicode 脚本区间数正文,够用且可预测:
 

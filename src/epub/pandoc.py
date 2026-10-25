@@ -1,4 +1,4 @@
-"""Pandoc EPUB 生成封装(idea.md §10/§11)。
+"""Pandoc EPUB 生成封装(见 docs/design.md §6 EPUB 产物)。
 
 统一命令:
     pandoc book.md -o out.epub --toc --toc-depth=3 --css=config/book.css

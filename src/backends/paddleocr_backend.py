@@ -1,4 +1,4 @@
-"""PaddleOCR-VL 1.6 云端后端(idea.md §13 / Phase 5)。
+"""PaddleOCR-VL 1.6 云端后端(见 docs/design.md §4 提取后端)。
 
 对接百度 AI Studio「PaddleOCR-VL」官方 API(单 Token 鉴权):
   1. POST https://paddleocr.aistudio-app.com/api/v2/ocr/jobs
@@ -152,7 +152,8 @@ def reconstruct_footnotes_in(md_text: str, blocks: list[dict]) -> tuple[str, dic
 
     与 MinerU 用的是同一个入口(`markdown.footnotes.reconstruct_footnotes`):
     配对规则、置信度、fallback、编号全在那里,两个后端不各写一套。「Markdown 里本来
-    就带着脚注文本」这件事也由引擎统一处理(`strip_note_lines`),适配器不做特殊分支。
+    就带着脚注文本」这件事也由引擎统一处理(`reconstruct_footnotes` 内部按
+    `markdown/footnotes.py` 的 `note_line_spans` 删掉原文里已带的脚注行),适配器不做特殊分支。
     """
     if not md_text or not blocks:
         return md_text, {}
@@ -446,7 +447,7 @@ class PaddleOCRAdapter(Backend):
 
         work_dir.mkdir(parents=True, exist_ok=True)
         images_abs = work_dir / "images"
-        # 统一目录结构(idea.md §6):清掉旧产物(上次转换的图片、imgs/ 等)
+        # 统一目录结构(见 docs/design.md §2 统一中间格式):清掉旧产物(上次转换的图片、imgs/ 等)
         for old_dir in (work_dir / "images", work_dir / "imgs"):
             if old_dir.is_dir():
                 for old in old_dir.iterdir():

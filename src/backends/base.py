@@ -1,4 +1,4 @@
-"""OCR/PDF 后端统一接口(idea.md §13)。
+"""OCR/PDF 后端统一接口(见 docs/design.md §4 提取后端)。
 
 所有后端(本地 PyMuPDF4LLM、云端 MinerU、云端 PaddleOCR-VL)
 必须实现统一的 convert() 接口,输出统一的 work/book.md + images/ 结构,

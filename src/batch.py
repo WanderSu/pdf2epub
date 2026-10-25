@@ -1,4 +1,4 @@
-"""批处理核心(idea.md §15 / Phase 7)。
+"""批处理核心(见 docs/design.md §9 命令行与批处理)。
 
 能力:
   - 批量处理(文件或目录,串行执行,优先稳定性)
@@ -44,7 +44,7 @@ from detector.pdf_detector import PDFType
 from paths import config_file
 import events
 
-#: 封面 JPEG 宽度 / 质量(v0.3.2 P1-4:PDF 首页渲染,不裁切)
+#: 封面 JPEG 宽度 / 质量(PDF 首页渲染,不裁切)
 COVER_WIDTH = 1200
 COVER_QUALITY = 88
 #: 语言检测读取的正文前多少字符(整本读没必要,前几万字足够定脚本)
@@ -89,7 +89,7 @@ def _parse_pdf_date(raw: str) -> str | None:
 
 def render_cover(pdf: Path, work_dir: Path, *, width: int = COVER_WIDTH,
                  quality: int = COVER_QUALITY) -> Path | None:
-    """把 PDF 首页渲染成封面 JPEG(idea.md §12:封面用 PDF 第一页)。
+    """把 PDF 首页渲染成封面 JPEG(见 docs/design.md §6:封面用 PDF 第一页)。
 
     返回 None 表示这次没做成封面(渲染失败 / 空 PDF)—— 不阻断转换,EPUB 只是没封面。
     """
@@ -433,7 +433,7 @@ def _fail(result: TaskResult, source: Path, error: Exception, *, code: str,
 def verify_output(epub: Path, *, strict: bool = False,
                   book_md: Path | None = None,
                   expected_pages: int | None = None) -> VerifyResult:
-    """EPUB 结构与内容完整性校验(idea.md §12 / v0.3.2 P0-3),接入转换流程。
+    """EPUB 结构与内容完整性校验(见 docs/design.md §7),接入转换流程。
 
     - 结构:容器 / manifest / 链接 / 图片 / 公式 / CSS(verify_epub)
     - 内容:对照源 Markdown 检查有无内容丢失(book_md 非空时追加)

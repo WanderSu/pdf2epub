@@ -1,4 +1,4 @@
-"""MinerU Cloud 后端(idea.md §13 / Phase 4)。
+"""MinerU Cloud 后端(见 docs/design.md §4 提取后端)。
 
 流程(官方 /api/v4 精准解析 API,本地文件上传模式):
   1. POST /api/v4/file-urls/batch  申请上传 URL + batch_id
