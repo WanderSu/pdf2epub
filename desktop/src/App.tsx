@@ -549,7 +549,9 @@ export default function App() {
       type: s?.type ?? ((b.kind ?? undefined) as FileType | undefined),
       backend: s?.backend ?? ((b.backend ?? undefined) as Backend | undefined),
       epub: b.path,
-      path: s?.path,
+      // 「重新转换」要的是**源文件**路径:本会话刚转过的用队列里的实时值,
+      // 重启后队列是空的 → 退回书库里持久化的 source(老库没有就为空,按钮不显示)
+      path: s?.path ?? b.source ?? undefined,
     };
   }), [diskBooks, files]);
 

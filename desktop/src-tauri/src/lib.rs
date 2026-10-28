@@ -323,7 +323,7 @@ async fn convert_file(
         });
     }
     if let Some(ep) = &epub {
-        upsert_library(ep); // 转换产物自动入库
+        upsert_library(ep, Some(&file_path)); // 转换产物自动入库(连源文件路径一起记)
     }
     Ok(ConvertResult {
         success: true,
@@ -497,6 +497,10 @@ struct LibraryEntry {
     backend: Option<String>,   // Local / MinerU / PaddleOCR / Auto
     #[serde(default)]
     pages: Option<u32>,
+    /// 源文件路径(PDF/MD)。书库的「重新转换」要用它 —— 不记下来的话,重启之后
+    /// 界面只剩「打开 EPUB」,用户想重转也点不到(旧库没有这个键 → default)。
+    #[serde(default)]
+    source: Option<String>,
 }
 
 fn library_db_path() -> PathBuf {
@@ -648,7 +652,10 @@ fn epub_metadata(path: &str) -> (String, String) {
 }
 
 /// 转换完成/文件变动后更新单条记录(EPUB 元数据优先,失败回退文件名解析)。
-fn upsert_library(epub_path: &str) {
+///
+/// ``source``:本次转换的源文件路径。只在有值(且非空)时写入 —— 手动放进 output/
+/// 的 EPUB 没有源文件,不该把上一次的记录覆盖成空。
+fn upsert_library(epub_path: &str, source: Option<&str>) {
     let mut entries = load_library();
     let name = Path::new(epub_path)
         .file_name()
@@ -675,6 +682,9 @@ fn upsert_library(epub_path: &str) {
         }
         existing.size = size;
         existing.mtime = mtime;
+        if let Some(s) = source.filter(|s| !s.is_empty()) {
+            existing.source = Some(s.to_string());
+        }
     } else {
         entries.push(LibraryEntry {
             path: epub_path.to_string(),
@@ -687,9 +697,87 @@ fn upsert_library(epub_path: &str) {
             kind: None,
             backend: None,
             pages: None,
+            source: source.filter(|s| !s.is_empty()).map(|s| s.to_string()),
         });
     }
     save_library(&dedupe_library(entries));
+}
+
+/// 引擎的 `batch.sanitize_name`:空白与 Windows 非法字符 → 下划线(连续的一段并成一个)。
+/// 工作目录名由它决定(`work/<这个名字>/`),找回源文件路径要靠它。
+fn sanitize_work_name(name: &str) -> String {
+    let mut out = String::new();
+    let mut last_us = false;
+    for ch in name.trim().chars() {
+        let replace = ch.is_whitespace() || "\\/:*?\"<>|".contains(ch);
+        if replace {
+            if !last_us {
+                out.push('_');
+                last_us = true;
+            }
+        } else {
+            out.push(ch);
+            last_us = false;
+        }
+    }
+    if out.is_empty() {
+        "book".to_string()
+    } else {
+        out
+    }
+}
+
+/// 工作目录候选根:`<exe 同级>/work`(发布形态)与 `<当前目录>/work`(开发形态)。
+fn work_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            roots.push(dir.join("work"));
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let p = cwd.join("work");
+        if !roots.contains(&p) {
+            roots.push(p);
+        }
+    }
+    roots
+}
+
+/// 从 `work/<工作目录名>/ir/meta.json` 的 `source` 字段找回源文件路径。
+fn recover_source_from_work(epub_path: &str) -> Option<String> {
+    recover_source_from_roots(&work_roots(), epub_path)
+}
+
+/// 同上,但工作目录根由调用方给出(测试注入临时目录用)。
+fn recover_source_from_roots(roots: &[PathBuf], epub_path: &str) -> Option<String> {
+    let stem = Path::new(epub_path).file_stem()?.to_string_lossy().into_owned();
+    let work_name = sanitize_work_name(&stem);
+    for root in roots {
+        let meta = root.join(&work_name).join("ir").join("meta.json");
+        let Ok(text) = std::fs::read_to_string(&meta) else {
+            continue;
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        if let Some(s) = json.get("source").and_then(|v| v.as_str()) {
+            if !s.is_empty() {
+                return Some(s.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 这条书库记录对应的源文件路径:**必须真实存在**才算数。
+fn resolve_entry_source(entry: &LibraryEntry) -> Option<String> {
+    if let Some(s) = entry.source.as_deref() {
+        if Path::new(s).exists() {
+            return Some(s.to_string());
+        }
+    }
+    recover_source_from_work(&entry.path).filter(|s| Path::new(s).exists())
 }
 
 /// 书库同步:剔除失效记录 + 扫描输出目录新 EPUB(读元数据/文件名)+ 写回数据库。
@@ -699,6 +787,12 @@ fn library_sync(output_dir: String) -> Vec<LibraryEntry> {
     let mut entries = load_library();
     // 1. 剔除路径已不存在的记录(手动从 output 删除的)
     entries.retain(|e| Path::new(&e.path).exists());
+    // 1b. 源文件路径:老库没记 → 从工作目录的 ir/meta.json 找回来;
+    //     源文件已被删除/移动的记录把 source 清空(界面据此隐藏「重新转换」,
+    //     而不是给出一个点了就报错的按钮)。
+    for e in entries.iter_mut() {
+        e.source = resolve_entry_source(e);
+    }
     // 2. 扫描输出目录
     let dir = resolve_dir(&output_dir);
     if let Ok(rd) = std::fs::read_dir(&dir) {
@@ -751,6 +845,7 @@ fn library_sync(output_dir: String) -> Vec<LibraryEntry> {
                 kind: None,
                 backend: None,
                 pages: None,
+                source: None,
             });
         }
     }
@@ -1186,6 +1281,7 @@ mod tests {
             kind: None,
             backend: None,
             pages: None,
+            source: None,
         };
         let entries = vec![
             mk("E:\\out\\a.epub", "[日]_大江健三郎"),
@@ -1336,6 +1432,70 @@ mod tests {
         std::fs::create_dir_all(existing.parent().unwrap()).unwrap();
         std::fs::write(&existing, "{}").unwrap();
         assert_eq!(apikey_target(Some(&cli.to_string_lossy())), existing);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn sanitize_work_name_matches_the_engine() {
+        // 与 Python 侧 batch.sanitize_name 同一套规则(空白与 Windows 非法字符 → 下划线,
+        // 连续的一段并成一个)。工作目录名必须逐字一致,否则源文件路径找不回来。
+        assert_eq!(
+            sanitize_work_name("工资、价格和利润 - [德] 卡尔·马克思"),
+            "工资、价格和利润_-_[德]_卡尔·马克思"
+        );
+        assert_eq!(sanitize_work_name("a  b   c"), "a_b_c");
+        assert_eq!(sanitize_work_name("坏/名:字?*"), "坏_名_字_");
+        assert_eq!(sanitize_work_name("   "), "book");
+    }
+
+    #[test]
+    fn source_is_recovered_from_the_work_dir() {
+        // 老库没记 source:重启后「重新转换」按钮要能回来 —— 从
+        // work/<工作目录名>/ir/meta.json 的 source 字段把源文件路径读出来。
+        let base = std::env::temp_dir().join(format!("pdf2epub-src-{}", std::process::id()));
+        let work = base.join("work");
+        let src_pdf = base.join("源文件.pdf");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::write(&src_pdf, b"pdf").unwrap();
+
+        let dir = work.join(sanitize_work_name("工资、价格和利润 - [德] 卡尔·马克思"));
+        std::fs::create_dir_all(dir.join("ir")).unwrap();
+        std::fs::write(
+            dir.join("ir").join("meta.json"),
+            // {:?} 负责把 Windows 路径里的反斜杠转义成合法 JSON
+            format!("{{\"schema\":1,\"source\":{:?}}}", src_pdf.to_string_lossy()),
+        )
+        .unwrap();
+
+        let epub = base
+            .join("output")
+            .join("工资、价格和利润 - [德] 卡尔·马克思.epub");
+        let epub_s = epub.to_string_lossy().into_owned();
+        assert_eq!(
+            recover_source_from_roots(&[work.clone()], &epub_s),
+            Some(src_pdf.to_string_lossy().into_owned())
+        );
+
+        // 库里记的路径已失效 → 回退到工作目录;源文件也真没了 → 返回 None(按钮隐藏)
+        let entry = LibraryEntry {
+            path: epub_s,
+            title: String::new(),
+            author: String::new(),
+            size: 0,
+            mtime: 0,
+            added_at: 0,
+            kind: None,
+            backend: None,
+            pages: None,
+            source: Some(base.join("已删除.pdf").to_string_lossy().into_owned()),
+        };
+        let _ = recover_source_from_roots(&[work.clone()], &entry.path);
+        std::fs::remove_file(&src_pdf).ok();
+        assert_eq!(recover_source_from_roots(&[work], &entry.path), Some(
+            src_pdf.to_string_lossy().into_owned()
+        ));
+        // 只是取回路径;「文件在不在」由 resolve_entry_source 判定
+        assert_eq!(resolve_entry_source(&entry), None);
         std::fs::remove_dir_all(&base).ok();
     }
 }

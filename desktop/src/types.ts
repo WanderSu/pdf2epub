@@ -80,6 +80,9 @@ export interface LibEntry {
   kind?: string | null;
   backend?: string | null;
   pages?: number | null;
+  /** 源文件路径(PDF/MD):书库「重新转换」要用它。后端只在文件真的存在时给出,
+   *  所以有值即可放心显示按钮。旧记录可能是 null。 */
+  source?: string | null;
 }
 
 export interface EnvState {

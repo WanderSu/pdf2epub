@@ -36,7 +36,6 @@ body {
     "Source Han Serif SC",
     "SimSun",
     "NSimSun",
-    "Microsoft YaHei",
     serif;
 
   font-size: 1em;
@@ -68,24 +67,17 @@ p {
   widows: 2;
 }
 
-/* 标题、图片、表格等块元素后的第一段不缩进。
-   这样不会出现“章节标题下面第一段空出两个字”的网页感。 */
-h1 + p,
-h2 + p,
-h3 + p,
-h4 + p,
-h5 + p,
-h6 + p,
-figure + p,
-blockquote + p,
-table + p,
-pre + p {
+/* 图片、表格等块元素后的第一段不缩进。 */
+figure+p,
+blockquote+p,
+table+p,
+pre+p {
   text-indent: 0;
 }
 
 
 /* 连续正文段落保持自然的书籍节奏。 */
-p + p {
+p+p {
   margin-top: 0;
 }
 
@@ -110,20 +102,17 @@ h6 {
   margin-left: 0;
 
   font-family:
-    "Helvetica Neue",
-    Arial,
-    "PingFang SC",
-    "Microsoft YaHei",
-    "Noto Sans CJK SC",
-    "Source Han Sans SC",
-    "WenQuanYi Micro Hei",
-    "SimHei",
-    sans-serif;
+    "Songti SC",
+    "STSong",
+    "Noto Serif CJK SC",
+    "Source Han Serif SC",
+    "SimSun",
+    serif;
 
   line-height: 1.4;
   font-weight: 600;
 
-  text-align: left;
+  text-align: center;
 
   page-break-after: avoid;
   orphans: 3;
@@ -399,7 +388,7 @@ sub {
 
 /* Pandoc 还会在脚注区顶部插一个 <hr />:与 .footnotes 的 border-top 叠成两条线,
    留 CSS 的那条细线,把 hr 隐掉。 */
-.footnotes > hr {
+.footnotes>hr {
   display: none;
 }
 
