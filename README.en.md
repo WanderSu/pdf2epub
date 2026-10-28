@@ -177,7 +177,7 @@ Go to:
 and download the latest Windows archive, for example:
 
 ```text
-pdf2epub-v0.5.0-win-x64.zip
+pdf2epub-v0.5.1-win-x64.zip
 ```
 
 The version number in the file name changes with each release. Unzip it and run:
