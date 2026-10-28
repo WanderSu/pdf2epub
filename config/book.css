@@ -380,6 +380,12 @@ sub {
   text-indent: 0;
 }
 
+/* 脚注块里的序号(产物侧插入):与正文标注的 1、2、3 一一对应,
+   给一点右间距,不要挤在正文第一个字上。 */
+.footnotes .footnote-num {
+  margin-right: 0.3em;
+}
+
 /* Pandoc 3.x 的 epub3 writer 把脚注写成 <aside epub:type="footnote">,不是
    <ol><li> —— 上面两条列表规则留给仍用列表形态的旧版/其它生成器,这里补上
    aside 的节奏,否则多条脚注会挤在一起。 */

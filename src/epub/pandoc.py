@@ -226,19 +226,72 @@ FOOTNOTE_ASIDE_RE = re.compile(
     r'(<aside\b[^>]*epub:type="footnote"[^>]*>)(.*?)</aside>', re.S)
 #: 脚注块上的 id(回链要指回 `fnref<后缀>`)
 FOOTNOTE_ID_RE = re.compile(r'\bid="([^"]+)"')
+#: 已经补过的序号(幂等标记)
+FOOTNOTE_NUM_RE = re.compile(r'<span class="footnote-num">')
+#: 脚注块里的第一个段落:序号插在它里面,否则会单独占一行
+FOOTNOTE_FIRST_P_RE = re.compile(r"<p\b[^>]*>")
 
 
-def add_footnote_backlinks(epub_path: str | Path) -> int:
-    """给脚注块补「回到正文引用处」的回链,返回补了几条。
+def _rewrite_footnotes(text: str) -> tuple[str, int]:
+    """给一份 XHTML 里的脚注块补序号 + 回链,返回 (新文本, 改动条数)。
 
-    **为什么需要这一步**:pandoc 3.x 的 epub3 writer 只写正文侧的引用
-    (`<a href="#fn1" class="footnote-ref" id="fnref1" epub:type="noteref">`),
-    **不写**脚注侧的 `doc-backlink`(用最小样本实测过,与本项目代码无关)。
-    没有回链时「返回正文」只能靠阅读器自己的返回键,规范推荐的回链形式是脚注里带
-    `<a href="#fnref1" role="doc-backlink">`。
+    序号按**文档内出现顺序**编号(1、2、3…):pandoc 的正文标注也是按出现顺序
+    编号、并且每份 XHTML 从 1 重新开始,所以两边天然对齐。编号取位置而不是
+    ``id="fnX"`` 的数字 —— 自定义脚注标签(`[^注1]`)时 id 不一定等于显示序号。
+    """
+    changed = 0
+
+    def fix(match: re.Match) -> str:
+        nonlocal changed
+        tag, body = match.group(1), match.group(2)
+        before = body
+
+        if not FOOTNOTE_NUM_RE.search(body):
+            # 编号:放进第一个 <p> 内部,避免和段落各占一行
+            head = FOOTNOTE_FIRST_P_RE.search(body)
+            num = f'<span class="footnote-num">{_seq[0]}.</span> '
+            _seq[0] += 1
+            body = (body[: head.end()] + num + body[head.end():]
+                    if head is not None else num + body)
+
+        found = FOOTNOTE_ID_RE.search(tag)
+        if found is not None:
+            anchor = found.group(1)
+            ref_id = (f"fnref{anchor[len('fn'):]}" if anchor.startswith("fn")
+                      else f"fnref-{anchor}")
+            if f'href="#{ref_id}"' not in body:          # 已经有回链:不重复补
+                back = (f' <a href="#{ref_id}" class="footnote-back" '
+                        f'role="doc-backlink">\u21a9</a>')
+                if "</p>" in body:
+                    head_p, _, tail = body.rpartition("</p>")
+                    body = f"{head_p}{back}</p>{tail}"
+                else:
+                    body = f"{body}{back}"
+
+        if body != before:
+            changed += 1
+        return f"{tag}{body}</aside>"
+
+    # 序号计数器按文档重置(每个 XHTML 的脚注都从 1 开始,与正文标注一致)
+    _seq = [1]
+    return FOOTNOTE_ASIDE_RE.sub(fix, text), changed
+
+
+def add_footnote_marks(epub_path: str | Path) -> int:
+    """给脚注块补序号(`1.`)与「回到正文引用处」的回链(↩),返回改动的脚注条数。
+
+    **为什么要补这两样**:
+
+    - pandoc 3.x 的 epub3 writer 只写正文侧的引用
+      (`<a href="#fn1" class="footnote-ref" id="fnref1" epub:type="noteref">`),
+      **不写**脚注侧的 `doc-backlink`;没有回链时「返回正文」只能靠阅读器自己的
+      返回键,规范推荐的形式是脚注里带 `<a role="doc-backlink">`。
+    - 脚注块(`<aside>`)里**没有序号**:正文标着 1、2、3,书末的注释却是几段没有
+      编号的文字,读者对不上。产物侧补成 `1.`、`2.`……,与正文标注一一对应。
 
     **只在产物里确实有脚注时才动文件**:没有脚注的书连 zip 都不重写(零风险)。
     重写时 `mimetype` 必须仍是第一个条目且不压缩(EPUB 规范要求,否则严格阅读器报废)。
+    两处改动都幂等:重复调用不会补出第二条回链或第二个序号。
     """
     path = Path(epub_path)
     try:
@@ -255,29 +308,9 @@ def add_footnote_backlinks(epub_path: str | Path) -> int:
             new_items.append((info, data))
             continue
         text = data.decode("utf-8", errors="replace")
-
-        def fix(match: re.Match) -> str:
-            nonlocal changed
-            tag, body = match.group(1), match.group(2)
-            found = FOOTNOTE_ID_RE.search(tag)
-            if found is None:                                # 没有 id 就没法指回来
-                return match.group(0)
-            anchor = found.group(1)
-            ref_id = (f"fnref{anchor[len('fn'):]}" if anchor.startswith("fn")
-                      else f"fnref-{anchor}")
-            if f'href="#{ref_id}"' in body:                  # 已经有回链:不重复补
-                return match.group(0)
-            back = (f' <a href="#{ref_id}" class="footnote-back" '
-                    f'role="doc-backlink">\u21a9</a>')
-            if "</p>" in body:
-                head, _, tail = body.rpartition("</p>")
-                body = f"{head}{back}</p>{tail}"
-            else:
-                body = f"{body}{back}"
-            changed += 1
-            return f"{tag}{body}</aside>"
-
-        new_items.append((info, FOOTNOTE_ASIDE_RE.sub(fix, text).encode("utf-8")))
+        text, n = _rewrite_footnotes(text)
+        changed += n
+        new_items.append((info, text.encode("utf-8")))
 
     if not changed:
         return 0
@@ -370,5 +403,5 @@ def build_epub(
     if not epub.exists() or epub.stat().st_size == 0:
         raise PandocError(f"Pandoc 返回成功但没有写出 EPUB(产物缺失或为空): {epub}")
     # 脚注回链:pandoc 的 epub3 writer 不写 doc-backlink,产物侧补上(没有脚注就不动文件)
-    add_footnote_backlinks(epub)
+    add_footnote_marks(epub)
     return epub
