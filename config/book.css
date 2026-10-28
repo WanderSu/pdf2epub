@@ -25,7 +25,11 @@ body {
   margin: 1.2em 1.35em;
   padding: 0;
 
+  /* 西文优先落在 Times 而不是直接落到中文字体:SimSun 之类的拉丁字形偏窄挤,
+     中英混排时很跳。Georgia 用旧式数字(数字高低不一),排在 Times 之后做备份。 */
   font-family:
+    "Times New Roman",
+    Georgia,
     "Songti SC",
     "STSong",
     "Noto Serif CJK SC",
@@ -106,6 +110,8 @@ h6 {
   margin-left: 0;
 
   font-family:
+    "Helvetica Neue",
+    Arial,
     "PingFang SC",
     "Microsoft YaHei",
     "Noto Sans CJK SC",
@@ -330,6 +336,22 @@ a.footnote-ref {
   text-decoration: none;
 }
 
+/* 正文里的上标 / 下标(化学式、幂次):显式给字号与基线,减少阅读器默认样式的差异。
+   脚注引用是 <a> 而不是 <sup>,不受这里影响。 */
+sup,
+sub {
+  font-size: 0.75em;
+  line-height: 0;
+}
+
+sup {
+  vertical-align: super;
+}
+
+sub {
+  vertical-align: sub;
+}
+
 .footnotes {
   margin-top: 2.4em;
   padding-top: 0.8em;
@@ -356,6 +378,32 @@ a.footnote-ref {
 
 .footnotes p {
   text-indent: 0;
+}
+
+/* Pandoc 3.x 的 epub3 writer 把脚注写成 <aside epub:type="footnote">,不是
+   <ol><li> —— 上面两条列表规则留给仍用列表形态的旧版/其它生成器,这里补上
+   aside 的节奏,否则多条脚注会挤在一起。 */
+.footnotes aside {
+  margin: 0 0 0.55em;
+}
+
+.footnotes aside:last-child {
+  margin-bottom: 0;
+}
+
+/* Pandoc 还会在脚注区顶部插一个 <hr />:与 .footnotes 的 border-top 叠成两条线,
+   留 CSS 的那条细线,把 hr 隐掉。 */
+.footnotes > hr {
+  display: none;
+}
+
+/* 脚注回链(产物侧补的 ↩):不带下划线,与正文留一点间隔。 */
+a.footnote-back {
+  margin-left: 0.35em;
+
+  font-size: 0.92em;
+
+  text-decoration: none;
 }
 
 
@@ -479,6 +527,34 @@ li {
 
 li p {
   text-indent: 0;
+}
+
+/* 表格标题(Pandoc 的 <caption>)与定义列表:默认样式在阅读器之间差异很大,
+   这里给出一个克制的统一值。 */
+caption {
+  margin: 0.2em 0 0.6em;
+
+  font-family:
+    "Helvetica Neue",
+    Arial,
+    "PingFang SC",
+    "Microsoft YaHei",
+    "Noto Sans CJK SC",
+    sans-serif;
+
+  font-size: 0.86em;
+  line-height: 1.5;
+
+  text-align: left;
+}
+
+dt {
+  margin-top: 0.8em;
+  font-weight: 600;
+}
+
+dd {
+  margin: 0.2em 0 0.4em 1.6em;
 }
 
 /* 表格单元格与图注里的段落同样不缩进:Pandoc 从 Markdown 表格生成的多段内容
