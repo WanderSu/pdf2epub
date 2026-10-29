@@ -178,7 +178,7 @@ export interface InitialSettings {
   baseline: Record<string, boolean>;
 }
 
-export const APP_VERSION = "v0.5.1";
+export const APP_VERSION = "v0.5.2";
 export const MAX_RECENT = 8;
 
 /**
