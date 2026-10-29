@@ -64,6 +64,15 @@ Each file in the queue gets its own stage strip (detect → extract → clean �
 and a persistent progress line (failed = red, done = green, skipped = blue, running = cinnabar),
 visible even when the row details are collapsed.
 
+### Preflight check
+
+![preflight check](docs/screenshot-review-sheet.png)
+
+Importing files opens a review sheet first: type, page count, backend and signature count come
+straight from the real preflight plan, and batches that need cloud OCR show the estimated page
+count. Conversion starts only after you confirm; cancelling leaves the files queued, and START
+runs them later.
+
 ### Settings
 
 ![settings](docs/screenshot-settings-light.png)
