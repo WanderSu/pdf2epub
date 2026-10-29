@@ -135,9 +135,30 @@ await send("Page.addScriptToEvaluateOnNewDocument", {
           apikey_path: "C:/Users/x/.pdf2epub/apikey.json",
         });
         if (cmd === "library_sync") return Promise.resolve(window.__library || []);
-        if (cmd === "preflight") return Promise.resolve(JSON.stringify({
-          files: [], total_ocr_pages: 0, total_shards: 0, quota: 1000, over_quota: false,
-        }));
+        // 复核表要显示的是**真实 preflight 的行**,所以这里按请求路径返回计划;
+        // 返回空数组时界面会显示「未知」占位 —— 那是另一条分支,不该出现在 README 图里
+        if (cmd === "preflight") {
+          const PLAN = {
+            [P.running]: { kind: "pdf-hybrid", backend: "mineru", pages: 842, ocrPages: 268, shards: 8 },
+            [P.done]:    { kind: "pdf-text",   backend: "pymupdf", pages: 312, ocrPages: 0,   shards: 1 },
+            [P.failed]:  { kind: "pdf-scanned", backend: "paddleocr", pages: 268, ocrPages: 268, shards: 4 },
+            [P.skipped]: { kind: "pdf-text",   backend: "pymupdf", pages: 96, ocrPages: 0,   shards: 1 },
+          };
+          const rows = (args.filePaths || []).map(file => {
+            const p = PLAN[file] || { kind: "pdf-text", backend: "pymupdf", pages: 0, ocrPages: 0, shards: 1 };
+            return {
+              name: String(file).split("/").pop(), path: file, kind: p.kind, backend: p.backend,
+              pages: p.pages, text_pages: p.pages - p.ocrPages, ocr_pages: p.ocrPages,
+              shards: p.shards, needs_ocr: p.ocrPages > 0, notes: [],
+            };
+          });
+          return Promise.resolve(JSON.stringify({
+            files: rows,
+            total_ocr_pages: rows.reduce((s, r) => s + r.ocr_pages, 0),
+            total_shards: rows.reduce((s, r) => s + r.shards, 0),
+            quota: 1000, over_quota: false,
+          }));
+        }
         if (cmd === "convert_file"){
           const file = args.filePath;
           const res = FINAL[file] || { success: true, status: "completed", epub: "/out/x.epub", error: null, error_code: null };
@@ -247,14 +268,40 @@ await evalJs(`window.__library = [
   { path: "/output/自然辩证法研究.epub", title: "自然辩证法,还是社会历史辩证法", author: "俞吾金", size: 478123, mtime: ${sec - 172800}, added_at: ${sec - 172800}, kind: "SCN", backend: "PaddleOCR", pages: 7 },
 ]; "ok"`);
 
-const feed = async (key) => {
+const shot = async (name) => {
+  const file = safeOut(name);
+  const png = await send("Page.captureScreenshot", { format: "png" });
+  writeFileSync(file, Buffer.from(png.result.data, "base64"));
+  console.log("  写入", file);
+};
+
+// 导入后先要过「印前复核」这一步(新版流水线:让用户看清楚再按制版),
+// 所以每次 drop 之后必须点复核表上的「开始制版」,队列才会真的跑起来。
+const pressStart = async () => {
+  const clicked = await evalJs(`(() => {
+    const dialog = document.querySelector('[role="dialog"]');
+    if (!dialog) return "no-dialog";
+    // 文案随是否需要云端页面变化:「开始制版」/「开始 OCR 制版」
+    const b = [...dialog.querySelectorAll("button")].find(x => /制版|START/.test(x.textContent||"") && !/^(取消|CANCEL)$/.test((x.textContent||"").trim()));
+    if (!b) return "no-button";
+    b.click();
+    return "ok";
+  })()`);
+  await sleep(350);
+  return clicked;
+};
+
+const feed = async (key, opts = {}) => {
   await evalJs(`window.__drop([${JSON.stringify(PATHS[key])}]); "ok"`);
   await sleep(400);
+  if (opts.shotSheet) await shot(opts.shotSheet);
+  const pressed = await pressStart();
+  if (pressed !== "ok") console.log("  !! 复核表未出现(" + pressed + "):", key);
   await evalJs(`window.__emit(${JSON.stringify(PATHS[key])}, ${JSON.stringify(SCRIPTS[key].map(e => JSON.stringify(e)))}); "ok"`);
   await sleep(650);
 };
 
-await feed("done");
+await feed("done", { shotSheet: "screenshot-review-sheet.png" });
 await feed("skipped");
 await feed("failed");
 await feed("running"); // 最后加，保持 ACTIVE=1
@@ -273,19 +320,13 @@ const state = await evalJs(`(() => {
 })()`);
 console.log("队列状态:", JSON.stringify(state));
 
-const shot = async (name) => {
-  const file = safeOut(name);
-  const png = await send("Page.captureScreenshot", { format: "png" });
-  writeFileSync(file, Buffer.from(png.result.data, "base64"));
-  console.log("  写入", file);
-};
-
 // 1. 转换页浅色
 await shot("screenshot-convert-light.png");
 
 // 2. 转换页深色
 await evalJs(`(() => {
-  const b = [...document.querySelectorAll("header button")].find(x => /☾|☀/.test(x.textContent||""));
+  // 主题按钮现在是 SVG(不再是 ☾/☀ 字符),按 aria-label 找 —— 换图标不该让脚本瞎掉
+  const b = [...document.querySelectorAll("header button")].find(x => /Toggle theme|切换主题/.test(x.getAttribute("aria-label")||""));
   if (b) b.click();
   return !!b;
 })()`);
@@ -294,7 +335,8 @@ await shot("screenshot-convert-dark.png");
 
 // 回浅色
 await evalJs(`(() => {
-  const b = [...document.querySelectorAll("header button")].find(x => /☾|☀/.test(x.textContent||""));
+  // 主题按钮现在是 SVG(不再是 ☾/☀ 字符),按 aria-label 找 —— 换图标不该让脚本瞎掉
+  const b = [...document.querySelectorAll("header button")].find(x => /Toggle theme|切换主题/.test(x.getAttribute("aria-label")||""));
   if (b) b.click();
   return !!b;
 })()`);

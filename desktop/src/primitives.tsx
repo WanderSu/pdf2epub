@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { ERROR_KIND_LABEL, type ErrorKind, type Signatures, type StageNode } from "./events";
 import { T, type Lang } from "./i18n";
-import type { Backend, ConsoleLine, FileStatus, FileType, QueueFile } from "./types";
+import type { Backend, ConsoleLine, FileStatus, FileType, Notice, QueueFile } from "./types";
 
 // ── SHARED PRIMITIVES ─────────────────────────────────────────────────────────
 
@@ -122,14 +122,14 @@ export function StageStepper({ stages, signatures, lang }: { stages: StageNode[]
           <span key={s.key} className="flex items-center">
             {i > 0 && <span className={`w-5 h-px ${lineColor} transition-all duration-300`} />}
             <span className="flex flex-col items-center gap-0.5">
-              <span className={`w-4 h-4 border flex items-center justify-center font-mono text-[9px] transition-all ${nodeClass}`}>
+              <span className={`w-5 h-5 border flex items-center justify-center font-mono text-[9px] transition-all ${nodeClass}`}>
                 {isDone ? (
                   <svg width="8" height="6" viewBox="0 0 8 6" fill="none" className="check-draw">
                     <path d="M1 3 L3 5 L7 1" stroke="currentColor" strokeWidth="1.2" strokeDasharray="20" strokeDashoffset="0" strokeLinecap="square" />
                   </svg>
                 ) : isFailed ? "✕" : nodeLabel}
               </span>
-              <span className={`font-mono text-[9px] tracking-[0.04em] ${labelColor}`}>
+              <span className={`font-mono ${lang === "zh" ? "text-[11px]" : "text-[9px]"} tracking-[0.04em] whitespace-nowrap ${labelColor}`}>
                 {lang === "zh" && !s.isOcr ? (CRAFT_ZH[s.key] ?? s.key) : stageLabel}
               </span>
             </span>
@@ -147,19 +147,20 @@ export function StageStepper({ stages, signatures, lang }: { stages: StageNode[]
   );
 }
 
-/** 书脊色块封面(真实封面提取尚未实现 → 几何占位,不用照片) */
+/** 书脊色块封面(真实封面提取尚未实现 → 几何占位,不用照片)。
+ *  色序按书名首字取:同一本书每次开局都是同一块布,换皮会造成
+ *  「这本书好像不一样了」的错觉。 */
 export function SpineBlock({ title }: { title: string }) {
   const words = title.split(" ").filter(w => !["the", "a", "an", "and", "of"].includes(w.toLowerCase()));
   const initials = words.slice(0, 2).map(w => w[0]?.toUpperCase() ?? "").join("") || "EP";
-  const hues = [200, 150, 30, 260, 0, 180];
-  const hue = hues[(title.charCodeAt(0) || 65) % hues.length];
+  const cloth = (title.charCodeAt(0) || 65) % 6;
   return (
     <div
       className="w-10 h-14 flex items-center justify-center border border-[var(--border)] shrink-0 relative overflow-hidden"
-      style={{ backgroundColor: `hsl(${hue}, 22%, 28%)` }}
+      style={{ backgroundColor: `var(--cloth-${cloth})` }}
     >
       <span className="font-serif text-[11px] font-bold text-white/80 z-10">{initials}</span>
-      <div className="absolute bottom-0 left-0 right-0 h-px" style={{ backgroundColor: `hsl(${hue}, 40%, 45%)`, opacity: 0.5 }} />
+      <div className="absolute bottom-0 left-0 right-0 h-px bg-white/30" />
     </div>
   );
 }
@@ -370,16 +371,61 @@ export function WarningStrip({ file, lang, onUseOcr }: { file: QueueFile; lang: 
   );
 }
 
-/* 章节头 — 通栏 1px 线 + 屏号屏名 + 右侧状态 */
-export function ChapterHead({ label, state, lang }: { label: string; state?: string; lang: Lang }) {
+/* 章节头 — 通栏双线 + 屏号 + 大字屏名 + 副题 + 右侧状态。
+   版面取自新版设计(sb. Zeitung):数字与名字是两级信息,所以分两行排版,
+   下面 96px 的朱砂短线是「这一章从第几页开始」的示意,与 fore-edge 上的书签同位。 */
+export function ChapterHead({ label, description, state, lang }: {
+  label: string; description?: string; state?: string; lang: Lang;
+}) {
+  const [number, ...rest] = label.split(" ");
+  const title = rest.join(" ");
   return (
-    <div className="shrink-0">
+    <div className="shrink-0 title-set">
       <Rule />
-      <div className="flex items-baseline justify-between py-3">
-        <span className={`font-mono text-[11px] tracking-[0.08em] uppercase text-[var(--foreground)] ${lang === "zh" ? "cjk font-sans" : ""}`}>{label}</span>
-        {state && <span className="font-mono text-[11px] tracking-[0.08em] text-[var(--muted-foreground)]">{state}</span>}
+      <div className="flex items-end justify-between py-4">
+        <div className="flex items-end gap-5 min-w-0">
+          <span className="font-mono text-[11px] tracking-[0.08em] text-[var(--primary)] pb-1 shrink-0">{number}</span>
+          <div className="min-w-0">
+            <div className={`font-serif text-[28px] leading-none text-[var(--foreground)] ${lang === "zh" ? "cjk-serif" : ""}`}>
+              {title}
+            </div>
+            {description && (
+              <div className={`mt-2 text-[11px] text-[var(--muted-foreground)] ${lang === "zh" ? "cjk" : "font-mono tracking-[0.04em]"}`}>
+                {description}
+              </div>
+            )}
+          </div>
+        </div>
+        {state && <span className="font-mono text-[11px] tracking-[0.08em] text-[var(--primary)] pb-1 shrink-0 whitespace-nowrap">{state}</span>}
       </div>
-      <Rule />
+      <div className="flex items-center">
+        <span className="h-px w-24 bg-[var(--primary)]" />
+        <span className="h-px flex-1 bg-[var(--border)]" />
+      </div>
+    </div>
+  );
+}
+
+/* Toast 抽屉 —— 右下角滑入,5 秒后自动消失(倒计时线时长与之一致)。
+   -terminal上有排字记录逐行长出来,不适合逐操作打扰;只有「用户刚点了、
+   但结果在当前屏看不见」的事(文件被去重忽略了、保存落盘了)才值得冒出来。 */
+export function ToastStack({ notices, lang }: { notices: Notice[]; lang: Lang }) {
+  if (notices.length === 0) return null;
+  return (
+    <div className="fixed right-6 bottom-10 z-50 w-[340px] space-y-2 pointer-events-none" aria-live="polite">
+      {notices.map(notice => (
+        <div
+          key={notice.id}
+          className={`toast-slip bg-[var(--card)] border border-[var(--border)] border-l-2 px-4 py-3 pointer-events-auto ${
+            notice.tone === "ok" ? "border-l-[var(--ok)]"
+              : notice.tone === "danger" ? "border-l-[var(--danger)]"
+                : "border-l-[var(--primary)]"
+          }`}
+        >
+          <div className={`text-[12px] text-[var(--foreground)] ${lang === "zh" ? "cjk" : "font-mono"}`}>{notice.message}</div>
+          <div className="toast-countdown h-px mt-3 bg-[var(--primary)]" />
+        </div>
+      ))}
     </div>
   );
 }

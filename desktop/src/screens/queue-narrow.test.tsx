@@ -57,6 +57,7 @@ function renderQueue() {
       composingExpanded={false}
       setComposingExpanded={() => {}}
       consoleLines={[]}
+      review={null}
       onPick={() => {}}
       onCancel={() => {}}
       onRetry={() => {}}
@@ -67,6 +68,10 @@ function renderQueue() {
       onPreflight={() => {}}
       onPreflightRecent={() => {}}
       onAddRecent={() => {}}
+      onMoveTop={() => {}}
+      onStartQueue={() => {}}
+      onReviewStart={() => {}}
+      onReviewCancel={() => {}}
     />,
   );
 }

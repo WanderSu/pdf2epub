@@ -8,6 +8,7 @@ import {
 import { KIND_TO_TYPE, backendFromPlan, fmtMonthDay } from "../format";
 import type {
   ConsoleLine, FileStatus, FileType, PreflightFile, PreflightReport, QueueFile, RecentEntry,
+  ReviewSheet,
 } from "../types";
 
 /** 进度线颜色:三个终态互不冒充(失败红 / 完成绿 / 跳过蓝),在跑是朱砂 */
@@ -21,13 +22,89 @@ function progressColor(status: FileStatus): string {
   }
 }
 
+/**
+ * 导入复核表 —— 按下「制版」之前的最后一眼。
+ *
+ * 表里每个数字都来自 preflight 的真实计划:`known=false` 的行(命令行报错、
+ * 或引擎还没回)**显示占位而不是猜一个类型**。汇聚原因分析:一旦这里开始编造,
+ * 用户就会以为是自己看错了 —— 比留空更糟。
+ *
+ * 必须有这么一道闸门,不是形式:本地转换不花钱,云端 OCR 是要按页结算的,
+ * 而 drop-and-forget 的界面在几十页扫描件上按回车之前没有任何反悔机会。
+ */
+function ReviewTable({ sheet, lang, onCancel, onStart }: {
+  sheet: ReviewSheet;
+  lang: Lang;
+  onCancel: () => void;
+  onStart: () => void;
+}) {
+  const t = T[lang].review;
+  const unknown = sheet.rows.some(r => !r.known);
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-[var(--foreground)]/20 p-8" role="dialog" aria-modal="true" aria-label={t.title}>
+      <div className="w-full max-w-[760px] bg-[var(--card)] border border-[var(--foreground)]">
+        <div className="px-8 pt-7 pb-5">
+          <div className="flex items-baseline gap-4">
+            <span className="font-mono text-[11px] tracking-[0.1em] text-[var(--primary)]">PREFLIGHT</span>
+            <span className={`font-serif text-[24px] text-[var(--foreground)] ${lang === "zh" ? "cjk-serif" : ""}`}>{t.title}</span>
+            <span className="ml-auto font-mono text-[11px] text-[var(--muted-foreground)]">{t.files(sheet.rows.length)}</span>
+          </div>
+          <div className="mt-4 h-px bg-[var(--primary)]" />
+        </div>
+
+        <div className="px-8 max-h-[360px] overflow-auto scroll-area">
+          <div className="grid grid-cols-[1fr_52px_64px_88px_88px] gap-4 pb-2 border-b border-[var(--border)]">
+            {[t.colFile, t.colType, t.colPages, t.colBackend, t.colSignature].map(label => (
+              <span key={label} className={`text-[10px] text-[var(--muted-foreground)] ${lang === "zh" ? "cjk" : "font-mono tracking-[0.08em] uppercase"}`}>{label}</span>
+            ))}
+          </div>
+          {sheet.rows.map(row => (
+            <div key={row.id} className="grid grid-cols-[1fr_52px_64px_88px_88px] gap-4 items-center py-3 border-b border-[var(--border)]">
+              <div className="min-w-0">
+                <div className="font-mono text-[11px] text-[var(--foreground)] truncate">{row.name}</div>
+                <div className="font-mono text-[10px] text-[var(--muted-foreground)] mt-1 truncate selectable" title={row.path}>{row.path}</div>
+              </div>
+              <TypeBadge type={row.type} />
+              <span className="font-mono text-[11px] tabular-nums text-[var(--muted-foreground)]">{row.pages ?? t.none}</span>
+              <BackendBadge backend={row.backend} />
+              <span className="font-mono text-[10px] text-[var(--primary)]">
+                {row.shards && row.shards > 1 ? t.signature(row.shards) : t.none}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        <div className="mx-8 my-5 border-l-2 border-[var(--primary)] pl-4 py-1">
+          <div className={`text-[12px] text-[var(--foreground)] ${lang === "zh" ? "cjk" : "font-mono"}`}>
+            {sheet.totalOcrPages > 0 ? t.estimate(sheet.totalOcrPages) : t.estimateLocal}
+          </div>
+          <div className="font-mono text-[10px] text-[var(--muted-foreground)] mt-1">{t.pipeline}</div>
+          {unknown && (
+            <div className={`text-[11px] text-[var(--warn)] mt-1 ${lang === "zh" ? "cjk" : "font-mono"}`}>{t.hintUnknown}</div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-5 px-8 py-4 border-t border-[var(--border)] bg-[var(--background)]">
+          <button onClick={onCancel} className={`font-mono text-[11px] text-[var(--muted-foreground)] hover:text-[var(--foreground)] ${lang === "zh" ? "cjk" : "tracking-[0.08em]"}`}>
+            {t.cancel}
+          </button>
+          <button onClick={onStart} className={`px-6 py-2 bg-[var(--primary)] text-[var(--primary-foreground)] font-mono text-[11px] hover:opacity-90 ${lang === "zh" ? "cjk" : "tracking-[0.08em]"}`}>
+            {sheet.totalOcrPages > 0 ? T[lang].convert.startOcr : T[lang].convert.start}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── CONVERT SCREEN ────────────────────────────────────────────────────────────
 
 export function ConvertScreen({
   lang, files, preview, preflightOf, batchNotice, dragging, recent, busyPreflight,
-  composingExpanded, setComposingExpanded, consoleLines,
+  composingExpanded, setComposingExpanded, consoleLines, review,
   onPick, onCancel, onRetry, onClearDone, onRetryFailed, onCancelAll, onUseOcr,
-  onPreflight, onPreflightRecent, onAddRecent,
+  onPreflight, onPreflightRecent, onAddRecent, onMoveTop, onStartQueue,
+  onReviewStart, onReviewCancel,
 }: {
   lang: Lang;
   files: QueueFile[];
@@ -40,6 +117,8 @@ export function ConvertScreen({
   composingExpanded: boolean;
   setComposingExpanded: (v: boolean) => void;
   consoleLines: ConsoleLine[];
+  /** 待复核的一批新文件(真实 preflight 结果);null = 没有待确认的批次 */
+  review: ReviewSheet | null;
   onPick: () => void;
   onCancel: (id: string) => void;
   onRetry: (id: string) => void;
@@ -50,6 +129,10 @@ export function ConvertScreen({
   onPreflight: () => void;
   onPreflightRecent: (path: string) => void;
   onAddRecent: (path: string) => void;
+  onMoveTop: (ids: string[]) => void;
+  onStartQueue: () => void;
+  onReviewStart: () => void;
+  onReviewCancel: () => void;
 }) {
   const t = T[lang].convert;
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
@@ -88,8 +171,13 @@ export function ConvertScreen({
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
-      <div className="gutter pt-6 shrink-0">
-        <ChapterHead label={`01 ${T[lang].screens[0]}`} state={active > 0 ? t.active(active) : undefined} lang={lang} />
+      <div className="gutter pt-8 shrink-0">
+        <ChapterHead
+          label={`01 ${T[lang].screens[0]}`}
+          description={t.desc}
+          state={active > 0 ? t.active(active) : undefined}
+          lang={lang}
+        />
       </div>
 
       {/* ── 空状态:拖放区 + 类型检测 + 最近文件 ── */}
@@ -271,11 +359,27 @@ export function ConvertScreen({
                 <Rule vertical />
                 <button onClick={() => { files.filter(f => selected.has(f.id)).forEach(f => onRetry(f.id)); setSelected(new Set()); }}
                   className="font-mono text-[10px] tracking-[0.08em] uppercase text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors">{t.retry}</button>
+                <Rule vertical />
+                {/* 移到顶部:串行队列里这是唯一能改优先级的入口,
+                    把急件拨到前面不用先取消已经在跑的那一个。 */}
+                <button onClick={() => { onMoveTop([...selected]); setSelected(new Set()); }}
+                  className={`font-mono text-[10px] tracking-[0.08em] uppercase text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors ${lang === "zh" ? "cjk font-sans" : ""}`}>{t.moveTop}</button>
                 <div className="flex-1" />
                 <button onClick={() => setSelected(new Set())} className="font-mono text-[10px] text-[var(--muted-foreground)] hover:text-[var(--foreground)]">✕</button>
               </div>
             ) : (
               <div className="flex items-center gap-4 py-2 border-b border-[var(--border)]">
+                {/* 复核表被取消后这批文件停在 pending —— 队列必须有个入口能开跑,
+                    否则它们永远挂在那里,而每行都还在显示 PENDING。
+                    复核表开着时不显示:那一批马上就要由「开始制版」决定去向,
+                    这里再给一个入口会把同一批文件跑两遍。 */}
+                {pending > 0 && active === 0 && !review && (
+                  <>
+                    <button onClick={onStartQueue}
+                      className={`font-mono text-[10px] tracking-[0.08em] uppercase text-[var(--primary)] hover:opacity-80 transition-opacity ${lang === "zh" ? "cjk font-sans" : ""}`}>{t.start}</button>
+                    <Rule vertical />
+                  </>
+                )}
                 {[
                   { label: t.selectAll, action: selectAll },
                   { label: t.clearDone, action: onClearDone },
@@ -399,6 +503,15 @@ export function ConvertScreen({
       )}
 
       <ComposingRoom expanded={composingExpanded} setExpanded={setComposingExpanded} lang={lang} lines={consoleLines} />
+
+      {review && (
+        <ReviewTable
+          sheet={review}
+          lang={lang}
+          onCancel={onReviewCancel}
+          onStart={onReviewStart}
+        />
+      )}
     </div>
   );
 }

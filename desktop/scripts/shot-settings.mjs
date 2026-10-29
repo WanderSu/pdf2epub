@@ -150,9 +150,9 @@ await evalJs(`document.body.focus(); (() => {
 await sleep(300);
 await shot("settings-focus.png");
 
-// 暗色
+// 暗色(主题按钮已换成 SVG,按 aria-label 找)
 await evalJs(`(() => {
-  const b = [...document.querySelectorAll("header button")].find(x => /☾|☀/.test(x.textContent));
+  const b = [...document.querySelectorAll("header button")].find(x => /Toggle theme|切换主题/.test(x.getAttribute("aria-label")||""));
   if (b) b.click(); return !!b;
 })()`);
 await sleep(600);

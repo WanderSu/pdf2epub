@@ -43,6 +43,15 @@
   --info: #1F3C6E;
   --paddle: #5B3A8E;
 
+  /* 布面色板:书脊占位块按书名取色。取固定值而不是 hsl() 现算 ——
+     同一组 Hue 在明暗两套背景上的可读性差很多,两套各自调过。 */
+  --cloth-0: #343B3B;
+  --cloth-1: #4A4138;
+  --cloth-2: #35443B;
+  --cloth-3: #713B35;
+  --cloth-4: #3D4652;
+  --cloth-5: #48433F;
+
   /* 字体栈全部用本机字体:桌面端不引远端 @import —— Google Fonts 在国内
      不可达(中文标题会静默回退),且四次串行 @import 会造成启动瞬间字体跳变。 */
   --font-sans: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC",
@@ -75,6 +84,14 @@
   --warn: #C08A2E;
   --info: #5B86C7;
   --paddle: #9B7BD4;
+
+  /* 暗底上的同一批布面要提亮,否则书脊块在夜里是一坨黑 */
+  --cloth-0: #566060;
+  --cloth-1: #665B4F;
+  --cloth-2: #52675A;
+  --cloth-3: #824C45;
+  --cloth-4: #566272;
+  --cloth-5: #625B55;
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -153,6 +170,34 @@ body {
 /* Row enter stagger (applied with delay inline) */
 @keyframes row-enter { from { opacity: 0; } to { opacity: 1; } }
 .row-enter { animation: row-enter 0.2s cubic-bezier(0.2, 0, 0, 1) both; }
+
+/* 章标题落版:numbers first, then the name settles in */
+@keyframes title-set {
+  from { opacity: 0; letter-spacing: 0.02em; }
+  to { opacity: 1; letter-spacing: 0; }
+}
+.title-set { animation: title-set 120ms cubic-bezier(0.2, 0, 0, 1) both; }
+
+/* Toast 抽屉:从下方滑入 + 5s 倒计时进度线(与自动消失的时长一致) */
+@keyframes slip-enter {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes slip-countdown {
+  from { transform: scaleX(1); }
+  to { transform: scaleX(0); }
+}
+.toast-slip { animation: slip-enter 200ms cubic-bezier(0.2, 0, 0, 1) both; }
+.toast-countdown {
+  transform-origin: left;
+  animation: slip-countdown 5s linear forwards;
+}
+
+/* 页眉在窄窗口下先让出目录引导点与版本号 —— 它是导航,不是装饰 */
+@media (max-width: 1100px) {
+  .toc-leader { max-width: 16px !important; }
+  .running-version { display: none; }
+}
 
 /* Composing room background */
 .composing-bg {

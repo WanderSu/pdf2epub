@@ -232,8 +232,13 @@ export function SettingsScreen({
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
-      <div className="gutter pt-6 shrink-0">
-        <ChapterHead label={`03 ${T[lang].screens[2]}`} state={unsaved > 0 ? t.dirty(unsaved) : undefined} lang={lang} />
+      <div className="gutter pt-8 shrink-0">
+        <ChapterHead
+          label={`03 ${T[lang].screens[2]}`}
+          description={t.desc}
+          state={unsaved > 0 ? t.dirty(unsaved) : undefined}
+          lang={lang}
+        />
       </div>
 
       <div className="flex-1 overflow-auto scroll-area gutter pb-24">

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { T, type Lang } from "../i18n";
 import { Rule, TypeBadge, BackendBadge, SpineBlock, ChapterHead } from "../primitives";
 import { formatSize } from "../format";
@@ -23,6 +23,14 @@ export function LibraryScreen({ lang, books, loading, outputDir, onRefresh, onOp
   const [filter, setFilter] = useState<Backend | "All">("All");
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  const searchRef = useRef<HTMLInputElement>(null);
+
+  // 页快捷键「/」由 App 广播(Booklist 自己不该关心键盘),这里只认事件
+  useEffect(() => {
+    const focusSearch = () => searchRef.current?.focus();
+    window.addEventListener("pdf2epub:search", focusSearch);
+    return () => window.removeEventListener("pdf2epub:search", focusSearch);
+  }, []);
 
   const filtered = books
     .filter(b => filter === "All" || b.backend === filter)
@@ -40,9 +48,10 @@ export function LibraryScreen({ lang, books, loading, outputDir, onRefresh, onOp
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
-      <div className="gutter pt-6 shrink-0">
+      <div className="gutter pt-8 shrink-0">
         <ChapterHead
           label={`02 ${T[lang].screens[1]}`}
+          description={t.desc}
           state={loading ? t.loading : t.books(books.length)}
           lang={lang}
         />
@@ -52,6 +61,7 @@ export function LibraryScreen({ lang, books, loading, outputDir, onRefresh, onOp
         <div className="relative flex items-center border-b border-[var(--border)]">
           <span className="font-mono text-[11px] text-[var(--muted-foreground)] mr-2">/</span>
           <input
+            ref={searchRef}
             type="text"
             value={search}
             onChange={e => setSearch(e.target.value)}
@@ -143,6 +153,15 @@ export function LibraryScreen({ lang, books, loading, outputDir, onRefresh, onOp
               </div>
               <p className={`text-[13px] text-[var(--muted-foreground)] ${lang === "zh" ? "cjk" : ""}`}>{books.length === 0 ? t.empty : t.emptyFiltered}</p>
               <p className={`text-[12px] text-[var(--muted-foreground)] ${lang === "zh" ? "cjk" : "font-mono"}`}>{books.length === 0 ? t.emptySub : ""}</p>
+              {/* 筛完为零要有出路:否则用户以为书丢了,只能自己回想刚才点过什么 */}
+              {(search || filter !== "All") && (
+                <button
+                  onClick={() => { setSearch(""); setFilter("All"); }}
+                  className={`mt-2 border border-[var(--primary)] text-[var(--primary)] px-4 py-1.5 text-[11px] hover:bg-[var(--primary)] hover:text-[var(--primary-foreground)] transition-colors ${lang === "zh" ? "cjk" : "font-mono tracking-[0.08em]"}`}
+                >
+                  {t.clearFilters}
+                </button>
+              )}
             </div>
           )}
 

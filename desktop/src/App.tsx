@@ -26,7 +26,7 @@ import {
   parseWarningFromLine,
   updateStagesFromLine,
 } from "./format";
-import { Rule } from "./primitives";
+import { Rule, ToastStack } from "./primitives";
 import { ConvertScreen } from "./screens/ConvertScreen";
 import { LibraryScreen } from "./screens/LibraryScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
@@ -44,10 +44,12 @@ import {
   type FileType,
   type LibEntry,
   type LibraryBook,
+  type Notice,
   type PreflightFile,
   type PreflightReport,
   type QueueFile,
   type RecentEntry,
+  type ReviewSheet,
   type Screen,
 } from "./types";
 
@@ -67,6 +69,15 @@ export default function App() {
   const [now, setNow] = useState(() => new Date());
   const [composingExpanded, setComposingExpanded] = useState(false);
   const [files, setFiles] = useState<QueueFile[]>([]);
+  // Toast:只播报「点了但当前屏看不见结果」的事(去重、落盘、 hold 住没开跑)
+  const [notices, setNotices] = useState<Notice[]>([]);
+  const t = T[lang];
+  const notify = useCallback((message: string, tone: Notice["tone"] = "info") => {
+    // 5s 与 .toast-countdown 的动画时长一致(见 index.css)
+    const id = `${Date.now()}-${Math.random()}`;
+    setNotices(prev => [...prev.slice(-2), { id, tone, message }]);
+    window.setTimeout(() => setNotices(prev => prev.filter(n => n.id !== id)), 5000);
+  }, []);
   const [consoleLines, setConsoleLines] = useState<ConsoleLine[]>([]);
   const [env, setEnv] = useState<EnvState | null>(null);
   const [diskBooks, setDiskBooks] = useState<LibEntry[]>([]);
@@ -228,8 +239,8 @@ export default function App() {
 
   // ── 印前检查(CLI --dry-run --json) ──
   //  `backend` 必须与真正转换时用的是同一个:否则会出现「预检显示本地、实际跑云端」。
-  const runPreflight = useCallback(async (paths: string[], backendOverride?: string) => {
-    if (paths.length === 0) return;
+  const runPreflight = useCallback(async (paths: string[], backendOverride?: string): Promise<PreflightReport | null> => {
+    if (paths.length === 0) return null;
     setBusyPreflight(true);
     try {
       const backend = backendOverride ?? (backendPref === "auto" ? null : backendPref);
@@ -259,9 +270,12 @@ export default function App() {
           cloudPages: plan.ocr_pages,
         };
       }));
+      return report;
     } catch (e) {
       const ts = new Date().toTimeString().slice(0, 8);
       setConsoleLines(prev => [...prev.slice(-300), { ts, level: "ERROR" as const, text: `[PREFLIGHT] ${String(e)}` }]);
+      // 拿不到计划就是拿不到:调用方据此显示占位,不要替引擎编一份
+      return null;
     } finally {
       setBusyPreflight(false);
     }
@@ -384,6 +398,53 @@ export default function App() {
     });
   }, []);
 
+  // ── 导入复核闸门 ──
+  //  新版设计把它放在「文件进来 → 按下」之间做的是复核,不是假的进度条:
+  //  表里的类型/页数/后端/折帖全部来自上一步 runPreflight 的真实计划,
+  //  拿不到就留空(known=false)。代价是多一次点击,换来的是在按页计费的
+  //  云端 OCR 之前有一次反悔机会。
+  //  只在**一次导入最多一张表**:复核表已经开着时再来一批,直接放行进队列,
+  //  不叠第二张(叠上去只会互相盖住,用户不知道哪张是哪批)。
+  const [review, setReview] = useState<ReviewSheet | null>(null);
+  const reviewResolve = useRef<((start: boolean) => void) | null>(null);
+  const reviewing = useRef(false);
+
+  const settleReview = useCallback((start: boolean) => {
+    const resolve = reviewResolve.current;
+    reviewResolve.current = null;
+    reviewing.current = false;
+    setReview(null);
+    resolve?.(start);
+  }, []);
+
+  const requestReview = useCallback(async (report: PreflightReport | null, rows: QueueFile[], force: boolean) => {
+    // force = 用户已经明确要求「重转」(书库 RE-CONVERT),不必再问一遍
+    if (force || rows.length === 0 || reviewing.current) return true;
+    reviewing.current = true;
+    const sheet: ReviewSheet = {
+      rows: rows.map(f => {
+        const plan = report?.files.find(p => normPath(p.path) === normPath(f.path));
+        const known = Boolean(plan);
+        return plan
+          ? {
+            id: f.id, name: f.name, path: f.path,
+            type: KIND_TO_TYPE[plan.kind],
+            pages: plan.pages,
+            backend: backendFromPlan(plan.backend),
+            shards: plan.shards,
+            ocrPages: plan.ocr_pages,
+            known,
+          }
+          : { id: f.id, name: f.name, path: f.path, known };
+      }),
+      totalOcrPages: report?.total_ocr_pages ?? 0,
+    };
+    setReview(sheet);
+    const start = await new Promise<boolean>(resolve => { reviewResolve.current = resolve; });
+    if (!start) notify(t.toast.held, "info");
+    return start;
+  }, [notify, t]);
+
   //  addFiles(force=true) 只用于「明确要求重转」的入口(书库 RE-CONVERT):
   //  常规添加/拖放不加 force —— 已转过的书被跳过是**正确的续跑行为**,
   //  界面会如实显示 SKIPPED(而不是假装成功)。
@@ -410,22 +471,29 @@ export default function App() {
     );
     const fresh = newFiles.filter(f => !busy.has(normPath(f.path)));
     if (fresh.length === 0) {
+      const names = paths.map(baseName).join(", ");
       const ts = new Date().toTimeString().slice(0, 8);
       setConsoleLines(prev => [...prev.slice(-300), {
         ts, level: "WARN" as const,
-        text: `[QUEUE] ${paths.map(baseName).join(", ")} 已在队列中,已忽略重复添加`,
+        text: `[QUEUE] ${names} 已在队列中,已忽略重复添加`,
       }]);
+      // 队列就在当前屏,但 MAX_RECENT 之外的老条目在滚出视野后才重名,
+      // 所以「什么都没发生」必须说一句,否则用户会以为拖放坏了
+      notify(t.toast.duplicate(paths.length), "info");
       return;
     }
     setFiles(prev => [...prev, ...fresh]);
     rememberRecent(fresh.map(f => f.path));
     setScreen("convert");
-    // 先印前检查(检测类型/页数/折帖/云端页数,后端与转换一致),再串行转换
-    void runPreflight(fresh.map(f => f.path));
-    for (const f of fresh) {
-      await convertOne(f, undefined, force);
+    // 先印前检查(真实的类型/页数/后端/折帖),让用户确认后再串行转换
+    const report = await runPreflight(fresh.map(f => f.path));
+    const start = await requestReview(report, fresh, force);
+    if (start) {
+      for (const f of fresh) {
+        await convertOne(f, undefined, force);
+      }
     }
-  }, [convertOne, rememberRecent, runPreflight]);
+  }, [convertOne, rememberRecent, runPreflight, requestReview, notify, t]);
 
   // ── 原生拖放(WebView2 下 HTML5 DnD 拿不到路径)──
   useEffect(() => {
@@ -448,6 +516,22 @@ export default function App() {
     return () => { disposed = true; unlisten?.(); };
   }, [addFiles]);
 
+  //  串行队列里的「优先级」只有这一条:选中的行提到最前。不打断正在跑的那个,
+  //  也不 copy 队列行的"# —— 转换按 id 走,重排是纯视图操作。
+  const moveTop = useCallback((ids: string[]) => {
+    const picked = new Set(ids);
+    if (picked.size === 0) return;
+    setFiles(prev => [...prev.filter(f => picked.has(f.id)), ...prev.filter(f => !picked.has(f.id))]);
+  }, []);
+
+  //  复核表被取消后的入口:把留在 pending 的行真正跑起来。
+  //  没有它,取消就等于「这批文件永远挂起」。
+  const startQueue = useCallback(async () => {
+    for (const f of filesRef.current.filter(x => x.status === "pending")) {
+      await convertOne(f, undefined, false);
+    }
+  }, [convertOne]);
+
   const pickFiles = useCallback(async () => {
     const sel = await open({
       multiple: true,
@@ -458,6 +542,47 @@ export default function App() {
       await addFiles(paths);
     }
   }, [addFiles]);
+
+  // ── 键盘快捷键 ──
+  //  1/2/3 切屏、/ 聚焦书库搜索(书库自己监听事件)、Cmd/Ctrl+O 选文件、
+  //  Esc 收起排字记录。输入框里一律不拦 —— 用户在填 MinerU 密钥时按 2,
+  //  要的是字符「2」而不是跳到书目。
+
+  //  复核表挂在转换屏里:切走屏幕它就消失,但「按下前」的等待不会自己结束 ——
+  //  那样这批文件会永远停在 pending,复核的 promise 也一直吊着。
+  //  所以离开转换屏 = 放弃复核,和点「取消」等价(文件留着,回去按 START 还能跑)。
+  useEffect(() => {
+    if (screen !== "convert" && reviewResolve.current) settleReview(false);
+  }, [screen, settleReview]);
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const el = event.target as HTMLElement | null;
+      const editing = el?.tagName === "INPUT" || el?.tagName === "TEXTAREA" || el?.isContentEditable === true;
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "o") {
+        event.preventDefault();
+        setScreen("convert");
+        void pickFiles();
+        return;
+      }
+      if (event.key === "Escape") {
+        // 复核表开着时 Esc 等于「取消」:先处理它,否则只是把抽屉收起来、
+        // 表还压在屏正中间,看着像 Esc 失灵
+        if (reviewResolve.current) { settleReview(false); return; }
+        setComposingExpanded(false);
+        return;
+      }
+      if (editing || reviewResolve.current) return;
+      if (event.key === "1") setScreen("convert");
+      if (event.key === "2") setScreen("library");
+      if (event.key === "3") setScreen("settings");
+      if (event.key === "/" && screen === "library") {
+        event.preventDefault();
+        window.dispatchEvent(new Event("pdf2epub:search"));
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [screen, pickFiles, settleReview]);
 
   // ── 队列操作 ──
   //  取消只能作用于「还没终结」的行:批量操作会遍历全部选中项(含已完成),
@@ -531,7 +656,10 @@ export default function App() {
     try {
       setEnv(await invoke<EnvState>("check_env"));
     } catch { /* 忽略 */ }
-  }, [backendPref, outputDir, cliPath, cleanOpts, strictVerify]);
+    // 生效是在**下一次**转换,所以「保存了」这件事在当前屏没有任何视觉变化 ——
+    // 不播报的话,用户会反复点保存确认到底写没写进去
+    notify(t.toast.saved, "ok");
+  }, [backendPref, outputDir, cliPath, cleanOpts, strictVerify, notify, t]);
 
   // ── 书库数据:library.json(含转换时回写的类型/后端/页数)+ 本会话兜底 ──
   //  memo:转换期间每行日志都会触发 App 重渲染,这里不必跟着重算
@@ -558,6 +686,8 @@ export default function App() {
   const openEpub = useCallback(async (epub: string) => {
     try {
       await invoke("open_epub", { path: epub });
+      // 交给系统默认阅读器打开:窗口在后面,前台看起来什么都没发生
+      notify(t.toast.opened(baseName(epub)), "info");
     } catch (e) {
       const ts = new Date().toTimeString().slice(0, 8);
       setConsoleLines(prev => [...prev.slice(-300), {
@@ -566,11 +696,12 @@ export default function App() {
         text: `[OPEN EPUB] ${epub} — ${String(e)}`,
       }]);
     }
-  }, []);
+  }, [notify, t]);
 
   const openFolder = useCallback(async () => {
     try {
       await invoke<string>("open_output_dir", { outputDir });
+      notify(t.toast.revealed, "info");
     } catch (e) {
       const ts = new Date().toTimeString().slice(0, 8);
       setConsoleLines(prev => [...prev.slice(-300), {
@@ -579,7 +710,7 @@ export default function App() {
         text: `[OPEN DIR] ${outputDir} — ${String(e)}`,
       }]);
     }
-  }, [outputDir]);
+  }, [outputDir, notify, t]);
 
   // 书库「重新转换」= 用户明确要求重转 → force(否则已有 EPUB 会让它直接 skip,
   // 界面看起来跑了一遍,其实什么都没发生)
@@ -596,7 +727,6 @@ export default function App() {
   const activeStage = activeFile?.stages.find(s => s.state === "active");
   const pendingCount = files.filter(f => f.status === "pending").length;
   const previewFile = files.length > 0 ? files[files.length - 1] : null;
-  const t = T[lang];
 
   const NAV: { id: Screen; label: string; count: string | null }[] = [
     { id: "convert", label: t.screens[0], count: convertingCount > 0 ? String(convertingCount) : null },
@@ -613,7 +743,7 @@ export default function App() {
       <header className="shrink-0 flex items-stretch" style={{ background: "var(--card)" }}>
         <div className="h-10 flex items-center gutter w-full gap-6">
           <span className="font-mono text-[11px] tracking-[0.08em] text-[var(--muted-foreground)] shrink-0">
-            {t.brand} <span className="opacity-50">{APP_VERSION}</span>
+            {t.brand} <span className="opacity-50 running-version">{APP_VERSION}</span>
           </span>
 
           <Rule vertical />
@@ -630,7 +760,7 @@ export default function App() {
                 >
                   <span className="font-mono text-[10px] text-[var(--muted-foreground)] mr-1.5">0{i + 1}</span>
                   <span className={lang === "zh" ? "cjk font-medium" : ""}>{s.label}</span>
-                  <span className="mx-2 font-mono text-[10px] text-[var(--border)] tracking-widest overflow-hidden" style={{ maxWidth: 48, display: "inline-block" }}>
+                  <span className="mx-2 font-mono text-[10px] text-[var(--border)] tracking-widest overflow-hidden toc-leader" style={{ maxWidth: 48, display: "inline-block" }}>
                     {"·".repeat(8)}
                   </span>
                   {s.count !== null && (
@@ -647,10 +777,22 @@ export default function App() {
           <div className="flex items-center gap-3 shrink-0">
             <button
               onClick={() => setDarkMode(!darkMode)}
-              className="font-mono text-[10px] text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors"
+              className="flex items-center text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors"
               aria-label={lang === "zh" ? "切换主题" : "Toggle theme"}
+              title={darkMode ? t.settings.themeLight : t.settings.themeDark}
             >
-              {darkMode ? "☀" : "☾"}
+              {darkMode ? (
+                // 太阳:一圈加八根射线,与既可以出现在 11px 行高里的方块/圆点同语汇
+                // (用 emoji 的话在暗底上会被渲染成彩色 —— 只有黑白两色才像是印出来的)
+                <svg width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden="true">
+                  <circle cx="6.5" cy="6.5" r="2.25" stroke="currentColor" />
+                  <path d="M6.5 0.75V2M6.5 11V12.25M0.75 6.5H2M11 6.5H12.25M2.43 2.43L3.32 3.32M9.68 9.68L10.57 10.57M10.57 2.43L9.68 3.32M3.32 9.68L2.43 10.57" stroke="currentColor" strokeLinecap="square" />
+                </svg>
+              ) : (
+                <svg width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden="true">
+                  <path d="M10.9 8.4A4.75 4.75 0 0 1 4.6 2.1a4.75 4.75 0 1 0 6.3 6.3Z" stroke="currentColor" strokeLinejoin="miter" />
+                </svg>
+              )}
             </button>
             <Rule vertical />
             <button
@@ -685,6 +827,7 @@ export default function App() {
             composingExpanded={composingExpanded}
             setComposingExpanded={setComposingExpanded}
             consoleLines={consoleLines}
+            review={review}
             onPick={() => void pickFiles()}
             onCancel={cancelFile}
             onRetry={retryFile}
@@ -695,6 +838,10 @@ export default function App() {
             onPreflight={() => void runPreflight(files.map(f => f.path))}
             onPreflightRecent={(p: string) => void runPreflight([p])}
             onAddRecent={(p: string) => void addFiles([p])}
+            onMoveTop={moveTop}
+            onStartQueue={() => void startQueue()}
+            onReviewStart={() => settleReview(true)}
+            onReviewCancel={() => settleReview(false)}
           />
         )}
         {screen === "library" && (
@@ -755,6 +902,9 @@ export default function App() {
         <div className="flex-1" />
         <span className="font-mono text-[10px] text-[var(--muted-foreground)] truncate max-w-[300px] selectable" title={outputDir}>{outputDir}</span>
       </footer>
+
+      {/* Toast — 操作反馈(与排字记录互补:那里记过程,这里报结果) */}
+      <ToastStack notices={notices} lang={lang} />
 
       {/* 终态播报:视觉上的状态变化对读屏器不可见 */}
       <div aria-live="polite" className="sr-only">

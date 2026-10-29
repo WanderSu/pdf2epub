@@ -53,6 +53,13 @@ export interface ConsoleLine {
   legacy?: boolean;
 }
 
+/** Toast 抽屉里的一条播报。tone 只决定左侧 2px 竖线的颜色。 */
+export interface Notice {
+  id: string;
+  tone: "ok" | "danger" | "info";
+  message: string;
+}
+
 export interface LibraryBook {
   id: string;
   title: string;
@@ -113,6 +120,29 @@ export interface PreflightReport {
   total_shards: number;
   quota: number;
   over_quota: boolean;
+}
+
+/**
+ * 导入复核表的一行:数据来自**真实 preflight**(CLI `--dry-run --json`)。
+ * `known=false` = 这个文件还没拿到计划(命令行失败/引擎没回),界面显示占位,
+ * 不自己脑补类型与页数 —— 假数据比空更难发现,它会骗过下一个人。
+ */
+export interface ReviewRow {
+  id: string;
+  name: string;
+  path: string;
+  type?: FileType;
+  pages?: number;
+  backend?: Backend;
+  shards?: number;
+  ocrPages?: number;
+  known: boolean;
+}
+
+/** 一批新导入文件的复核请求(App 持有,ConvertScreen 渲染)。 */
+export interface ReviewSheet {
+  rows: ReviewRow[];
+  totalOcrPages: number;
 }
 
 export interface RecentEntry {
