@@ -135,6 +135,12 @@ await send("Page.addScriptToEvaluateOnNewDocument", {
           apikey_path: "C:/Users/x/.pdf2epub/apikey.json",
         });
         if (cmd === "library_sync") return Promise.resolve(window.__library || []);
+        // 设置已从 localStorage 搬进 %LOCALAPPDATA%\pdf2epub\settings.json,
+        // main.tsx 在渲染前读它。桩要直接给出这份文件 —— 返回 null 会走
+        // 「从 localStorage 迁移」那条分支,截出来的图随环境漂移。
+        if (cmd === "load_settings") return Promise.resolve(window.__settings || null);
+        if (cmd === "clean_baseline") return Promise.resolve(window.__cleanBaseline || {});
+        if (cmd === "save_settings") { window.__settings = args.settings; return Promise.resolve(null); }
         // 复核表要显示的是**真实 preflight 的行**,所以这里按请求路径返回计划;
         // 返回空数组时界面会显示「未知」占位 —— 那是另一条分支,不该出现在 README 图里
         if (cmd === "preflight") {
@@ -181,8 +187,12 @@ await send("Page.addScriptToEvaluateOnNewDocument", {
       metadata: { currentWindow: { label: "main" }, currentWebview: { windowLabel: "main", label: "main" } },
     };
     window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener(){} };
-    localStorage.setItem("pdf2epub.lang", "zh");
-    localStorage.setItem("pdf2epub.dark", "0");
+    // 界面语言/主题/清理开关的基线都从这里来(等价于用户的 settings.json)
+    window.__settings = {
+      theme: "light", lang: "zh", backend: "auto", output_dir: "output",
+      cli_path: "", clean: {}, strict: false, recent: [],
+    };
+    window.__cleanBaseline = {};
 
     // 模拟原生拖放：喂给 tauri://drag-drop 的所有监听回调
     window.__drop = (paths) => {

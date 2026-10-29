@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { T, CLEAN_GROUPS, type Lang } from "../i18n";
+import { mergeCleanOpts } from "../format";
 import { Rule, Switch, Segment, RadioRow, ChapterHead, ToggleSwitch } from "../primitives";
 import {
   CLEAN_KEYS, type BackendPref, type CleanKey, type CleanOpts, type EnvState,
@@ -109,7 +110,7 @@ function TokenRow({ lang, label, configured, pending, value, onChange, onClear }
 export function SettingsScreen({
   lang, setLang, darkMode, setDarkMode, backendPref, setBackendPref,
   outputDir, setOutputDir, cliPath, setCliPath, env,
-  cleanOpts, setCleanOpts, strictVerify, setStrictVerify, onSave,
+  cleanOpts, cleanBaseline, setCleanOpts, strictVerify, setStrictVerify, onSave,
 }: {
   lang: Lang;
   setLang: (l: Lang) => void;
@@ -123,6 +124,8 @@ export function SettingsScreen({
   setCliPath: (v: string) => void;
   env: EnvState | null;
   cleanOpts: CleanOpts;
+  /** 清理开关的基线(config.yaml 的 clean: 段 + 引擎默认)——「恢复默认」拨回它 */
+  cleanBaseline: Record<string, boolean>;
   setCleanOpts: (v: CleanOpts) => void;
   strictVerify: boolean;
   setStrictVerify: (v: boolean) => void;
@@ -374,7 +377,18 @@ export function SettingsScreen({
               </div>
             );
           })}
-          <p className={`text-[10px] text-[var(--muted-foreground)] ${lang === "zh" ? "cjk" : "font-mono"}`}>{t.cleanNote}</p>
+          <div className="flex items-start gap-4 pt-1">
+            <p className={`flex-1 text-[10px] leading-relaxed text-[var(--muted-foreground)] ${lang === "zh" ? "cjk" : "font-mono"}`}>{t.cleanNote}</p>
+            {/* 「恢复默认」= 把九个开关拨回基线值。保存时「与基线相同」的键会被删掉,
+                这几项就重新交给 config.yaml 管 —— 而不是写一句「用默认值」把管辖权
+                永久夺走(两者点完界面一样,后续行为完全不同)。 */}
+            <button
+              onClick={() => setCleanOpts(mergeCleanOpts(cleanBaseline))}
+              className={`shrink-0 border border-[var(--border)] px-3 py-1 font-mono text-[10px] tracking-[0.08em] uppercase text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:border-[var(--foreground)] transition-colors ${lang === "zh" ? "cjk font-sans" : ""}`}
+            >
+              {t.cleanReset}
+            </button>
+          </div>
         </SectionCard>
         <Rule />
 

@@ -199,6 +199,24 @@ The desktop build bundles the Python runtime it needs, so no separate Python ins
 
 Keep `pdf2epub.exe`, `cli.exe` and `config/` in the same folder — do not move the exe out on its own.
 
+### Where your settings and library live
+
+Your UI settings and book library are **not** stored in the unzipped folder — they are per Windows
+user:
+
+```text
+%LOCALAPPDATA%\pdf2epub\
+    settings.json     UI and conversion preferences (theme, output dir, cleanup switches…)
+    library.json      the books you have produced
+```
+
+This keeps them safe across upgrades: unzip a newer build over the same folder and both survive.
+To back up or move to another machine, copy that folder.
+
+Cleanup switches default to `config/config.yaml` in the unzipped folder: switches you have **not**
+touched follow it, the ones you changed win, and RESET at the bottom of the Settings page hands the
+changed ones back to it.
+
 ### Pandoc is also required
 
 EPUB files are produced by Pandoc, so Pandoc has to be installed.
@@ -532,7 +550,7 @@ You can also force local extraction (`--backend pymupdf`), but the result may st
 
 pdf2epub joins lines that were broken across pages by default.
 
-For books with unusual typography you can turn the corresponding cleanup rule off in the desktop settings, or use `--clean-disable join_lines`.
+For books with unusual typography you can turn the corresponding cleanup rule off in the desktop settings, or use `--clean-disable join_lines`. Conversely, if `config.yaml` has a rule pinned to `false`, use `--clean-enable join_lines` to turn it on for a single run.
 
 Poetry and other content that must keep its line structure is handled by heuristics, so unusual layouts may still need a manual check.
 
@@ -643,6 +661,7 @@ ebook-converter <file-or-dir>... [-o output-dir] [options]
 | `--retries N` | Retries per file, default 2 |
 | `--force` | Ignore the "already done" state and convert again |
 | `--clean-disable LIST` | Turn off Markdown cleanup rules (comma separated, repeatable) |
+| `--clean-enable LIST` | Turn cleanup rules back on, overriding a `false` written in `config.yaml`. When a key appears in both lists, `--clean-disable` wins |
 | `--strict` | Strict mode: content-comparison warnings also fail the file (default is warn only). Fatal check errors fail the file in any mode |
 | `--lang LANG` | EPUB language (`zh-CN`, `en`, `ja`, ...); detected from the text by default |
 | `--dry-run` | Preflight only, no files are written |

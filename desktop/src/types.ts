@@ -151,9 +151,51 @@ export interface RecentEntry {
   at: number;
 }
 
+/**
+ * `%LOCALAPPDATA%\pdf2epub\settings.json` 的内容。
+ *
+ * 字段**全部可缺省**:旧版本写的文件、或用户手改过的文件都要能读进来,缺的项由
+ * 内置默认值补齐(读失败不该让人丢设置)。
+ *
+ * `clean` 存的是**稀疏映射** —— 只记用户亲手改过的开关。存全量会把「用户没意见」
+ * 也变成「用户要这样」,`config.yaml` 从此再也管不着那几项,而用户不知道自己
+ * 刚把可配置性关掉了。没记的键 = 听 config.yaml(基线)。
+ */
+export interface SettingsFile {
+  theme?: "dark" | "light";
+  lang?: "zh" | "en";
+  backend?: BackendPref;
+  output_dir?: string;
+  cli_path?: string;
+  clean?: Record<string, boolean>;
+  strict?: boolean;
+  recent?: RecentEntry[];
+}
+
+/** 渲染前就读好的设置:文件内容 + 清理开关的基线(引擎那侧的口径)。 */
+export interface InitialSettings {
+  file: SettingsFile;
+  baseline: Record<string, boolean>;
+}
+
 export const APP_VERSION = "v0.5.1";
-export const RECENT_KEY = "pdf2epub.recent";
 export const MAX_RECENT = 8;
+
+/**
+ * 旧版把设置存在 localStorage 里(%LOCALAPPDATA%\com.wandersu.pdf2epub\)。
+ * 现在设置与书库都落在 `%LOCALAPPDATA%\pdf2epub\`,下面这些键**只用于一次性迁移**,
+ * 迁移成功后即删除 —— 留着它们会让「设置到底存在哪」有两个答案。
+ */
+export const LEGACY_KEYS = {
+  theme: "pdf2epub.dark",
+  lang: "pdf2epub.lang",
+  backend: "pdf2epub.backend",
+  outputDir: "pdf2epub.outputDir",
+  cliPath: "pdf2epub.cliPath",
+  clean: "pdf2epub.clean",
+  strict: "pdf2epub.strict",
+  recent: "pdf2epub.recent",
+} as const;
 
 //: 清理项开关顺序必须与 CLI 的 cleaner.CLEAN_KEYS 一致
 export const CLEAN_KEYS = [

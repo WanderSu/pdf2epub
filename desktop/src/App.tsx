@@ -17,10 +17,11 @@ import {
   KIND_TO_TYPE,
   backendFromPlan,
   baseName,
+  baseValue,
+  diffCleanOpts,
   fmtDate,
   formatSize,
-  loadCleanOpts,
-  loadRecent,
+  mergeCleanOpts,
   normPath,
   parseTypeFromLine,
   parseWarningFromLine,
@@ -34,7 +35,6 @@ import {
   APP_VERSION,
   CLEAN_KEYS,
   MAX_RECENT,
-  RECENT_KEY,
   type Backend,
   type BackendPref,
   type CleanOpts,
@@ -42,6 +42,7 @@ import {
   type EnvState,
   type FileStatus,
   type FileType,
+  type InitialSettings,
   type LibEntry,
   type LibraryBook,
   type Notice,
@@ -51,17 +52,20 @@ import {
   type RecentEntry,
   type ReviewSheet,
   type Screen,
+  type SettingsFile,
 } from "./types";
 
 // ── APP SHELL ─────────────────────────────────────────────────────────────────
 //  只做三件事:持有全局状态、串起 CLI 调用链、把状态分发给三个屏。
 //  任何「长什么样」的逻辑都在 primitives / screens 里,任何「怎么显示」的逻辑在 format 里。
-export default function App() {
+export default function App({ initial = { file: {}, baseline: {} } }: { initial?: InitialSettings }) {
+  //  设置来自 %LOCALAPPDATA%\pdf2epub\settings.json —— main.tsx 在**渲染之前**
+  //  就把它读好了(否则会先闪一帧默认主题/语言)。这里只取初值,之后由 persist 落盘。
+  const { file, baseline } = initial;
   const [screen, setScreen] = useState<Screen>("convert");
-  const [darkMode, setDarkMode] = useState<boolean>(() => localStorage.getItem("pdf2epub.dark") === "1");
+  const [darkMode, setDarkMode] = useState<boolean>(file.theme === "dark");
   const [lang, setLang] = useState<Lang>(() => {
-    const saved = localStorage.getItem("pdf2epub.lang");
-    if (saved === "en" || saved === "zh") return saved;
+    if (file.lang === "en" || file.lang === "zh") return file.lang;
     // 首次启动跟随系统:中文项目默认给英文界面是没道理的
     return (navigator.language || "").toLowerCase().startsWith("zh") ? "zh" : "en";
   });
@@ -83,23 +87,16 @@ export default function App() {
   const [diskBooks, setDiskBooks] = useState<LibEntry[]>([]);
   const [libraryLoading, setLibraryLoading] = useState(false);
   const [dragging, setDragging] = useState(false);
-  const [recent, setRecent] = useState<RecentEntry[]>(loadRecent);
+  const [recent, setRecent] = useState<RecentEntry[]>(file.recent ?? []);
   const [preflights, setPreflights] = useState<Record<string, PreflightFile>>({});
   const [batchNotice, setBatchNotice] = useState<PreflightReport | null>(null);
   const [busyPreflight, setBusyPreflight] = useState(false);
-  const [backendPref, setBackendPref] = useState<BackendPref>(
-    () => (localStorage.getItem("pdf2epub.backend") as BackendPref) || "auto",
-  );
-  const [outputDir, setOutputDir] = useState<string>(
-    () => localStorage.getItem("pdf2epub.outputDir") || "output",
-  );
-  const [cliPath, setCliPath] = useState<string>(
-    () => localStorage.getItem("pdf2epub.cliPath") || "",
-  );
-  const [cleanOpts, setCleanOpts] = useState<CleanOpts>(loadCleanOpts);
-  const [strictVerify, setStrictVerify] = useState<boolean>(
-    () => localStorage.getItem("pdf2epub.strict") === "1",
-  );
+  const [backendPref, setBackendPref] = useState<BackendPref>(file.backend ?? "auto");
+  const [outputDir, setOutputDir] = useState<string>(file.output_dir ?? "output");
+  const [cliPath, setCliPath] = useState<string>(file.cli_path ?? "");
+  //  三层取值:内置默认 → config.yaml 的 clean: 段 → 用户改过的键
+  const [cleanOpts, setCleanOpts] = useState<CleanOpts>(() => mergeCleanOpts(baseline, file.clean ?? {}));
+  const [strictVerify, setStrictVerify] = useState<boolean>(file.strict ?? false);
   const canceled = useRef<Set<string>>(new Set());
   // 队列最新快照:转换结束回写书库元数据时取用(不依赖 setState 的异步性)
   const filesRef = useRef<QueueFile[]>([]);
@@ -108,6 +105,29 @@ export default function App() {
     () => CLEAN_KEYS.filter(k => !cleanOpts[k]),
     [cleanOpts],
   );
+  //  要**显式开启**的项 = 用户勾上了、而引擎那边的基线是关的。必须有这一路:
+  //  `--clean-disable` 只能关,config.yaml 里写死的 false 光靠它打不开 ——
+  //  少了它,界面显示 ON、引擎实际 OFF,而且没有任何提示。
+  const cleanEnable = useMemo(
+    () => CLEAN_KEYS.filter(k => cleanOpts[k] && !baseValue(baseline, k)),
+    [cleanOpts, baseline],
+  );
+
+  //  设置落盘:settings.json 是唯一写入口。记住最近一次写出的内容,好让
+  //  「保存设置」与「记住最近文件」这类零散写入不会互相覆盖(每次写整份文件,
+  //  但只改自己关心的那几个键)。
+  const settingsRef = useRef<SettingsFile>({ ...file });
+  const persist = useCallback(async (patch: Partial<SettingsFile>) => {
+    settingsRef.current = { ...settingsRef.current, ...patch };
+    try {
+      await invoke("save_settings", { settings: settingsRef.current });
+    } catch (e) {
+      const ts = new Date().toTimeString().slice(0, 8);
+      setConsoleLines(prev => [...prev.slice(-300), {
+        ts, level: "ERROR" as const, text: `[SETTINGS] ${String(e)}`,
+      }]);
+    }
+  }, []);
 
   // ── CLI 进度事件 ──
   //  stdout 的 JSON 事件(--json-events)是状态/进度的唯一来源;stderr 的人类日志
@@ -196,16 +216,23 @@ export default function App() {
   }, []);
 
   // ── 主题 / 语言 ──
+  //  这两项与其他设置不同:改完立刻生效并落盘(不必点「保存设置」)。但**首次渲染
+  //  不写**:否则打开一次应用就会把「默认值」写成「用户的选择」,以后再改默认值
+  //  老用户也不会跟着变 —— 与清理开关那个坑是同一件事。
+  const themeSettled = useRef(false);
   useEffect(() => {
     document.documentElement.classList.toggle("dark", darkMode);
-    localStorage.setItem("pdf2epub.dark", darkMode ? "1" : "0");
-  }, [darkMode]);
+    if (!themeSettled.current) { themeSettled.current = true; return; }
+    void persist({ theme: darkMode ? "dark" : "light" });
+  }, [darkMode, persist]);
+  const langSettled = useRef(false);
   useEffect(() => {
     document.documentElement.classList.toggle("lang-zh", lang === "zh");
     // <html lang> 决定读屏语言与断词/字形选择,不能固定成 zh-CN
     document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
-    localStorage.setItem("pdf2epub.lang", lang);
-  }, [lang]);
+    if (!langSettled.current) { langSettled.current = true; return; }
+    void persist({ lang });
+  }, [lang, persist]);
 
   // 页眉时钟:30s 一跳(秒级没必要,反而增加重渲染)
   useEffect(() => {
@@ -338,6 +365,7 @@ export default function App() {
         cliPath: cliPath || null,
         taskId: f.id,
         cleanDisable,
+        cleanEnable,
         strict: strictVerify,
         force,
       });
@@ -385,7 +413,7 @@ export default function App() {
         error: String(err),
       } : x));
     }
-  }, [outputDir, backendPref, cliPath, cleanDisable, strictVerify]);
+  }, [outputDir, backendPref, cliPath, cleanDisable, cleanEnable, strictVerify]);
 
   const rememberRecent = useCallback((paths: string[]) => {
     setRecent(prev => {
@@ -393,10 +421,10 @@ export default function App() {
       const incoming: RecentEntry[] = paths.map(p => ({ path: p, name: baseName(p), at: now }));
       const merged = [...incoming, ...prev.filter(r => !paths.some(p => normPath(p) === normPath(r.path)))];
       const trimmed = merged.slice(0, MAX_RECENT);
-      localStorage.setItem(RECENT_KEY, JSON.stringify(trimmed));
+      void persist({ recent: trimmed });
       return trimmed;
     });
-  }, []);
+  }, [persist]);
 
   // ── 导入复核闸门 ──
   //  新版设计把它放在「文件进来 → 按下」之间做的是复核,不是假的进度条:
@@ -645,11 +673,15 @@ export default function App() {
   const handleStrict = (v: boolean) => setStrictVerify(v);
 
   const saveSettings = useCallback(async () => {
-    localStorage.setItem("pdf2epub.backend", backendPref);
-    localStorage.setItem("pdf2epub.outputDir", outputDir);
-    localStorage.setItem("pdf2epub.cliPath", cliPath);
-    localStorage.setItem("pdf2epub.clean", JSON.stringify(cleanOpts));
-    localStorage.setItem("pdf2epub.strict", strictVerify ? "1" : "0");
+    //  清理开关只写「与基线不同」的键:与基线相同的项等于「用户没意见」,
+    //  留空才让 config.yaml 继续管着它(「恢复默认」靠的就是这一点)。
+    await persist({
+      backend: backendPref,
+      output_dir: outputDir,
+      cli_path: cliPath,
+      clean: diffCleanOpts(cleanOpts, baseline),
+      strict: strictVerify,
+    });
     try {
       await invoke("set_cli_path", { path: cliPath || null });
     } catch { /* 忽略 */ }
@@ -659,7 +691,7 @@ export default function App() {
     // 生效是在**下一次**转换,所以「保存了」这件事在当前屏没有任何视觉变化 ——
     // 不播报的话,用户会反复点保存确认到底写没写进去
     notify(t.toast.saved, "ok");
-  }, [backendPref, outputDir, cliPath, cleanOpts, strictVerify, notify, t]);
+  }, [backendPref, outputDir, cliPath, cleanOpts, strictVerify, baseline, persist, notify, t]);
 
   // ── 书库数据:library.json(含转换时回写的类型/后端/页数)+ 本会话兜底 ──
   //  memo:转换期间每行日志都会触发 App 重渲染,这里不必跟着重算
@@ -870,6 +902,7 @@ export default function App() {
             setCliPath={setCliPath}
             env={env}
             cleanOpts={cleanOpts}
+            cleanBaseline={baseline}
             setCleanOpts={setCleanOpts}
             strictVerify={strictVerify}
             setStrictVerify={handleStrict}

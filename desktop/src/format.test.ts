@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
   normPath, formatSize, fmtDate, fmtMonthDay, baseName,
-  backendFromPlan, parseTypeFromLine, loadCleanOpts, loadRecent,
+  backendFromPlan, parseTypeFromLine,
+  clearLegacySettings, diffCleanOpts, mergeCleanOpts, readLegacySettings,
 } from "./format";
 import { CLEAN_KEYS, CLEAN_DEFAULTS, MAX_RECENT } from "./types";
 
@@ -74,53 +75,100 @@ describe("parseTypeFromLine(legacy 兜底)", () => {
   });
 });
 
-describe("loadCleanOpts", () => {
-  it("无存储时全部走默认值", () => {
-    expect(loadCleanOpts()).toEqual(CLEAN_DEFAULTS);
+describe("mergeCleanOpts(三层取值)", () => {
+  it("没有基线与保存值时全部走内置默认", () => {
+    expect(mergeCleanOpts({})).toEqual(CLEAN_DEFAULTS);
   });
 
-  it("对象格式按 key 取值,未知键忽略", () => {
-    localStorage.setItem("pdf2epub.clean", JSON.stringify({ bold: true, images: false, nope: 1 }));
-    const got = loadCleanOpts();
+  it("config.yaml 的 clean: 段压过内置默认", () => {
+    const got = mergeCleanOpts({ bold: true, cjk_spaces: false });
     expect(got.bold).toBe(true);
-    expect(got.images).toBe(false);
-    expect(got.page_numbers).toBe(CLEAN_DEFAULTS.page_numbers);
+    expect(got.cjk_spaces).toBe(false);
+    expect(got.page_numbers).toBe(CLEAN_DEFAULTS.page_numbers); // 配置里没写的项照旧
+  });
+
+  it("用户改过的键压过 config.yaml —— 没记的键才算「听配置」", () => {
+    expect(mergeCleanOpts({ bold: true }, { bold: false }).bold).toBe(false);
+  });
+
+  it("未知键与坏值一概忽略", () => {
+    const got = mergeCleanOpts(
+      { nope: true },
+      { images: "yes" } as unknown as Record<string, boolean>,
+    );
+    expect(got).toEqual(CLEAN_DEFAULTS);
     expect(got).not.toHaveProperty("nope");
-  });
-
-  it("旧版裸数组按下标迁移一次", () => {
-    const arr = CLEAN_KEYS.map(k => CLEAN_DEFAULTS[k]);
-    arr[0] = false; // page_numbers 关掉
-    localStorage.setItem("pdf2epub.clean", JSON.stringify(arr));
-    expect(loadCleanOpts().page_numbers).toBe(false);
-  });
-
-  it("坏 JSON 不抛错,退回默认值", () => {
-    localStorage.setItem("pdf2epub.clean", "{not json");
-    expect(loadCleanOpts()).toEqual(CLEAN_DEFAULTS);
   });
 });
 
-describe("loadRecent", () => {
-  it("过滤掉没有 path 的脏数据", () => {
-    localStorage.setItem("pdf2epub.recent", JSON.stringify([
-      { path: "/a.pdf", name: "a.pdf" },
-      { name: "no-path.pdf" },
-      null,
-    ]));
-    const got = loadRecent();
-    expect(got).toHaveLength(1);
-    expect(got[0].path).toBe("/a.pdf");
+describe("diffCleanOpts(落盘只写与基线不同的键)", () => {
+  it("没动过的项一个都不写 —— 留空才让 config.yaml 继续管着它", () => {
+    expect(diffCleanOpts({ ...CLEAN_DEFAULTS }, {})).toEqual({});
   });
 
-  it("上限截断到 MAX_RECENT", () => {
-    const many = Array.from({ length: MAX_RECENT + 4 }, (_, i) => ({ path: `/b${i}.pdf`, name: `b${i}.pdf` }));
-    localStorage.setItem("pdf2epub.recent", JSON.stringify(many));
-    expect(loadRecent()).toHaveLength(MAX_RECENT);
+  it("与 config.yaml 相同的项也不写(那是「没意见」,不是「要这样」)", () => {
+    const opts = { ...CLEAN_DEFAULTS, bold: true, cjk_spaces: true };
+    expect(diffCleanOpts(opts, { bold: true, cjk_spaces: false })).toEqual({ cjk_spaces: true });
   });
 
-  it("坏 JSON 返回空数组", () => {
+  it("「恢复默认」(拨回基线值)等于把这些键删掉", () => {
+    const baseline = { bold: true };
+    // 用户把 bold 关掉 → 与基线不同 → 写进去
+    expect(diffCleanOpts({ ...CLEAN_DEFAULTS, bold: false }, baseline)).toEqual({ bold: false });
+    // 再点「恢复默认」拨回基线 → 什么都不写 → 这几项重新交给 config.yaml
+    expect(diffCleanOpts(mergeCleanOpts(baseline, {}), baseline)).toEqual({});
+  });
+});
+
+describe("readLegacySettings(localStorage 一次性迁移)", () => {
+  it("没有任何旧值时返回 null —— 调用方据此跳过写入", () => {
+    expect(readLegacySettings()).toBeNull();
+  });
+
+  it("读全量旧值,并把清理开关收窄成稀疏映射", () => {
+    localStorage.setItem("pdf2epub.dark", "1");
+    localStorage.setItem("pdf2epub.lang", "en");
+    localStorage.setItem("pdf2epub.backend", "mineru");
+    localStorage.setItem("pdf2epub.outputDir", "D:/out");
+    localStorage.setItem("pdf2epub.strict", "1");
+    localStorage.setItem("pdf2epub.clean", JSON.stringify({ ...CLEAN_DEFAULTS, bold: true }));
+    localStorage.setItem("pdf2epub.recent", JSON.stringify([{ path: "/a.pdf", name: "a.pdf", at: 1 }]));
+    const got = readLegacySettings()!;
+    expect(got.theme).toBe("dark");
+    expect(got.lang).toBe("en");
+    expect(got.backend).toBe("mineru");
+    expect(got.output_dir).toBe("D:/out");
+    expect(got.strict).toBe(true);
+    // 与内置默认相同的项不搬:旧版全量存法分不清「没意见」与「要这样」
+    expect(got.clean).toEqual({ bold: true });
+    expect(got.recent).toHaveLength(1);
+  });
+
+  it("旧版裸数组格式按下标迁移", () => {
+    const arr = CLEAN_KEYS.map(k => CLEAN_DEFAULTS[k]);
+    arr[0] = false; // page_numbers 关掉
+    localStorage.setItem("pdf2epub.clean", JSON.stringify(arr));
+    expect(readLegacySettings()!.clean).toEqual({ page_numbers: false });
+  });
+
+  it("坏 JSON 不抛错,当没有", () => {
+    localStorage.setItem("pdf2epub.clean", "{not json");
     localStorage.setItem("pdf2epub.recent", "[[[");
-    expect(loadRecent()).toEqual([]);
+    expect(readLegacySettings()).toBeNull();
+  });
+
+  it("最近文件过滤脏数据并截断到 MAX_RECENT", () => {
+    const many = Array.from({ length: MAX_RECENT + 4 },
+      (_, i) => ({ path: `/b${i}.pdf`, name: `b${i}.pdf`, at: i }));
+    localStorage.setItem("pdf2epub.recent", JSON.stringify([...many, { name: "no-path" }, null]));
+    expect(readLegacySettings()!.recent).toHaveLength(MAX_RECENT);
+  });
+
+  it("clearLegacySettings 把旧键清干净", () => {
+    localStorage.setItem("pdf2epub.dark", "1");
+    localStorage.setItem("pdf2epub.clean", "{}");
+    clearLegacySettings();
+    expect(localStorage.getItem("pdf2epub.dark")).toBeNull();
+    expect(localStorage.getItem("pdf2epub.clean")).toBeNull();
   });
 });

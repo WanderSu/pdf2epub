@@ -204,6 +204,22 @@ pdf2epub.exe
 
 注意保持 `pdf2epub.exe`、`cli.exe` 和 `config/` 在同一个文件夹里，不要把 exe 单独挪出去。
 
+### 设置与书库放在哪里
+
+界面设置和书库**不在解压目录里**，而是每个 Windows 用户一份：
+
+```text
+%LOCALAPPDATA%\pdf2epub\
+    settings.json     界面与转换偏好（主题、输出目录、清理开关…）
+    library.json      已转换的书目
+```
+
+放在这里的好处是升级不会丢数据：把新版本解压覆盖到同一个文件夹，设置和书目都还在。
+备份或换机时，把这个文件夹复制走即可。
+
+清理开关的默认值来自解压目录里的 `config/config.yaml`：界面上**没动过**的开关跟随它，
+动过的那几项以界面为准；「规范」页底部的「恢复默认」会把动过的项交还给它。
+
 ### 还需要安装 Pandoc
 
 EPUB 生成使用 Pandoc，因此需要安装 Pandoc。
@@ -544,7 +560,7 @@ pdf2epub 会尝试检测这种情况。
 
 pdf2epub 默认会尝试合并跨页断行。
 
-如果某本书的排版比较特殊，可以在桌面端的设置中关闭对应清理规则，也可以使用 `--clean-disable join_lines`。
+如果某本书的排版比较特殊，可以在桌面端的设置中关闭对应清理规则，也可以使用 `--clean-disable join_lines`。反过来，如果 `config.yaml` 里把某项写成了 `false`，单次运行想临时打开它就用 `--clean-enable join_lines`。
 
 诗歌等需要保留分行结构的内容，目前采用启发式规则进行判断，因此特殊排版仍可能需要手动检查。
 
@@ -654,6 +670,7 @@ ebook-converter <文件或目录>... [-o 输出目录] [选项]
 | `--retries N` | 单个文件失败后的重试次数，默认 2 |
 | `--force` | 忽略「已完成」，强制重新转换 |
 | `--clean-disable LIST` | 关闭指定的 Markdown 清理规则（逗号分隔，可重复） |
+| `--clean-enable LIST` | 开启指定的 Markdown 清理规则；用于覆盖 `config.yaml` 里写死的 `false`。两边都写同一项时以 `--clean-disable` 为准 |
 | `--strict` | 严格模式：内容对照的「疑似缩水」也判失败（默认只警告）。致命校验错误在任何模式下都会判失败 |
 | `--lang LANG` | 指定 EPUB 语言（如 `zh-CN`、`en`、`ja`），默认按正文自动判断 |
 | `--dry-run` | 只进行转换前检查，不生成文件 |

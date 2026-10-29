@@ -64,6 +64,9 @@ await send("Page.addScriptToEvaluateOnNewDocument", {
   source: `(function(){
     window.__TAURI_INTERNALS__ = {
       invoke(c){ if(c==="library_sync") return Promise.resolve([]);
+        if(c==="load_settings") return Promise.resolve({theme:"light",lang:"zh",backend:"auto",output_dir:"output",cli_path:"",clean:{},strict:false,recent:[]});
+        if(c==="clean_baseline") return Promise.resolve({});
+        if(c==="save_settings") return Promise.resolve(null);
         if(c==="check_env") return Promise.resolve({pandoc:{status:"ok",version:"3.1.11",path:"C:/bin/pandoc.exe"},engine:{status:"ok",version:"v0.4.3",path:"C:/pdf2epub/pdf2epub.exe"},mineru_configured:true,paddle_configured:false,apikey_path:"C:/Users/x/.pdf2epub/apikey.json"});
         if(c==="preflight") return Promise.resolve(JSON.stringify({files:[],total_ocr_pages:0,total_shards:0,quota:1000,over_quota:false}));
         return Promise.resolve(null); },
@@ -74,7 +77,7 @@ await send("Page.addScriptToEvaluateOnNewDocument", {
       metadata:{currentWindow:{label:"main"},currentWebview:{windowLabel:"main",label:"main"}},
     };
     window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener(){} };
-    localStorage.setItem("pdf2epub.lang","zh");
+    // 语言与主题现在来自 settings.json(桩见 load_settings),不再走 localStorage
   })();`,
 });
 

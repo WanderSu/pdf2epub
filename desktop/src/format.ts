@@ -2,8 +2,9 @@
 // 都不依赖 React —— 单独成文件是为了能被测试,而不是为了「文件多看起来整洁」。
 import type { StageNode, StageState } from "./events";
 import {
-  CLEAN_DEFAULTS, CLEAN_KEYS, MAX_RECENT, RECENT_KEY,
-  type Backend, type CleanOpts, type FileType, type RecentEntry,
+  CLEAN_DEFAULTS, CLEAN_KEYS, LEGACY_KEYS, MAX_RECENT,
+  type Backend, type CleanKey, type CleanOpts, type FileType, type RecentEntry,
+  type SettingsFile,
 } from "./types";
 
 // ── LOG PARSERS(legacy 兜底:仅在事件流缺失时使用)────────────────────────────
@@ -102,30 +103,106 @@ export function backendFromPlan(b: string): Backend {
   return "Auto";
 }
 
-export function loadCleanOpts(): CleanOpts {
-  const next: CleanOpts = { ...CLEAN_DEFAULTS };
-  try {
-    const raw = JSON.parse(localStorage.getItem("pdf2epub.clean") || "null");
-    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-      // 新格式:按 key 取值,后端增删/重排都不影响已存的值
-      for (const k of CLEAN_KEYS) {
-        const v = (raw as Record<string, unknown>)[k];
-        if (typeof v === "boolean") next[k] = v;
-      }
-    } else if (Array.isArray(raw)) {
-      // 旧格式(裸数组):按下标迁移一次,之后一律对象
-      CLEAN_KEYS.forEach((k, i) => {
-        if (typeof raw[i] === "boolean") next[k] = raw[i];
-      });
-    }
-  } catch { /* 忽略坏数据 */ }
+// ── 清理开关的三层取值 ────────────────────────────────────────────────────────
+//  内置默认 → `config.yaml` 的 `clean:` 段 → 用户在本机改过的键。
+//  第三层只有**用户亲手改过**的项才有值(settings.json 里存的是稀疏映射),
+//  所以改了 config.yaml 的项在界面上会立刻反映出来 —— 这正是「桌面端也读
+//  config.yaml」的收益,而它只读不写,不会毁掉那份文件的注释、也不怕升级覆盖。
+
+/** 基线取值:config.yaml 里写了就用它,没写才用内置默认。
+ *  不能写成 `baseline[k] ?? CLEAN_DEFAULTS[k]` —— 「配置里没有这一项」是
+ *  「用户没表态」,不是「关掉」。 */
+export function baseValue(baseline: Record<string, boolean>, k: CleanKey): boolean {
+  const b = baseline[k];
+  return typeof b === "boolean" ? b : CLEAN_DEFAULTS[k];
+}
+
+/** 清理开关的最终取值(界面上的复选框状态)。 */
+export function mergeCleanOpts(
+  baseline: Record<string, boolean>,
+  saved: Record<string, boolean> = {},
+): CleanOpts {
+  const next = {} as CleanOpts;
+  for (const k of CLEAN_KEYS) {
+    const s = saved[k];
+    next[k] = typeof s === "boolean" ? s : baseValue(baseline, k);
+  }
   return next;
 }
 
-export function loadRecent(): RecentEntry[] {
+/** 落盘时只写「与基线不同」的键。
+ *
+ *  与基线相同的项等于「用户没意见」—— 留空才会让 config.yaml 继续管着它。
+ *  这也是「恢复默认」能生效的全部原理:把开关拨回基线,保存后这些键就被删掉,
+ *  配置文件的管辖自动恢复(而不是写一句「用默认值」把管辖权永久夺走)。
+ *
+ *  一处**有意的**信息损失:用户显式把某项改成与基线相同的值时,这里认为他没表态,
+ *  以后 config.yaml 一变界面就跟着变。要完全保真得改存「用户动过的键名集合」,
+ *  为这点差别多一份状态不值。 */
+export function diffCleanOpts(
+  opts: CleanOpts,
+  baseline: Record<string, boolean>,
+): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  for (const k of CLEAN_KEYS) {
+    if (opts[k] !== baseValue(baseline, k)) out[k] = opts[k];
+  }
+  return out;
+}
+
+// ── 旧版 localStorage 的一次性迁移 ────────────────────────────────────────────
+
+/** 把旧版 localStorage 里的设置读成一份 settings.json;没有任何旧值时返回 null。 */
+export function readLegacySettings(): SettingsFile | null {
+  const file: SettingsFile = {};
+  const dark = localStorage.getItem(LEGACY_KEYS.theme);
+  if (dark === "1" || dark === "0") file.theme = dark === "1" ? "dark" : "light";
+  const lang = localStorage.getItem(LEGACY_KEYS.lang);
+  if (lang === "en" || lang === "zh") file.lang = lang;
+  const backend = localStorage.getItem(LEGACY_KEYS.backend);
+  if (backend === "auto" || backend === "mineru" || backend === "paddleocr") file.backend = backend;
+  const outDir = localStorage.getItem(LEGACY_KEYS.outputDir);
+  if (outDir) file.output_dir = outDir;
+  const cli = localStorage.getItem(LEGACY_KEYS.cliPath);
+  if (cli) file.cli_path = cli;
+  const strict = localStorage.getItem(LEGACY_KEYS.strict);
+  if (strict === "1" || strict === "0") file.strict = strict === "1";
+  const clean = readLegacyClean();
+  if (clean) file.clean = clean;
+  const recent = readLegacyRecent();
+  if (recent.length > 0) file.recent = recent;
+  return Object.keys(file).length > 0 ? file : null;
+}
+
+/** 旧版把九个开关**全量**存下来,所以只能反推「用户可能改过哪些」:
+ *  与内置默认值相同的项算没改过。旧版那种全量存法最大的毛病就是分不清这两者,
+ *  迁移时按这个口径收窄,搬过来的就是稀疏映射。 */
+function readLegacyClean(): Record<string, boolean> | undefined {
+  const saved: Record<string, boolean> = {};
+  const keep = (k: CleanKey, v: unknown) => {
+    if (typeof v === "boolean" && v !== CLEAN_DEFAULTS[k]) saved[k] = v;
+  };
   try {
-    const raw = JSON.parse(localStorage.getItem(RECENT_KEY) || "[]");
+    const raw = JSON.parse(localStorage.getItem(LEGACY_KEYS.clean) || "null");
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+      for (const k of CLEAN_KEYS) keep(k, (raw as Record<string, unknown>)[k]);
+    } else if (Array.isArray(raw)) {
+      // 更旧的格式(裸数组,按下标对齐)
+      CLEAN_KEYS.forEach((k, i) => keep(k, raw[i]));
+    }
+  } catch { /* 坏数据当没有 */ }
+  return Object.keys(saved).length > 0 ? saved : undefined;
+}
+
+function readLegacyRecent(): RecentEntry[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LEGACY_KEYS.recent) || "[]");
     if (Array.isArray(raw)) return raw.filter(r => r && typeof r.path === "string").slice(0, MAX_RECENT);
-  } catch { /* 忽略坏数据 */ }
+  } catch { /* 坏数据当没有 */ }
   return [];
+}
+
+/** 迁移成功后清掉旧键:留着会让「设置存在哪」有两个答案。 */
+export function clearLegacySettings(): void {
+  for (const key of Object.values(LEGACY_KEYS)) localStorage.removeItem(key);
 }

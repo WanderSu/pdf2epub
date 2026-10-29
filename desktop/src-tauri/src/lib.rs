@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -177,6 +177,9 @@ async fn convert_file(
     cli_path: Option<String>,
     task_id: Option<String>,
     clean_disable: Option<Vec<String>>,
+    //  显式**开启**的清理项。`--clean-disable` 是单向的:config.yaml 里写了 false
+    //  的项光靠它打不开(界面上勾上也会静默无效),所以需要一个对称的入口。
+    clean_enable: Option<Vec<String>>,
     strict: Option<bool>,
     force: Option<bool>,
 ) -> Result<ConvertResult, String> {
@@ -216,6 +219,9 @@ async fn convert_file(
     // 桌面端「清理选项」:关闭的项透传给 CLI(--clean-disable)
     if let Some(list) = clean_disable.filter(|l| !l.is_empty()) {
         cmd.arg("--clean-disable").arg(list.join(","));
+    }
+    if let Some(list) = clean_enable.filter(|l| !l.is_empty()) {
+        cmd.arg("--clean-enable").arg(list.join(","));
     }
     // 「严格校验」开关(默认关):开启后 CLI 生成 EPUB 后做结构校验,有失败项即判该文件失败
     if strict.unwrap_or(false) {
@@ -479,6 +485,174 @@ fn resolve_dir(dir: &str) -> PathBuf {
     }
 }
 
+// ---------- 用户数据落点:%LOCALAPPDATA%\pdf2epub\ ----------
+//
+//  为什么不在 exe 同级:绿色版的「升级」就是覆盖整个安装目录,放在那里的用户数据
+//  每次升级都得靠人工保留(此前 apikey.json / library.json / work / output / logs
+//  全靠人记着)。设置与书库搬到用户目录之后,升级只替换文件,数据一律不动。
+//
+//  仍然留在安装目录的是 `work/` 与 `output/`:它们是**产物**,跟着安装目录走才对。
+
+/// 用户数据目录。接收 base 而不是直接读环境变量,是为了让测试能在临时目录里跑,
+/// 不去碰真实用户数据。
+fn app_data_dir_in(local_appdata: Option<&std::ffi::OsStr>) -> PathBuf {
+    match local_appdata.map(PathBuf::from) {
+        Some(base) => base.join("pdf2epub"),
+        // 拿不到 LOCALAPPDATA(受限环境)时退回 exe 同级:至少还能用,
+        // 不因为一个环境变量缺失就让整个应用起不来。
+        None => std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| PathBuf::from(".")),
+    }
+}
+
+fn app_data_dir() -> PathBuf {
+    app_data_dir_in(std::env::var_os("LOCALAPPDATA").as_deref())
+}
+
+fn settings_path() -> PathBuf {
+    app_data_dir().join("settings.json")
+}
+
+/// settings.json 的内容。**每个字段都可缺省**:旧版本写的文件、或用户手改过的
+/// 文件都要能读进来,缺的字段由前端用内置默认值补齐 —— 读失败不该让人丢设置。
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
+#[serde(default)]
+struct SettingsFile {
+    /// "dark" / "light"
+    theme: Option<String>,
+    /// "zh" / "en"
+    lang: Option<String>,
+    /// auto / mineru / paddleocr
+    backend: Option<String>,
+    output_dir: Option<String>,
+    cli_path: Option<String>,
+    /// **只记用户亲手改过的清理开关**,没记的项听 config.yaml。
+    /// 存全量会把「用户没意见」也变成「用户要这样」,config.yaml 从此管不着它。
+    clean: BTreeMap<String, bool>,
+    strict: Option<bool>,
+    recent: Vec<RecentEntry>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
+#[serde(default)]
+struct RecentEntry {
+    path: String,
+    name: String,
+    at: u64,
+}
+
+/// 读设置文件。**文件不存在时返回 None**:调用方据此把「第一次运行」与
+/// 「文件里恰好没有这一项」分开 —— 前者要跑一次 localStorage 迁移。
+#[tauri::command]
+fn load_settings() -> Option<SettingsFile> {
+    let text = std::fs::read_to_string(settings_path()).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// 写设置文件:先写同目录临时文件再改名(原子替换)。
+/// 直接覆盖时,写一半被杀(关窗口 / 断电)会留下半份 JSON,下次启动读不出来 ——
+/// 用户的全部设置静默归零,而且看不出是谁干的。
+#[tauri::command]
+fn save_settings(settings: SettingsFile) -> Result<(), String> {
+    let path = settings_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("无法创建设置目录 {}: {e}", dir.display()))?;
+    }
+    let text = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, text).map_err(|e| format!("无法写入设置: {e}"))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("无法保存设置: {e}"))?;
+    Ok(())
+}
+
+/// config.yaml 的候选位置。顺序与 Python 侧 `paths.config_dir()` 对齐:
+/// PDF2EPUB_HOME → cwd → exe 同级 → 引擎(cli)所在目录及其祖先。
+/// 最后一段是开发形态要用的:引擎在 `<项目>/.venv/Scripts/`,而 config/ 在项目根。
+fn config_candidates(cli_path: Option<&str>) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    let push = |p: PathBuf, roots: &mut Vec<PathBuf>| {
+        if !p.as_os_str().is_empty() && !roots.contains(&p) {
+            roots.push(p);
+        }
+    };
+    if let Some(home) = std::env::var_os("PDF2EPUB_HOME") {
+        let h = PathBuf::from(home);
+        if h.join("config").is_dir() {
+            push(h, &mut roots);
+        }
+    }
+    if let Ok(c) = std::env::current_dir() {
+        push(c, &mut roots);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(d) = exe.parent() {
+            push(d.to_path_buf(), &mut roots);
+        }
+    }
+    if let Some(cli) = cli_path.filter(|c| !c.trim().is_empty()) {
+        let mut dir = PathBuf::from(cli).parent().map(|p| p.to_path_buf());
+        for _ in 0..4 {
+            let Some(d) = dir else { break };
+            push(d.clone(), &mut roots);
+            dir = d.parent().map(|p| p.to_path_buf());
+        }
+    }
+    roots.into_iter().map(|r| r.join("config").join("config.yaml")).collect()
+}
+
+/// 从 config.yaml 里只取 `clean:` 那一段(键 → 布尔),作为清理开关的**基线**。
+///
+/// 故意不引 YAML 依赖:这里要的只是一个二级映射,而 YAML 的唯一消费者是 Python
+/// 引擎;为九个布尔值装一个解析器不划算。只认「顶层 `clean:` 之后的缩进行」,
+/// 剥掉行尾 `#` 注释;认不出的值跳过。整体读不出任何一项时返回空表,
+/// 由前端用内置默认值补齐 —— 格式变了不该让设置页打不开。
+fn parse_clean_block(text: &str) -> BTreeMap<String, bool> {
+    let mut out = BTreeMap::new();
+    let mut inside = false;
+    for raw in text.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim_end();
+        if line.trim().is_empty() {
+            continue;
+        }
+        if !line.starts_with(|c: char| c.is_whitespace()) {
+            // 顶层键:只有 clean: 之后的缩进块归这里管
+            inside = line.trim() == "clean:";
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        let Some((key, value)) = line.split_once(':') else { continue };
+        let parsed = match value.trim().trim_matches(['"', '\'']) {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        };
+        if let Some(v) = parsed {
+            out.insert(key.trim().to_string(), v);
+        }
+    }
+    out
+}
+
+/// 清理开关的基线(= 引擎那侧的出厂口径)。
+/// 找不到 config.yaml(引擎没装好 / 路径不对)就返回空表,前端用内置默认值 ——
+/// 「引擎没配好」不该表现成「设置页打不开」。
+#[tauri::command]
+fn clean_baseline(app: AppHandle) -> BTreeMap<String, bool> {
+    let state = app.state::<CliConfig>();
+    let cli = state.cli_path.lock().unwrap().clone();
+    for path in config_candidates(Some(&cli)) {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            return parse_clean_block(&text);
+        }
+    }
+    BTreeMap::new()
+}
+
 // ---------- 书库持久化(library.json 数据库) ----------
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
@@ -504,15 +678,50 @@ struct LibraryEntry {
 }
 
 fn library_db_path() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|e| e.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("library.json")
+    app_data_dir().join("library.json")
+}
+
+/// 旧位置(exe 同级)的 library.json —— 只用于一次性迁移。
+fn legacy_library_path() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let p = exe.parent()?.join("library.json");
+    if p == library_db_path() {
+        return None;
+    }
+    p.is_file().then_some(p)
+}
+
+/// 书库从 exe 同级搬进用户目录的一次性迁移。
+///
+/// 接收路径而不是自己去解析,是为了让测试在临时目录里跑,不碰真实用户数据。
+/// **旧文件不删**:删掉它的收益只是「目录干净」,代价是不可逆;留着还能当退路。
+fn migrate_library(new_path: &Path, legacy: Option<&Path>) -> Vec<LibraryEntry> {
+    if new_path.is_file() {
+        return Vec::new();
+    }
+    let Some(old) = legacy else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(old) else {
+        return Vec::new();
+    };
+    let Ok(entries) = serde_json::from_str::<Vec<LibraryEntry>>(&text) else {
+        return Vec::new();
+    };
+    if let Some(dir) = new_path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&entries) {
+        let _ = std::fs::write(new_path, json);
+    }
+    entries
 }
 
 fn load_library() -> Vec<LibraryEntry> {
     let p = library_db_path();
+    if !p.is_file() {
+        return migrate_library(&p, legacy_library_path().as_deref());
+    }
     let Ok(text) = std::fs::read_to_string(&p) else {
         return Vec::new();
     };
@@ -521,6 +730,9 @@ fn load_library() -> Vec<LibraryEntry> {
 
 fn save_library(entries: &[LibraryEntry]) {
     let p = library_db_path();
+    if let Some(dir) = p.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
     if let Ok(json) = serde_json::to_string_pretty(entries) {
         let _ = std::fs::write(p, json);
     }
@@ -1231,6 +1443,9 @@ pub fn run() {
             save_apikey,
             library_sync,
             library_set_meta,
+            load_settings,
+            save_settings,
+            clean_baseline,
             open_epub,
             open_output_dir
         ])
@@ -1496,6 +1711,112 @@ mod tests {
         ));
         // 只是取回路径;「文件在不在」由 resolve_entry_source 判定
         assert_eq!(resolve_entry_source(&entry), None);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    // ── 用户数据落点与设置文件 ──────────────────────────────────────────────
+
+    #[test]
+    fn user_data_lives_under_local_appdata() {
+        // 传 base 的版本是纯函数,测试不去读真实环境变量(并行跑会互相打架)
+        let dir = app_data_dir_in(Some(std::ffi::OsStr::new("C:/Users/x/AppData/Local")));
+        assert_eq!(dir, PathBuf::from("C:/Users/x/AppData/Local").join("pdf2epub"));
+        assert_eq!(dir.join("settings.json").file_name().unwrap(), "settings.json");
+    }
+
+    #[test]
+    fn settings_file_tolerates_missing_fields() {
+        // 旧版本写的文件 / 用户手改过的文件:缺字段必须能读,缺的由前端补默认值
+        let partial: SettingsFile = serde_json::from_str("{\"theme\":\"dark\"}").unwrap();
+        assert_eq!(partial.theme.as_deref(), Some("dark"));
+        assert!(partial.clean.is_empty());
+        assert!(partial.recent.is_empty());
+        assert_eq!(partial.strict, None);
+        // 空对象也不能炸(用户把文件清空了)
+        let empty: SettingsFile = serde_json::from_str("{}").unwrap();
+        assert_eq!(empty.output_dir, None);
+    }
+
+    #[test]
+    fn settings_file_keeps_only_touched_clean_keys() {
+        // 存的是**稀疏**映射:没记的键等于「用户没意见」,交给 config.yaml
+        let s = SettingsFile {
+            clean: [("bold".to_string(), true)].into_iter().collect(),
+            ..Default::default()
+        };
+        let text = serde_json::to_string(&s).unwrap();
+        let back: SettingsFile = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.clean.len(), 1);
+        assert_eq!(back.clean.get("bold"), Some(&true));
+        assert_eq!(back.clean.get("page_numbers"), None);
+    }
+
+    #[test]
+    fn clean_block_read_from_config_yaml() {
+        let text = [
+            "ocr_backend: mineru",
+            "clean:",
+            "  page_numbers: true        # 剔除独立页码行",
+            "  join_lines: true",
+            "  bold: false               # 强调字体默认关",
+            "  headings: true",
+            "pymupdf:",
+            "  write_images: true",
+            "  headings: true",
+        ]
+        .join("\n");
+        let got = parse_clean_block(&text);
+        assert_eq!(got.len(), 4, "只收 clean: 这一段:{got:?}");
+        assert_eq!(got.get("page_numbers"), Some(&true));
+        assert_eq!(got.get("bold"), Some(&false), "行尾注释要被剥掉");
+        // 后面 pymupdf: 段里的同名键不能串进来
+        assert_eq!(got.get("write_images"), None);
+    }
+
+    #[test]
+    fn clean_block_parses_the_shipped_config_yaml() {
+        // 拿仓库里那份**真实**的 config.yaml 过一遍:手写解析器最怕的是真实文件的
+        // 形态(行尾注释、CRLF、缩进)与测试夹具不一致。找不到文件就跳过 ——
+        // 源码交付时没有 config/ 也不该让测试红。
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/config.yaml");
+        let Ok(text) = std::fs::read_to_string(&path) else { return };
+        let got = parse_clean_block(&text);
+        assert_eq!(got.len(), 9, "config.yaml 的 clean: 段应恰好九项:{got:?}");
+        assert_eq!(got.get("bold"), Some(&false), "bold 默认关");
+        assert_eq!(got.get("join_lines"), Some(&true));
+        assert_eq!(got.get("page_numbers"), Some(&true));
+    }
+
+    #[test]
+    fn clean_block_degrades_to_empty_on_odd_input() {
+        // 认不出来就返回空表(前端补内置默认值),绝不 panic
+        assert!(parse_clean_block("").is_empty());
+        assert!(parse_clean_block("clean: {}\r\n").is_empty());
+        assert!(parse_clean_block("clean:\r\n\x20 bold: 也许\r\n").is_empty());
+    }
+
+    #[test]
+    fn library_migrates_out_of_the_install_dir() {
+        let base = std::env::temp_dir().join(format!("pdf2epub-mig-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let old_dir = base.join("install");
+        let new_dir = base.join("userdata");
+        std::fs::create_dir_all(&old_dir).unwrap();
+        let old = old_dir.join("library.json");
+        std::fs::write(&old, r#"[{"path":"C:/out/a.epub","title":"A","author":"B","size":1,"mtime":2,"added_at":3}]"#).unwrap();
+        let new = new_dir.join("library.json");
+
+        let got = migrate_library(&new, Some(&old));
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].title, "A");
+        assert!(new.is_file(), "迁移要把书库落到新位置");
+        assert!(old.is_file(), "旧文件不删 —— 迁移不可逆的代价不值");
+
+        // 已经有新文件时不再迁移(否则会把用户在桌面端删掉的条目又搬回来)
+        std::fs::write(&new, "[]").unwrap();
+        assert!(migrate_library(&new, Some(&old)).is_empty());
+        // 旧位置没有文件 → 空,不报错
+        assert!(migrate_library(&base.join("nope/library.json"), None).is_empty());
         std::fs::remove_dir_all(&base).ok();
     }
 }

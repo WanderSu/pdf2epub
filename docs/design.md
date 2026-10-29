@@ -87,7 +87,7 @@ Windows 下的 PDF → EPUB 转换工具：把电子版 PDF、扫描版 PDF 与�
 - 块结构识别按 markdown 规则而不是硬编码枚举：有序列表标记是**任意数字**（`3. ` `12) ` 都算），只认 `1. ` `2. ` 会让目录里第 3 条起的条目被当成正文与相邻行粘连。
 - **诗行保护**：两行都短（≤ `VERSE_MAX_CHARS`）**且都没有句末标点**时，视为诗行 / 自由分行，不拼接；连续 ≥ 2 行满足该条件时在行尾补 **Markdown 硬换行**（两个空格）。两步共用同一个门槛：不拼只保住 `book.md` 的换行，pandoc 仍会把换行渲染成空格，**硬换行才让诗在阅读器里真的分行**（引用块里的诗同样处理）。标点条件是必需的 —— 只看长度会误伤「短行散文断行」（两行都短，但下一行以句号结尾，那是正常断行）。
 - 清理动作必须打到日志（`[clean] …`），否则规则静默生效、用户无从判断；阶段结束还会报 `applied / suggested / failed` 与页覆盖率。
-- 开关三处同源（默认值唯一来源是 `clean/options.py`）：`config.yaml` 的 `clean:` 段 / CLI `--clean-disable` / 桌面端「清理选项」。
+- 开关三处同源（默认值唯一来源是 `clean/options.py`）：`config.yaml` 的 `clean:` 段 / CLI `--clean-disable`·`--clean-enable` / 桌面端「清理选项」。**覆盖是双向的**：只有 `--clean-disable` 时，「关」是单向的 —— 配置里写死 `false` 的项没有任何办法在单次运行里打开，界面勾上也会静默无效（界面显示 ON、引擎实际 OFF）。
 - 清理失败就判该文件失败（错误码 `clean_failed`），**不产出"没清理过的书"**：那会让用户以为噪声是产物问题。
 
 ## 6. EPUB 产物
@@ -133,14 +133,19 @@ Tauri 2 壳 + React，UI 按设计稿实现；**业务逻辑全部在引擎里**
 - **stdout 与 stderr 都必须被持续读掉**：管道缓冲区写满会让子进程永久阻塞，症状是「转换莫名卡住」。
 - **进度条只许前进**：阶段内进度未知时可以给猜测值，但展示值取历史峰值。
 - **取消 = 结束整棵进程树**（`taskkill /T /F`）：只杀父进程时 PyInstaller 的子进程会继续跑完并计费。
-- 凭证可在设置页写入 `apikey.json`（值不回显）；清理项开关与引擎同源。
+- **用户数据落在 `%LOCALAPPDATA%\pdf2epub\`**（`settings.json` 设置、`library.json` 书目），不在解压目录里：绿色版的「升级」就是覆盖整个安装目录，放在那里的用户数据每次都要靠人工保留。`work/`、`output/`、`logs/` 仍跟安装目录走 —— 它们是产物，不是用户数据。（`apikey.json` 与 `config/` 也还在安装目录，见 §9.5。）
+- **设置只有一份写入路径**：壳读它当初值、把改动写回同一个文件，引擎不认识它。清理开关的取值分三层 —— 内置默认 → `config.yaml` 的 `clean:` 段 → 用户改过的键；`settings.json` 里**只记用户亲手改过的项（稀疏映射）**，没记的项跟随 `config.yaml`。存全量会把「用户没意见」变成「用户要这样」，配置文件从此管不着那几项，而用户不知道自己把可配置性关掉了。
+- **壳把清理开关翻译成两个对称的旗标**：关掉的项 → `--clean-disable`；「勾上了、而引擎那边的基线是关的」项 → `--clean-enable`。后者不可省：`--clean-disable` 只能关，缺少它会让配置里写死 `false` 的开关在界面上勾选无效，而且是静默的。
+- **「恢复默认」= 把开关拨回基线值**，保存时「与基线相同」的键不写盘 —— 那几项于是重新归 `config.yaml` 管。不能实现成「把值写成出厂默认」：点完界面一样，但配置文件从此永远接管不回来。
+- 凭证可在设置页写入 `apikey.json`（值不回显），不参与上述设置文件。
 
 ## 9. 命令行与批处理
 
 ```text
 ebook-converter <文件|目录>... -o output
     [--backend auto|pymupdf|mineru|paddleocr] [--retries N] [--force]
-    [--clean-disable LIST] [--strict] [--lang zh-CN] [--json-events]
+    [--clean-disable LIST] [--clean-enable LIST] [--strict] [--lang zh-CN]
+    [--json-events]
     [--dry-run [--json]] [--dump-ir] [--no-resume]
     [--log FILE|--no-log] [--verbose]
 ```
@@ -160,6 +165,7 @@ ebook-converter <文件|目录>... -o output
   用完即删），或仓库内的 `desktop/.smoke/`、`dist_release/`（均已 gitignore）。
   同一个坑还藏着第二层：MSYS 与原生程序对 `/tmp` 的理解不一致，会让"我明明
   写进了临时目录"的文件凭空消失。
+- **唯一允许写到仓库（与解压目录）之外的，是桌面端的用户数据**：`%LOCALAPPDATA%\pdf2epub\`（`settings.json` / `library.json`）。它跟「用户/机器」走而不是跟安装目录走，所以覆盖升级不会丢设置与书目；取不到 `LOCALAPPDATA` 时退回 exe 同级（受限环境里至少还能用）。其它任何产物一律不新增仓库外目录。
 - **脚本产物路径不用 cwd 相对路径**。`"../../docs"`、`".smoke"` 这类写法成立
   与否取决于从哪启动，换个目录就会解析到仓库外。产物路径一律按脚本自身位置
   推算（`import.meta.url` / `__file__`）再拼成绝对路径，写入前断言没越界。

@@ -82,7 +82,11 @@ describe("规范页校勘流水线", () => {
   const cleanOpts: CleanOpts = { ...CLEAN_DEFAULTS };
   const noop = () => {};
 
-  function renderSettings(opts: CleanOpts = cleanOpts, setCleanOpts = noop) {
+  function renderSettings(
+    opts: CleanOpts = cleanOpts,
+    setCleanOpts = noop,
+    baseline: Record<string, boolean> = {},
+  ) {
     return render(
       <SettingsScreen
         lang="zh"
@@ -97,6 +101,7 @@ describe("规范页校勘流水线", () => {
         setCliPath={noop}
         env={null}
         cleanOpts={opts}
+        cleanBaseline={baseline}
         setCleanOpts={setCleanOpts}
         strictVerify={false}
         setStrictVerify={noop}
@@ -122,5 +127,15 @@ describe("规范页校勘流水线", () => {
     const firstRow = container.querySelector(".group") as HTMLElement;
     firstRow.click();
     expect(setCleanOpts).toHaveBeenCalledTimes(1);
+  });
+
+  it("「恢复默认」把九个开关拨回基线值 —— 保存后这些键会被删掉,重新交给 config.yaml", () => {
+    const setCleanOpts = vi.fn();
+    const baseline = { bold: true, cjk_spaces: false };
+    renderSettings({ ...CLEAN_DEFAULTS, bold: false }, setCleanOpts, baseline);
+    screen.getByText("恢复默认").click();
+    expect(setCleanOpts).toHaveBeenCalledTimes(1);
+    // 拨回的是**基线**(config.yaml 的口径),不是硬编码的出厂默认值
+    expect(setCleanOpts.mock.calls[0][0]).toEqual({ ...CLEAN_DEFAULTS, ...baseline });
   });
 });
