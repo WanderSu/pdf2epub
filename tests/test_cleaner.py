@@ -654,6 +654,40 @@ def test_disable_by_name() -> None:
     assert opts.running_heads is False
 
 
+def test_enable_overrides_config_false() -> None:
+    """配置写死 false 的项,必须能在单次运行里打开。
+
+    只有 --clean-disable 时这是做不到的(它只能关),而桌面端界面又要能把开关
+    勾上 —— 缺了 enable,界面显示 ON、引擎实际 OFF,且没有任何提示。
+    """
+    opts = resolve_options({"clean": {"cjk_spaces": False}}, None, "cjk_spaces")
+    assert opts.cjk_spaces is True
+    assert opts.running_heads is True
+
+
+def test_disable_wins_when_both_lists_mention_the_same_key() -> None:
+    """同一项同时出现在关闭与开启列表里时以「关」为准(保守方向)。"""
+    opts = resolve_options({"clean": {"bold": True}}, "bold", "bold")
+    assert opts.bold is False
+
+
+def test_enable_and_disable_are_disjoint_by_construction() -> None:
+    """桌面端的算法:关掉的项进 disable,「勾上但基线是关」的项进 enable ——
+    两边不可能同时含同一项,所以上面那条优先级在实践中不会被触发。"""
+    defaults = CleanOptions().to_dict()
+    baseline = {**defaults, "cjk_spaces": False}
+    # 用户勾上被配置关掉的那项,并关掉另一项
+    wanted = {**defaults, "cjk_spaces": True, "images": False}
+    disable = [k for k in CLEAN_KEYS if not wanted[k]]
+    enable = [k for k in CLEAN_KEYS if wanted[k] and not baseline[k]]
+    assert not set(disable) & set(enable)
+
+    opts = resolve_options({"clean": {"cjk_spaces": False}}, disable, enable)
+    assert opts.cjk_spaces is True    # 基线 false + 勾上 → 开启生效
+    assert opts.images is False       # 关掉照旧
+    assert opts.bold is False         # 没动过 → 照配置与默认
+
+
 def test_unknown_clean_key_raises() -> None:
     with pytest.raises(ValueError):
         normalize_clean_keys("no_such_rule")

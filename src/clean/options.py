@@ -58,6 +58,11 @@ class CleanOptions:
         for key in normalize_clean_keys(keys):
             setattr(self, key, False)
 
+    def enable(self, keys: Iterable[str] | str | None) -> None:
+        """显式打开若干项(覆盖 ``clean:`` 段里写死的 false)。"""
+        for key in normalize_clean_keys(keys):
+            setattr(self, key, True)
+
     def enabled(self) -> tuple[str, ...]:
         """本次开启的开关名(按 ``CLEAN_KEYS`` 顺序)。"""
         return tuple(k for k in CLEAN_KEYS if getattr(self, k))
@@ -94,8 +99,17 @@ def normalize_clean_keys(keys: Iterable[str] | str | None) -> list[str]:
 
 
 def resolve_options(config: dict | None = None,
-                    disable: Iterable[str] | str | None = None) -> CleanOptions:
-    """配置默认值 + 本次运行的关闭项 → 最终 CleanOptions。"""
+                    disable: Iterable[str] | str | None = None,
+                    enable: Iterable[str] | str | None = None) -> CleanOptions:
+    """配置默认值 + 本次运行的关闭/开启项 → 最终 CleanOptions。
+
+    ``enable`` 是必需的,因为「关」是单向的:只有 ``disable`` 时,``clean:`` 段里
+    写了 ``false`` 的项**没有任何办法**在单次运行里打开。桌面端界面上勾上它也一样
+    无效 —— 它只能传「关闭项」,于是界面显示 ON、引擎实际 OFF,而且是静默的。
+
+    同一项同时出现在两边时以 ``disable`` 为准:关掉是保守的方向。
+    """
     opts = CleanOptions.from_config(config)
+    opts.enable(enable)
     opts.disable(disable)
     return opts

@@ -287,9 +287,9 @@ def policy_table() -> list[dict]:
 
 
 def resolve_or_default(config: dict | None = None,
-                       disable=None) -> CleanOptions:
+                       disable=None, enable=None) -> CleanOptions:
     """配置 → CleanOptions(转发 ``clean.options.resolve_options``,方便调用方只 import 一个名字)。"""
-    return resolve_options(config, disable)
+    return resolve_options(config, disable, enable)
 
 
 __all__ = [

@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 from batch import process_batch, setup_logging
-from clean.options import CLEAN_KEYS, resolve_options
+from clean.options import CLEAN_KEYS, normalize_clean_keys, resolve_options
 from convert import load_config
 from detector.pdf_detector import PDFDetector
 from paths import config_file
@@ -36,6 +36,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true", help="强制重新处理(忽略已完成)")
     p.add_argument("--clean-disable", default=None,
                    help="关闭指定清理项(逗号分隔,可重复): " + ",".join(CLEAN_KEYS))
+    p.add_argument("--clean-enable", default=None,
+                   help="开启指定清理项(逗号分隔,可重复);覆盖 config 里写死的 false。"
+                        "两边都写同一项时以 --clean-disable 为准")
     p.add_argument("--no-resume", action="store_true",
                    help="不复用云端 OCR 已提交的任务(默认中断后可续跑,不重新上传)")
     p.add_argument("--strict", action="store_true",
@@ -80,10 +83,10 @@ def main(argv: list[str] | None = None) -> int:
     paths = [Path(p) for p in args.paths]
     backend_override = None if args.backend == "auto" else args.backend
 
-    # 清理开关:config 的 clean: 段为默认值,--clean-disable 叠加关闭
+    # 清理开关:config 的 clean: 段为默认值,--clean-disable / --clean-enable 叠加覆盖
     try:
         config = load_config(config_file())
-        clean_options = resolve_options(config, args.clean_disable)
+        clean_options = resolve_options(config, args.clean_disable, args.clean_enable)
     except ValueError as e:
         # 配置类失败也发事件:桌面端据此显示「配置错误」而不是笼统的「转换失败」
         print(f"参数错误: {e}", file=sys.stderr)
@@ -100,6 +103,9 @@ def main(argv: list[str] | None = None) -> int:
     disabled = [k for k in CLEAN_KEYS if not getattr(clean_options, k)]
     if args.clean_disable and disabled:
         print(f"[clean] 已关闭清理项: {', '.join(disabled)}")
+    if args.clean_enable:
+        # 显式开启是覆盖配置的动作,必须打出来:否则「我明明勾上了」无从查起
+        print(f"[clean] 本次开启(覆盖配置): {', '.join(normalize_clean_keys(args.clean_enable))}")
 
     # IR 预览(--dump-ir):只切片与落盘,不转换、不联网、不改 EPUB 输出
     if args.dump_ir:
