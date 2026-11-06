@@ -96,6 +96,7 @@ def align_blocks(editable: Sequence[Block], evidence: Sequence[Block],
         "evidence_available": bool(evidence),
         "anchor_hits": 0,
         "containment_hits": 0,
+        "short_attributed": 0,
         "interval_attributed": 0,
         "unmatched": 0,
         "out_of_order": 0,
@@ -111,6 +112,7 @@ def align_blocks(editable: Sequence[Block], evidence: Sequence[Block],
     norms = [normalize(b.text) for b in evidence]
     links: list[Link] = []
     claimed: dict[int, int] = {}          # editable 序号 → page_idx
+    hits: dict[int, int] = {}             # editable 序号 → 命中的证据序号
     cursor = 0
 
     for pos, block in enumerate(blocks):
@@ -148,12 +150,70 @@ def align_blocks(editable: Sequence[Block], evidence: Sequence[Block],
         claimed[pos] = ev.page_idx
         links.append(Link(block_id=block.id, evidence_id=ev.id,
                           confidence="derived", how=how))
+        hits[pos] = hit
         stats["anchor_hits" if how == "anchor" else "containment_hits"] += 1
         cursor = hit + 1
 
+    stats["short_attributed"] = _attribute_short(blocks, evidence, hits, claimed, links)
     stats["interval_attributed"] = _fill_intervals(blocks, claimed)
     stats["page_attribution_missing"] = sum(1 for b in blocks if b.page_idx is None)
+    if links:
+        # 链接按**块顺序**放出:窗口匹配是第二轮补的,追加在尾部会让
+        # ``links_monotonic``(§E.5 不变量 4)读成"顺序乱了"。
+        order_of = {b.id: b.order for b in blocks}
+        links.sort(key=lambda link: order_of.get(link.block_id, 0))
     return tuple(blocks), tuple(links), stats
+
+
+#: 短块(归一化后不足 ``MIN_PREFIX_CHARS`` 字)参与匹配的下限:
+#: 1 个字没有判别力(「我」「他」满页都是),从 2 字起才可能唯一。
+_SHORT_MIN_CHARS = 2
+
+
+def _attribute_short(blocks: list[Block], evidence: Sequence[Block],
+                     hits: dict[int, int], claimed: dict[int, int],
+                     links: list[Link]) -> int:
+    """短块在**已匹配区间**内唯一命中证据时归还页号(跨页续行的唯一出路)。
+
+    为什么需要:``block_anchor`` 对正文块要求归一化后 ≥ ``MIN_PREFIX_CHARS`` 字才有
+    锚点,不足的整块不参与匹配 —— 于是「跨页被切开的短续行」永远拿不到页号,而它们
+    正是 ``join_lines`` 想拼接的对象;没有页归属,跨块删除只能降级为建议(见
+    ``clean.rules._linked_evidence``)。实测一本 319 页的扫描书:27 条拼接候选全部
+    卡在这里,跨页断行一处都没连上。
+
+    判据刻意窄:短块只在**左右两个已匹配块之间**的证据窗口里找**唯一**同文条目,
+    唯一才认。同一短句在窗口内出现两次(「我说:」这类)就放弃 —— 猜错一个页号会
+    污染整本页账,而少一条页归属只是"记录缺失",两者代价不对称。
+    """
+    if not hits:
+        return 0
+    norms = [normalize(b.text) for b in evidence]
+    order = sorted(hits)
+    filled = 0
+    for pos, block in enumerate(blocks):
+        if pos in claimed or block.page_idx is not None:
+            continue
+        if block.kind not in ("text", "heading"):
+            continue
+        key = normalize(block.text)
+        if not (_SHORT_MIN_CHARS <= len(key) < MIN_PREFIX_CHARS):
+            continue
+        before = [p for p in order if p < pos]
+        after = [p for p in order if p > pos]
+        lo = hits[before[-1]] + 1 if before else 0
+        hi = hits[after[0]] if after else len(evidence)
+        found = [j for j in range(lo, hi) if norms[j] == key]
+        if len(found) != 1:
+            continue
+        ev = evidence[found[0]]
+        if ev.page_idx is None:
+            continue
+        blocks[pos] = block.with_page(ev.page_idx, "interval")
+        claimed[pos] = ev.page_idx
+        links.append(Link(block_id=block.id, evidence_id=ev.id,
+                          confidence="derived", how="window"))
+        filled += 1
+    return filled
 
 
 def _fill_intervals(blocks: list[Block], claimed: dict[int, int]) -> int:

@@ -157,15 +157,27 @@ def test_strict_mode_passes_when_everything_is_attributed() -> None:
     assert ir.counts()["page_attribution_missing"] == 0
 
 
-def test_short_blocks_are_not_anchored() -> None:
-    """太短的块没有区分度,不参与匹配(否则"同上"这类词会乱配)。"""
+def test_short_blocks_need_a_unique_match() -> None:
+    """短块没有锚点,只在窗口内**唯一**同文时才归属(新判据见 test_ir_align_short.py)。
+
+    旧行为是一律不配 —— 实测代价太大:跨页断行被切开的续行恰恰都是 3–10 字的短块,
+    它们永远拿不到页号,跨块拼接因此全部停在建议,断行一处都连不上。风险改用更窄
+    的判据挡:同文在窗口里出现两次(「同上」这类常见说法)就放弃。
+    """
     md = "同上\n\n第一段正文,内容足够长,能被锚点匹配上。\n"
     ir = build_ir(md, backend="mineru", total_pages=2, evidence=_evidence(
         ("同上", 0),
         ("第一段正文,内容足够长,能被锚点匹配上。", 1),
     ))
-    assert ir.editable_blocks[0].page_idx is None       # 太短,不配对
+    assert ir.editable_blocks[0].page_idx == 0          # 窗口内唯一 → 归属
     assert ir.evidence_blocks[0].page_idx == 0          # 证据本身仍有页号
+
+    ambiguous = build_ir(md, backend="mineru", total_pages=2, evidence=_evidence(
+        ("同上", 0),
+        ("同上", 0),
+        ("第一段正文,内容足够长,能被锚点匹配上。", 1),
+    ))
+    assert ambiguous.editable_blocks[0].page_idx is None   # 窗口内两次 → 不猜
 
 
 # ---------------------------------------------------------------- 证据类型映射
