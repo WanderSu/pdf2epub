@@ -401,6 +401,98 @@ def add_footnote_marks(epub_path: str | Path) -> int:
     return _rewrite_zip(Path(epub_path), transform)
 
 
+#: pandoc 在「有 title 元数据但不出标题页」时留下的空标题(见 add_title)
+EMPTY_TITLE_H1 = '<h1 class="unnumbered"></h1>'
+
+#: 没有标题可写的那个 unnumbered 段落在导航里留下的**空目录项**(见 add_title)
+_EMPTY_NAV_ITEM = re.compile(r'<li id="toc-li-\d+"><a href="[^"]*"\s*/>\s*</li>')
+#: 目录文档自己的 ``<title>``(pandoc 在没有书名时写成 md 文件名或 UNTITLED)
+_NAV_TITLE = re.compile(r'<title>[^<]*</title>')
+#: ncx 的文档标题
+_NCX_DOCTITLE = re.compile(r'(<docTitle>\s*<text>)[^<]*(</text>)')
+_EMPTY_NCX_ITEM = re.compile(
+    r'<navPoint id="navPoint-\d+">\s*<navLabel>\s*<text>\s*</text>\s*</navLabel>'
+    r'\s*<content src="[^"]*"\s*/>\s*</navPoint>')
+
+
+def add_title(epub_path: str | Path, title: str, *, toc_label: str = "目录") -> bool:
+    """把书名写进 OPF 的 ``dc:title``(pandoc 没拿到书名时用),返回是否改动。
+
+    **为什么不让 pandoc 自己写**:pandoc 只要拿到 ``--metadata title``,即使关了标题页
+    (``--epub-title-page=false``),也会在**正文第一个文件**顶上插一个
+    ``<h1 class="unnumbered">书名</h1>``。当正文里有同名章节时(同名短篇集很常见),
+    两个 section 得到**同一个 id**,EPUB 导航里两条目录项都指向那个 h1 —— 实测结果
+    是章节条目整个丢失、点进去停在书名页。所以「不要标题页」时干脆不把书名交给
+    pandoc,产物侧再补 ``dc:title``:标题只留在元数据里,不再进正文。
+
+    幂等:已有 ``dc:title`` 就不再插;OPF 没有 ``xmlns:dc`` 时直接放弃。
+
+    ``toc_label``:目录页自己的标题。**不是书名** —— pandoc 有书名时会拿书名当目录页
+    标题(读者点开目录看到"烧纸"而不是"目录"),没书名时则写 ``UNTITLED``;两种都不对,
+    这里统一写成"目录"(``nav.xhtml`` 的 ``<title>`` 与 ``<h1 id="toc-title">``、
+    ``toc.ncx`` 的 ``<docTitle>``、OPF2 ``guide`` 里那份目录标题)。
+    """
+    title = (title or "").strip()
+    if not title:
+        return False
+    block = f"    <dc:title>{escape(title)}</dc:title>\n"
+
+    def transform(file_name: str, data: bytes) -> tuple[bytes, int]:
+        changed = 0
+        if file_name.endswith((".xhtml", ".html")):
+            # 没有书名可插时 pandoc 留下一个**空**的 ``<h1 class="unnumbered">``,
+            # 顺手删掉:它在阅读器里只是一行空白。
+            text = data.decode("utf-8", errors="replace")
+            if EMPTY_TITLE_H1 in text:
+                text = text.replace(EMPTY_TITLE_H1, "")
+                changed += 1
+            cleaned = _EMPTY_NAV_ITEM.sub("", text)
+            if cleaned != text:
+                text = cleaned
+                changed += 1
+            # 目录页(以及各文件 head)的书名:pandoc 没拿到书名时写的是 UNTITLED
+            title_xml = escape(title)
+            toc_xml = escape(toc_label)
+            # 章节文件 head 里的书名(封面页常是 UNTITLED)
+            cleaned = text.replace("<title>UNTITLED</title>",
+                                   f"<title>{title_xml}</title>")
+            # 目录页自己的标题:目录就是"目录",不是书名
+            cleaned = cleaned.replace('<h1 id="toc-title">UNTITLED</h1>',
+                                      f'<h1 id="toc-title">{toc_xml}</h1>')
+            cleaned = cleaned.replace('<h1 id="toc-title">' + title_xml + "</h1>",
+                                      f'<h1 id="toc-title">{toc_xml}</h1>')
+            if file_name.endswith("nav.xhtml"):
+                cleaned = _NAV_TITLE.sub(f"<title>{toc_xml}</title>", cleaned, count=1)
+            if cleaned != text:
+                text = cleaned
+                changed += 1
+            data = text.encode("utf-8")
+        if file_name.endswith(".ncx"):
+            text = data.decode("utf-8", errors="replace")
+            cleaned = _EMPTY_NCX_ITEM.sub("", text)
+            cleaned = _NCX_DOCTITLE.sub(
+                lambda m: m.group(1) + escape(toc_label) + m.group(2), cleaned)
+            if cleaned != text:
+                data = cleaned.encode("utf-8")
+                changed += 1
+        if file_name.endswith(".opf") and b"</metadata>" in data:
+            text = data.decode("utf-8", errors="replace")
+            if "xmlns:dc" in text and "<dc:title" not in text:
+                cut = text.rindex("</metadata>")
+                text = text[:cut] + block + text[cut:]
+                changed += 1
+            # OPF2 的 guide 里也有一份目录标题(老阅读器用它),同样是 UNTITLED
+            fixed = text.replace('type="toc" title="UNTITLED"',
+                                 f'type="toc" title="{escape(toc_label)}"')
+            if fixed != text:
+                text = fixed
+                changed += 1
+            data = text.encode("utf-8")
+        return data, changed
+
+    return _rewrite_zip(Path(epub_path), transform) > 0
+
+
 def add_contributor(epub_path: str | Path, name: str, *, role: str = "trl") -> bool:
     """把译者写进 OPF 的 `dc:contributor`(角色 `trl` = translator),返回是否改动。
 
@@ -456,6 +548,18 @@ def _run_pandoc(cmd: list[str], *, allow_drop_title_page: bool = False):
     logger.warning("当前 pandoc 不支持 %s,将保留生成的标题页(建议升级到 2.11+)", flag)
     return subprocess.run([a for a in cmd if a != flag], capture_output=True,
                           text=True, encoding="utf-8", errors="replace")
+
+
+def _has_h1(md_text: str, title: str) -> bool:
+    """正文里是否已有一级标题的文字与书名相同(归一化后比较)。"""
+    want = re.sub(r"\s+", "", title)
+    if not want:
+        return False
+    for line in md_text.splitlines():
+        m = re.match(r"^#[ 	]+(.*\S)[ 	]*$", line)
+        if m and re.sub(r"\s+", "", m.group(1)) == want:
+            return True
+    return False
 
 
 def build_epub(
@@ -518,6 +622,15 @@ def build_epub(
         source_md = book_md.parent / f"{book_md.stem}.pandoc.md"
         source_md.write_text(prepared, encoding="utf-8")
 
+    if title_page and title and _has_h1(md_text, title):
+        # 正文里已经有一个与书名同名的**一级标题**:再让 pandoc 生成标题页,两者会得到
+        # 同一个 section id,EPUB 导航里两条目录项指向同一处(实测:同名短篇集的第二个
+        # 「烧纸」跳回书名页,nav 里章节条目整个丢失)。
+        title_page = False
+    # 书名只在「要 pandoc 生成标题页」时才交给它:否则它会在正文首个文件顶上插一个
+    # 同名 h1(见 add_title),和同名章节撞 id。
+    emit_title = bool(title_page and title)
+
     depth = toc_depth or min(4, max(2, heading_depth(md_text)))
     cmd = [
         _resolve_pandoc(), str(source_md), "-o", str(epub),
@@ -530,9 +643,10 @@ def build_epub(
         "--css", str(css),
         "--resource-path", str(work_dir),
         "--mathml",
-        "--metadata", f"title={title}",
         "--metadata", f"lang={lang or 'zh-CN'}",
     ]
+    if emit_title:
+        cmd += ["--metadata", f"title={title}"]
     if author:
         cmd += ["--metadata", f"author={author}"]
     if identifier:
@@ -559,6 +673,11 @@ def build_epub(
     # 当成功结果交给上层(is_done 只认容器完整性,空文件会在这里就暴露)。
     if not epub.exists() or epub.stat().st_size == 0:
         raise PandocError(f"Pandoc 返回成功但没有写出 EPUB(产物缺失或为空): {epub}")
+    if title and not emit_title:
+        # 目录页标题:中文书用「目录」,其它语言用 Table of Contents(与阅读器惯例一致)
+        add_title(epub, title,
+                  toc_label="目录" if str(lang or "zh-CN").lower().startswith("zh")
+                  else "Table of Contents")
     # 脚注回链:pandoc 的 epub3 writer 不写 doc-backlink,产物侧补上(没有脚注就不动文件)
     add_footnote_marks(epub)
     # 译者:pandoc 没有 translator → dc:contributor 的映射,产物侧补(见 add_contributor)
