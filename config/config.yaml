@@ -31,6 +31,8 @@ hybrid:
 clean:
   page_numbers: true        # 剔除独立页码行
   running_heads: true       # 剔除页眉页脚重复行(跨页反复出现的短行)
+  front_matter: true        # 卷首去重:第 1 页若只是书名/作者/出版社,从正文删掉
+                            # (封面另由 cover.jpg 承担,避免书名出现两遍)
   join_lines: true          # 跨页断行连接
   ocr_spaces: true          # OCR 异常空格合并(中文行内被拆开的拉丁词)
   cjk_spaces: true          # 中文排版空格修正(汉字/中文标点/数字之间的空格)

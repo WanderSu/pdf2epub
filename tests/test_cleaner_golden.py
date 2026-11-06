@@ -59,6 +59,10 @@ GOLDEN_MAP: dict[str, list[str]] = {
     "cjk_spaces": ["cjk_spaces", "should_not_touch", "code_fence_protected", "page_markers",
                    "structure_lines"],
     "dup_headings": ["dup_headings"],              # 正例:相邻同名同级去重;反例:被正文隔开/不同级别保留
+    "front_matter": ["front_matter", "front_matter_scan"],
+    #   正例:文首「书名 + 作者 + 出版社」三段整块删除(封面已另作 cover.jpg),
+    #   同一样本里章为 ## 也一并归一到 #(两条规则的联动效果一起钉住);
+    #   front_matter_scan:扫描书,靠证据层 page_idx 定位第 1 页(而不是字符位置)
     "headings": ["headings", "should_not_touch", "code_fence_protected"],
     "images": ["images_refs"],                     # 正例:引用缺失上报;存在时不动
     # P6 新增的两条**无条件**规则(不是用户开关,恒在):
@@ -93,7 +97,7 @@ def _load_evidence(name: str) -> tuple[list, str, int]:
 
 
 def _run(name: str, md: str, options: CleanOptions,
-         images_dir: Path | None) -> tuple[str, tuple[str, ...]]:
+         images_dir: Path | None, title_hint: str | None = None) -> tuple[str, tuple[str, ...]]:
     """跑 IR 引擎(与正式流程同一入口 ``clean.clean_text``)。"""
     evidence, backend, total_pages = _load_evidence(name)
     outcome = clean_text(
@@ -101,6 +105,7 @@ def _run(name: str, md: str, options: CleanOptions,
         total_pages=total_pages, producer=Producer.from_backend(
             backend, source=f"{name}.md", variant="original"),
         options=options, images_dir=images_dir, write_reports_to=None,
+        title_hint=title_hint,
     )
     return outcome.md_after, outcome.issues
 
@@ -123,7 +128,8 @@ def test_cleaner_golden(name: str, tmp_path: Path) -> None:
         for filename in opts_data["images"]:
             (images_dir / filename).write_bytes(b"")
 
-    actual, issues = _run(name, source, options, images_dir)
+    actual, issues = _run(name, source, options, images_dir,
+                          title_hint=opts_data.get("title_hint"))
 
     assert actual == expected, f"样本 {name} 的实际输出与期望不一致"
     for issue in opts_data.get("expect_issues", []):

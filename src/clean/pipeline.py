@@ -168,6 +168,7 @@ def clean_text(md: str, *, backend: str = UNKNOWN, source: str = "",
                producer: Producer | None = None,
                options: CleanOptions | None = None,
                images_dir: str | Path | None = None,
+               title_hint: str | None = None,
                write_reports_to: str | Path | None = None,
                clock=None) -> CleanOutcome:
     """清理一段 Markdown,返回结果(不落盘,除非给了 ``write_reports_to``)。
@@ -176,6 +177,7 @@ def clean_text(md: str, *, backend: str = UNKNOWN, source: str = "",
     不给就记 ``unknown`` —— 不猜。页账与回放都靠它归属"哪次 OCR 的产物"。
     ``evidence``:后端给的 ``content_list``(只读证据层)。没有它时页账记
     ``undecided``,跨块拼接的删除降级为建议(不猜、不补页号)。
+    ``title_hint``:书名(文件名/元数据推断),只给 ``front_matter`` 判定卷首页用。
     ``clock``:取时刻的来源(默认 ``time.time``)。注入它是为了让"报告里的时间"
     可测 —— 测试要能不靠真实等待就断言起止时刻有效。
     """
@@ -200,7 +202,7 @@ def clean_text(md: str, *, backend: str = UNKNOWN, source: str = "",
     try:
         ir_after, reports = propose_rules(
             ir, rule_ids, allow_rules=auto_apply_rules(options),
-            options=options.to_dict(), clock=clock,
+            options=options.to_dict(), title_hint=title_hint, clock=clock,
         )
     except IRError as exc:
         raise CleanEngineError(f"清理失败({source or '未命名输入'}): {exc}") from exc
@@ -251,6 +253,7 @@ def clean_book_md(book_md: str | Path, *, backend: str = UNKNOWN,
                   producer: Producer | None = None,
                   options: CleanOptions | None = None,
                   images_dir: str | Path | None = None,
+                  title_hint: str | None = None,
                   write_reports: bool = True, clock=None) -> CleanOutcome:
     """就地清理 ``work/<书>/book.md``(正式转换流程的入口)。
 
@@ -258,7 +261,7 @@ def clean_book_md(book_md: str | Path, *, backend: str = UNKNOWN,
     :class:`CleanEngineError` 时 book.md 保持原样,批处理会把该文件判失败,
     而不是留下"清理了一半"的产物。
 
-    ``clock`` 透传给 :func:`clean_text`(可注入时钟,便于断言报告时间戳)。
+    ``title_hint`` / ``clock`` 透传给 :func:`clean_text`(卷首页判定与可注入时钟)。
     """
     path = Path(book_md)
     try:
@@ -270,6 +273,7 @@ def clean_book_md(book_md: str | Path, *, backend: str = UNKNOWN,
         raw, backend=backend, source=source or str(path), evidence=evidence,
         total_pages=total_pages, variant=variant, producer=producer, options=options,
         images_dir=images_dir if images_dir is not None else path.parent / "images",
+        title_hint=title_hint,
         write_reports_to=path.parent if write_reports else None, clock=clock,
     )
     if outcome.changed:

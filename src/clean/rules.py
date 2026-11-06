@@ -5,18 +5,19 @@
 ``markdown.textrules`` 导入(END_PUNCT、JOIN_MIN_CHARS、_is_catalog_entry…),
 不复制一份 —— 两份判据迟早各自漂移。
 
-九条规则里哪些改正文、哪些只报结论:
+十条规则里哪些改正文、哪些只报结论:
 
 ======================  ==================================================
 page_numbers            整行是页码 → 删除该行(整块只有页码 → 删块)
 running_heads           全文重复 ≥3 次的短行 → 删除该行
+front_matter            第 1 页只是书名/作者/出版社 → 整块删除(封面已另作 cover.jpg)
 cjk_spaces              汉字/中文标点/数字之间的空格 → 去掉
 blank_lines             块间 ≥3 连续换行 → 2(文首空白走文档级 set_prefix)
 trailing_spaces         行尾空白 → 去掉(代码/公式/脚注/注释块整体跳过)
 join_lines              被断开的段落拼接 + 诗行补硬换行
 ocr_spaces              OCR 拆开的拉丁词合并(``Py Mu PDF`` → ``PyMuPDF``)
 dup_headings            相邻同级同名标题去重
-headings                空标题删除 + 首个标题提升 + 层级跳跃收敛
+headings                空标题删除 + 整书层级基准归一 + 层级跳跃收敛
 images                  **只校验**:引用缺失写进报告 issues,不改正文
 ======================  ==================================================
 
@@ -300,29 +301,285 @@ def propose_dup_headings(ir: BookIR, *, first_id: int = 1) -> RuleProposal:
     return RuleProposal("dup_headings", tuple(patches), notes)
 
 
+# ================================================================ front_matter
+
+#: 卷首页判定的阈值(全部可数,写在这里以便与判据同源审计)
+FRONT_MAX_BLOCKS = 8          # 卷首页最多几块
+FRONT_MAX_CHARS = 120         # 卷首页最多几个非空白字符
+FRONT_MAX_LINE = 60           # 单块最长字符数(超过就不再是"版式字段",是正文)
+FRONT_TITLE_SIMILARITY = 0.7  # 与书名的相似度门槛
+
+#: 卷首页里常见的版式字段(出版社/版次/作者…):短行且无句末标点
+_FRONT_FIELD_RE = re.compile(r"^(?:著|编著|主编|译|译注|编|撰|等|出版社|出版|发行|印次|版次|ISBN|定价)")
+
+
+def _norm_title(text: str) -> str:
+    """书名归一:去空白(含全角)、去书名号与常见间隔符 —— 只用于比相似度。"""
+    text = re.sub(r"[\s\u3000]+", "", text or "")
+    return re.sub(r"[《》〈〉“”‘’\"'·・:：,，.。、!！?？\-—–_/\\()（）\[\]【】]+", "", text).lower()
+
+
+def _title_similarity(a: str, b: str) -> float:
+    """两个书名的相似度(0~1):完全相同 1;互为子串按长度比;否则编辑相似度。"""
+    import difflib
+
+    left, right = _norm_title(a), _norm_title(b)
+    if not left or not right:
+        return 0.0
+    if left == right:
+        return 1.0
+    ratio = difflib.SequenceMatcher(None, left, right).ratio()
+    if left in right or right in left:
+        ratio = max(ratio, min(len(left), len(right)) / max(len(left), len(right)))
+    return ratio
+
+
+def _same_title(a: str, b: str) -> bool:
+    """是不是同一个书名。
+
+    子串关系单独放行:文件名常写「巴勒斯坦问题」而封面写「巴勒斯坦问题:一部历史」,
+    按编辑相似度只有 0.6,但那显然是同一本书。较短的 ≥4 字才认,避免「中国」这种
+    两个字撞上「中国哲学史」。
+    """
+    left, right = _norm_title(a), _norm_title(b)
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    if left in right or right in left:
+        return min(len(left), len(right)) >= 4
+    return _title_similarity(left, right) >= FRONT_TITLE_SIMILARITY
+
+
+def _heading_text(block: Block) -> str:
+    return block.text.strip().lstrip("#").strip()
+
+
+def _looks_like_front_field(text: str) -> bool:
+    """一行"版式字段"(封面/扉页上的书名、作者、出版社…):短、无句末标点。"""
+    line = text.strip()
+    if not line or len(line) > 24:
+        return False
+    return line[-1] not in END_PUNCT
+
+
+def propose_front_matter(ir: BookIR, *, first_id: int = 1,
+                         title_hint: str | None = None) -> RuleProposal:
+    """卷首(封面/扉页)去重:第 1 页若只是书名、作者、出版社这类版式字段,整块删除。
+
+    为什么必须删:封面图已作为 ``cover.jpg`` 放在 EPUB 首位(见 ``batch.render_cover``),
+    OCR 再把同一页识成一堆文字,读者打开后就会看到**两遍**书名与作者 —— 再加上
+    ``dc:title`` 生成的标题页,一本扫描书能出现三处书名。
+
+    判据(四条同时成立才删,缺一条只留原样):
+      1. 该块属于**第 1 页**(``prov.page_idx == 0``);没有页归属证据时,退化为
+         "文首连续块",且必须能在其中找到与书名高度相似(≥0.7)的标题;
+      2. 整页块数 ≤ ``FRONT_MAX_BLOCKS``、非空白字符 ≤ ``FRONT_MAX_CHARS``;
+      3. 没有长句:任一可见块超过 ``FRONT_MAX_LINE`` 字或带句末标点 → 判定为正文,
+         整条规则放弃(宁可留一页重复,也不能吃掉第一章的开头);
+      4. 页里要么有与书名相似的标题,要么全是 ≤24 字的短行(纯字段式封面)。
+
+    只动 ``delete_block``,文字一个字节都不改 —— 删错了可以从报告的 before 里原文恢复。
+    """
+    blocks = [b for b in sorted(ir.editable_blocks, key=lambda b: b.order)
+              if not _is_page_marker(b) and str(b.extra.get("role") or "") != "html_comment"]
+    if len(blocks) < 2:
+        return RuleProposal("front_matter")
+
+    page1 = [b for b in blocks if b.prov.page_idx == 0]
+    positional = False
+    if page1:
+        # 第 1 页 = 文首连续的一段,直到第一块明确属于后面某页。中间那些**没有页归属**
+        # 的块(太短、对齐不出锚点的版式字段,如「xx 出版社」)留在段内 —— 它们物理上
+        # 就在第 1 页,只是对齐阶段挂不上证据。少了这一步,封面页会只删掉书名、
+        # 把作者和出版社留在正文第一屏。
+        page1 = []
+        for blk in blocks:
+            idx = blk.prov.page_idx
+            if idx is not None and idx > 0:
+                break
+            page1.append(blk)
+    else:
+        # 没有页归属(电子版 PDF / 现成 md):只能按"文首、到第一个章节标题之前"取。
+        # 这条路更危险,所以额外要求必须命中书名 —— 认不出书名就不动。
+        positional = True
+        for blk in blocks:
+            if page1 and blk.kind == "heading" and is_chapter_anchor(_heading_text(blk)):
+                break
+            page1.append(blk)
+            if len(page1) > FRONT_MAX_BLOCKS:
+                return RuleProposal("front_matter")
+
+    if not page1 or len(page1) >= len(blocks):
+        return RuleProposal("front_matter")      # 整本书都在"第 1 页":不可能,不猜
+
+    visible = [b.text.strip() for b in page1 if b.text.strip()]
+    chars = sum(len(re.sub(r"\s+", "", b.text)) for b in page1)
+    if len(page1) > FRONT_MAX_BLOCKS or chars > FRONT_MAX_CHARS:
+        return RuleProposal("front_matter")
+    if any(len(t) > FRONT_MAX_LINE or t[-1] in END_PUNCT for t in visible):
+        return RuleProposal("front_matter")
+    # 封面/扉页不会写着「第一章」:第 1 页上有章节标注 → 这是正文的第一页
+    # (实测:章标题独占一页时,旧判据会把它当成"字段式封面"删掉)
+    if any(b.kind == "heading" and is_chapter_anchor(_heading_text(b)) for b in page1):
+        return RuleProposal("front_matter")
+
+    headings = [b for b in page1 if b.kind == "heading"]
+    matched: Block | None = None
+    if title_hint:
+        for blk in headings:
+            if _same_title(_heading_text(blk), title_hint):
+                matched = blk
+                break
+    fields_only = all(_looks_like_front_field(t) for t in visible) and bool(visible)
+    if matched is None and (not fields_only or len(page1) < 2):
+        # 认不出书名、又只有孤零零一块:那更像"只排了一行标题的正文页",不删
+        return RuleProposal("front_matter")
+    if positional and matched is None:
+        # 没有页证据又没有书名命中:文首那几行可能是序言/引文,不删
+        return RuleProposal("front_matter")
+    # 卷首页之后必须紧接章节标题:否则这更像是正文开头(有些书直接从第一段起)
+    rest = [b for b in blocks if b.order > page1[-1].order]
+    nxt = next((b for b in rest if b.kind == "heading"), None)
+    if nxt is not None and not is_chapter_anchor(_heading_text(nxt)) and matched is None:
+        return RuleProposal("front_matter")
+
+    patches = []
+    id_counter = first_id
+    for blk in page1:
+        patches.append(Patch.propose(
+            patch_id=f"p{id_counter:04d}", rule_id="front_matter", block=blk,
+            operation="delete_block", evidence=_whole_block_evidence(blk),
+            confidence="derived", risk="low",
+        ))
+        id_counter += 1
+
+    note = (f"卷首页: 删除 {len(patches)} 块(封面/扉页已在封面图上)"
+            + (f", 书名取自卷首《{_heading_text(matched)}》" if matched is not None else ""))
+    return RuleProposal("front_matter", tuple(patches), (note,))
+
+
 # ================================================================ headings
 
+#: 部/卷级结构标注(中文「第X部/编/卷/篇」,英文 Part/Book)
+_PART_ANCHOR_RE = re.compile(
+    r"^\s*(?:第\s*[一二三四五六七八九十百千〇零两\d]+\s*[部编卷篇]"
+    r"|(?:Part|PART|Book|BOOK)\s+[\dIVXLC]+)")
+#: 章级结构标注(中文「第X章/回/节」,英文 Chapter N,数字编号,前言/附录一类)
+_CHAPTER_ANCHOR_RE = re.compile(
+    r"^\s*(?:第\s*[一二三四五六七八九十百千〇零两\d]+\s*[章回节讲]"
+    r"|(?:Chapter|CHAPTER)\s+[\dIVXLC]+"
+    r"|\d{1,3}\s*[.、]\s*\S"
+    r"|(?:序|序言|楔子|引言|导言|前言|后记|跋|结语|尾声|附录|致谢|参考文献|索引)\s*$)")
+
+
+def is_chapter_anchor(text: str) -> bool:
+    """标题文字是否带章节结构标注(只用于判定"这一行是章",不做语义猜测)。"""
+    line = (text or "").strip()
+    return bool(line) and bool(_PART_ANCHOR_RE.match(line) or _CHAPTER_ANCHOR_RE.match(line))
+
+
+def _mode_level(levels: list[int]) -> int | None:
+    """出现次数最多的级别;次数相同取更外层(数字更小)的那个。"""
+    if not levels:
+        return None
+    counts: dict[int, int] = {}
+    for lv in levels:
+        counts[lv] = counts.get(lv, 0) + 1
+    return min(counts, key=lambda lv: (-counts[lv], lv))
+
+
+def structure_base_level(units: list[tuple[int, str]]) -> tuple[int | None, str]:
+    """整本书的"章"应该落在第几级(1 = EPUB 的分卷单位)。
+
+    返回 ``(基准级别, 依据说明)``;``None`` 表示不做层级归一 —— 拿不准就不动,
+    因为平移层级会改变 EPUB 的分卷,改错的代价比不改大得多。
+
+    取法:
+      - 有「第X部/卷」(≥2 处)→ 取部级(章保持相对更深:三十章的书不该变成三十个文件);
+      - 否则有「第X章/Chapter N」(≥2 处)→ 取章级;
+      - 都没有 → 退化为"出现 ≥3 次的最浅级别"(最常见的一层就是章节层)。
+
+    三道安全闸:
+      - 基准 >3:整本书的层级异常,不猜;
+      - 基准之上还有标题:那是书名/卷首标题,平移后会与章同级(反而制造重复标题页),
+        留给 ``front_matter`` 先删,这里不动。
+    """
+    if not units:
+        return None, "没有标题"
+    if len(units) == 1:
+        # 只有一条标题的短文本(单章/单节):它本身就是"章节层",该在第 1 级。
+        # 这里不做"有没有书名在上头"的判断 —— 没有第二条标题可比。
+        return units[0][0], "唯一标题"
+    parts = [lv for lv, text in units if _PART_ANCHOR_RE.match(text)]
+    chapters = [lv for lv, text in units
+                if _CHAPTER_ANCHOR_RE.match(text) and not _PART_ANCHOR_RE.match(text)]
+    if len(parts) >= 2:
+        base, how = _mode_level(parts), "部/卷"
+    elif len(chapters) >= 2:
+        base, how = _mode_level(chapters), "章"
+    else:
+        if len(units) < 3:
+            return None, "标题不足 3 个且没有章节标注"
+        levels = [lv for lv, _ in units]
+        lowest = min(levels)
+        if len(units) <= 4:
+            # 极短输入(单章/两章的小册子):层数不足以统计,「最浅的一层」就是章。
+            # 这也是旧的「首个标题提升为 1」唯一还站得住的场景 —— 这里把它换成了
+            # 整篇一起平移,不会出现「第一个抬成 #、其余留在 ##」的半截结构。
+            base, how = lowest, "短文本最浅层"
+        elif levels.count(lowest) >= 3:
+            base, how = lowest, "层级频次"
+        else:
+            return None, "没有可识别的章节标注"
+    if base is None:
+        return None, "没有可识别的章节标注"
+    if base > 3:
+        return None, f"章节基准层级 {base} 过深"
+    above = [lv for lv, _ in units if lv < base]
+    if above:
+        return None, f"基准之上还有 {len(above)} 个标题(书名/卷首),先交给 front_matter"
+    return base, f"按{how}判定基准 {base}"
+
+
 def propose_headings(ir: BookIR, *, first_id: int = 1) -> RuleProposal:
-    """空标题删除 + 标题层级修正。
+    """空标题删除 + **整书层级基准归一** + 层级跳跃收敛。
 
     修正规则(只动 `#` 的个数与"# 后那个空格",不改标题文字):
       - 空标题(只有 `#`,没有文字)→ 删除;
-      - 首个标题若层级 >1 → 提升为 1 级;
+      - **层级基准归一**:章落在第 2 级(或更深)时,全书标题整体上移,让"章"回到
+        第 1 级(见 :func:`structure_base_level`);
       - 层级跳跃(`#` 后直接 `###`)→ 收为「上一级 +1」。
+
+    **为什么不再"只提升首个标题"**:旧逻辑把第一个标题抬到 1 级,其余不动。OCR 常见
+    形态是「书名 `#` + 章 `##`」,书名被 ``front_matter`` 删掉之后,旧逻辑会把
+    *第一章* 抬成 `#`、其余章留在 `##` —— 结构比修之前更乱。改成整体平移后,
+    相对深度(部→章→节)原样保留,章回到第 1 级。
+
+    第 1 级是 EPUB 的分卷单位:pandoc 只在 1 级标题处切文件,脚注(``<aside>``)落在
+    **所在章节末尾**。全书只有一个 1 级标题时,整本就一个文件,注释自然全堆到书末 ——
+    这是"注释总在最后"的真正原因,不是脚注链路的问题。
 
     正文与层级放在**同一条 Patch** 里(``replace_text`` 允许带 ``after.level``):
     拆成两条会让"改层级"与"改文本"在应用期互相把对方的 before 校验弄失效。
     """
     patches: list[Patch] = []
     notes: list[str] = []
-    dropped = promoted = leveled = 0
+    dropped = leveled = 0
     id_counter = first_id
-    prev_level: int | None = None
 
-    for blk in sorted(ir.editable_blocks, key=lambda b: b.order):
-        if blk.kind != "heading" or blk.level is None:
-            continue
-        text = blk.text.strip().lstrip("#").strip()
+    headings = [b for b in sorted(ir.editable_blocks, key=lambda b: b.order)
+                if b.kind == "heading" and b.level is not None]
+    units = [(b.level, _heading_text(b)) for b in headings if _heading_text(b)]
+    base, why = structure_base_level(units)
+    delta = (base - 1) if base and base > 1 else 0
+    if delta:
+        notes.append(f"标题层级: 整体上移 {delta} 级({why})")
+
+    prev_level: int | None = None
+    shifted = 0
+    for blk in headings:
+        text = _heading_text(blk)
         if not text:
             patches.append(Patch.propose(
                 patch_id=f"p{id_counter:04d}", rule_id="headings", block=blk,
@@ -333,11 +590,11 @@ def propose_headings(ir: BookIR, *, first_id: int = 1) -> RuleProposal:
             dropped += 1
             continue
         level = blk.level
-        if prev_level is None:
-            if level > 1:
-                level = 1
-                promoted += 1
-        elif level > prev_level + 1:
+        if delta:
+            level = max(1, level - delta)
+            if level != blk.level:
+                shifted += 1
+        if prev_level is not None and level > prev_level + 1:
             level = prev_level + 1
             leveled += 1
         prev_level = level
@@ -354,8 +611,10 @@ def propose_headings(ir: BookIR, *, first_id: int = 1) -> RuleProposal:
 
     if dropped:
         notes.append(f"空标题: 删除 {dropped} 行")
-    if promoted or leveled:
-        notes.append(f"标题层级: 修正 {promoted + leveled} 处")
+    if shifted:
+        notes.append(f"标题层级: 平移 {shifted} 个标题")
+    if leveled:
+        notes.append(f"标题层级: 收敛跳跃 {leveled} 处")
     return RuleProposal("headings", tuple(patches), tuple(notes))
 
 
@@ -1040,6 +1299,7 @@ def check_image_refs(md: str, images_dir) -> tuple[str, ...]:
 _PROPOSERS = {
     "page_numbers": propose_page_numbers,
     "running_heads": propose_running_heads,
+    "front_matter": propose_front_matter,
     "cjk_spaces": propose_cjk_spaces,
     "blank_lines": propose_blank_lines,
     "trailing_spaces": propose_trailing_spaces,
@@ -1049,11 +1309,15 @@ _PROPOSERS = {
     "headings": propose_headings,
 }
 
+#: 需要额外上下文(书名)的规则:其余规则一律只吃 ``ir`` —— 不做语义猜测
+_CONTEXT_RULES = frozenset({"front_matter"})
+
 
 def propose_rules(ir: BookIR, rule_ids: tuple[str, ...] | None = None, *,
                   allow_apply: bool = False,
                   allow_rules: frozenset[str] = frozenset(),
                   options: dict | None = None,
+                  title_hint: str | None = None,
                   clock=None) -> tuple[BookIR, list]:
     """按管线顺序连续提案并应用(每条规则一次 apply、一份报告)。
 
@@ -1065,6 +1329,9 @@ def propose_rules(ir: BookIR, rule_ids: tuple[str, ...] | None = None, *,
     ``clock``:取时刻的可注入来源(默认 ``time.time``)。**必须**由调用方注入或用
     默认时钟,不能把起止时刻写死 —— 报告是审计依据,说不出"这次跑的起止时刻"
     就没法回答"这一份报告是哪一次运行产出的"(P8:此前恒为 0)。
+
+    ``title_hint``:书名(文件名/元数据推断)。只有 ``front_matter`` 用它判断
+    "这一页上的大标题是不是书名";其它规则不接受这个参数(不做语义猜测)。
 
     返回 ``(final_ir, reports)``;patch_id 跨规则连续分配。
     """
@@ -1083,7 +1350,8 @@ def propose_rules(ir: BookIR, rule_ids: tuple[str, ...] | None = None, *,
                 continue            # bold/images 不是文本改写规则,不产 Patch
             raise ValueError(f"未实现的规则: {rule_id!r}(已实现: "
                              f"{', '.join(_PROPOSERS)})")
-        proposal = proposer(current, first_id=next_id)
+        extra = {"title_hint": title_hint} if rule_id in _CONTEXT_RULES else {}
+        proposal = proposer(current, first_id=next_id, **extra)
         if not proposal.patches:
             continue
         # 起止时刻交给 apply_patches 用 clock 取:这里若传 started_at=0/finished_at=0,

@@ -183,13 +183,13 @@ def test_deterministic_view_ignores_timestamps() -> None:
     assert early.deterministic_view() == late.deterministic_view()
 
 
-def test_default_options_are_the_nine_clean_keys() -> None:
+def test_default_options_are_the_clean_keys() -> None:
     from clean.options import CLEAN_KEYS
 
     options = default_options()
     assert set(options) == set(CLEAN_KEYS)
-    assert len(options) == 9
     assert options["bold"] is False            # 与 cleaner.CleanOptions 默认值一致
+    assert options["front_matter"] is True     # 卷首去重默认开(封面已另作 cover.jpg)
     assert list(_report().run.options) == list(CLEAN_KEYS)
 
 

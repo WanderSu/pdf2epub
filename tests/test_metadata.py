@@ -4,8 +4,10 @@
 1. 语言不再写死 —— 按正文脚本检测,`--lang` / 配置可覆盖;
 2. `dc:identifier` 稳定 —— 同一本书重转必须拿到同一个 id(否则阅读器当新书,
    书架重复、阅读进度丢失),内容变了才换;
-3. 封面 —— PDF 首页渲染成 JPEG 经 pandoc `--epub-cover-image` 注入,
-   并且**不能**被内容校验当成「多出来的图」。
+3. 封面 —— **第 1 页确实是封面**(整页图 / 只有几行短字段)时,原封面图渲成 JPEG
+   经 pandoc `--epub-cover-image` 注入并排首位,**同时关掉标题页**(否则书名出现两遍);
+   第 1 页是正文时不硬当封面,改回生成标题页。封面图也不能被内容校验当成
+   「多出来的图」。
 
 样本用真实本机链路(PyMuPDF 排版 PDF → 本地后端 → pandoc),不碰云端。
 """
@@ -20,7 +22,7 @@ import pytest
 import batch
 import cli
 from batch import _parse_pdf_date, process_batch, render_cover, source_date, stable_identifier
-from conftest import make_pdf
+from conftest import make_pdf, make_pdf_with_cover
 from epub.verify import verify_epub
 from lang_detect import detect_language, resolve_language
 
@@ -82,11 +84,15 @@ def test_stable_identifier_is_content_based(tmp_path: Path) -> None:
 
 
 def test_metadata_and_cover_end_up_in_the_epub(tmp_path: Path) -> None:
-    pdf = make_pdf(tmp_path / "测试书.pdf", pages=2, with_image=False)
+    # 第 1 页整页是封面图(scanned 书的常态):这样才会走「原封面作 cover.jpg」分支。
+    # backend_override 固定本地后端 —— 封面页没有文字层,自动检测会把它算成扫描页
+    # 而路由到云端 OCR(测试不碰云端)。
+    pdf = make_pdf_with_cover(tmp_path / "测试书.pdf", text_pages=2)
 
-    results = process_batch([pdf], config=dict(CFG), work_root=tmp_path / "work",
+    results = process_batch([pdf], config=dict(CFG), backend_override="pymupdf",
+                            work_root=tmp_path / "work",
                             output_dir=tmp_path / "out", force=True)
-    assert [r.status for r in results] == ["done"]
+    assert [r.status for r in results] == ["done"], [r.error for r in results]
     epub = results[0].epub
     opf = _opf(epub)
 
@@ -102,14 +108,39 @@ def test_metadata_and_cover_end_up_in_the_epub(tmp_path: Path) -> None:
     assert verify_epub(epub).ok
 
 
-def test_cover_is_not_reported_as_extra_or_orphan_image(tmp_path: Path) -> None:
-    """封面是 pandoc 注入的:内容对照不该把它算成「多出来的图」,也不算孤立图。"""
-    pdf = make_pdf(tmp_path / "测试书.pdf", pages=1, with_image=False)
+def test_cover_page_replaces_the_generated_title_page(tmp_path: Path) -> None:
+    """有封面时不再生成标题页(否则读者会先看到两遍书名:标题页 + 封面)。
 
-    results = process_batch([pdf], config=dict(CFG), work_root=tmp_path / "work",
+    两件事一起验:书名页只有**一处**(cover.xhtml),且它排在阅读顺序首位。
+    """
+    pdf = make_pdf_with_cover(tmp_path / "测试书.pdf", text_pages=2)
+
+    epub = process_batch([pdf], config=dict(CFG), backend_override="pymupdf",
+                         work_root=tmp_path / "work", output_dir=tmp_path / "out",
+                         force=True)[0].epub
+    opf = _opf(epub)
+
+    with zipfile.ZipFile(epub) as z:
+        names = z.namelist()
+    assert "EPUB/text/title_page.xhtml" not in names          # pandoc 标题页已关闭
+    assert "EPUB/text/cover.xhtml" in names                   # 原封面页顶上了
+
+    # 阅读顺序首位就是封面页(不是 nav,也不是第一章)
+    ids = re.findall(r'<itemref idref="([^"]+)"', opf)
+    hrefs = dict(re.findall(r'<item id="([^"]+)"[^>]*href="([^"]+)"', opf))
+    assert hrefs.get(ids[0]) == "text/cover.xhtml", (ids[:2], hrefs)
+
+
+def test_cover_is_not_reported_as_extra_or_orphan_image(tmp_path: Path) -> None:
+    """封面图不算「多出来的图」,也不算孤立图(内容对照只比正文里的图)。"""
+    pdf = make_pdf_with_cover(tmp_path / "测试书.pdf", text_pages=2)
+
+    results = process_batch([pdf], config=dict(CFG), backend_override="pymupdf",
+                            work_root=tmp_path / "work",
                             output_dir=tmp_path / "out", force=True)
 
     result = verify_epub(results[0].epub)
+    assert result.stats["cover"] == 1
     assert result.stats["orphan_images"] == 0
     assert result.stats["images_no_cover"] == 0
     assert result.stats["images"] == 1
@@ -159,7 +190,11 @@ def test_cli_lang_overrides_detection(tmp_path: Path) -> None:
 
 
 def test_cover_rendering_is_optional(tmp_path: Path) -> None:
-    """封面渲染失败/没有 PDF 时不能阻断转换。"""
+    """底层渲染只负责「把这一页画成 JPEG」;失败必须返回 None,不能抛异常打断转换。
+
+    「这一页该不该当封面」不在这里判(见 ``cover.detect_cover``),所以这里给一张
+    普通文字页也照样渲出来 —— 决定权在 ``_process_pdf``。
+    """
     pdf = make_pdf(tmp_path / "书.pdf", pages=1, with_image=False)
 
     cover = render_cover(pdf, tmp_path / "work")

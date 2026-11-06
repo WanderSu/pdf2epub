@@ -81,6 +81,8 @@ RULE_IDS: tuple[str, ...] = (
     "blank_lines",
     # --- P6 加法:行尾空白(同上,legacy 里也是无条件步骤)---
     "trailing_spaces",
+    # --- 卷首去重(封面/扉页已另作 cover.jpg)---
+    "front_matter",
 )
 
 OPERATIONS: tuple[str, ...] = (

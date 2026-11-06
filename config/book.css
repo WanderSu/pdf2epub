@@ -386,6 +386,30 @@ sub {
   margin-bottom: 0;
 }
 
+/* 上面两条是「外层有 .footnotes 包裹」时的写法。再加一条**不依赖外层 class** 的:
+   pandoc 3.x 的实际产物是
+     <section class="footnotes footnotes-end-of-document" epub:type="footnotes">
+       <hr /><aside epub:type="footnote" role="doc-footnote" id="fn1">…
+   `epub|type` 是命名空间选择器,改 class 名、或哪天 aside 被直接放进 body 都还能命中。
+   两套并存是**故意的**:不支持命名空间选择器的老阅读器会整条丢掉,那时还得靠上面
+   那两条 class 规则兜底。左侧细竖线把注释与正文分开,比整段调成灰色更好读。 */
+aside[epub|type~="footnote"] {
+  margin: 0 0 0.5em;
+  padding-left: 0.75em;
+
+  border-left: 2px solid rgba(127, 127, 127, 0.35);
+}
+
+aside[epub|type~="footnote"] p {
+  margin: 0 0 0.3em;
+
+  text-indent: 0;
+}
+
+aside[epub|type~="footnote"] p:last-child {
+  margin-bottom: 0;
+}
+
 /* Pandoc 还会在脚注区顶部插一个 <hr />:与 .footnotes 的 border-top 叠成两条线,
    留 CSS 的那条细线,把 hr 隐掉。 */
 .footnotes>hr {

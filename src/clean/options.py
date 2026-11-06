@@ -17,6 +17,7 @@ from typing import Iterable
 CLEAN_KEYS = (
     "page_numbers",    # 剔除独立页码行
     "running_heads",   # 剔除页眉页脚重复行
+    "front_matter",    # 卷首(封面/扉页)去重:封面已另作 cover.jpg
     "join_lines",      # 跨页断行连接
     "ocr_spaces",      # OCR 异常空格合并
     "cjk_spaces",      # 中文排版空格修正
@@ -37,6 +38,7 @@ class CleanOptions:
 
     page_numbers: bool = True   # 剔除独立页码行
     running_heads: bool = True  # 剔除页眉页脚重复行
+    front_matter: bool = True   # 卷首(封面/扉页)去重
     join_lines: bool = True     # 跨页断行连接
     ocr_spaces: bool = True     # OCR 异常空格合并
     cjk_spaces: bool = True     # 中文排版空格修正

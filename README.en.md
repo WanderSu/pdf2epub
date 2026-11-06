@@ -594,7 +594,16 @@ title: Meditations
 author: Marcus Aurelius
 ```
 
-If the file name does not follow that pattern, the file name is used as the title.
+If the file name does not look like a title (`扫描0001`, `IMG_2043`, `新建 DOC 文档`),
+the resolver keeps looking: first the PDF's own document metadata, then the labelled
+front-matter fields on page 1 (`作者：` `译者：` `出版社：`), and finally the first real
+heading in the body (chapter names and "Preface / Contents" do not count). The `metadata`
+event in the JSON event stream records which level each field came from.
+
+Two rules are absolute: **the author slot holds only the author** — a translator found on
+the title page never becomes a second `dc:creator`, it goes to `dc:contributor` with the
+`trl` role; and a trailing 「著 / 编著 / 主编」 is stripped. `出版社：` becomes
+`dc:publisher`.
 
 </details>
 

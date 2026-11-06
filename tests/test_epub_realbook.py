@@ -3,7 +3,7 @@
 自造小样本能证明规则「写对了」,证明不了「真实书籍转出来是好的」—— 这里拿仓库里
 的真实样本跑**完整链路**(检测 → 提取 → 清理 → pandoc → 双层校验),验收:
 
-  - 封面来自 PDF 首页,且确实被封面页引用、排在阅读顺序首位;
+  - 书名页只有一处:封面页确实是封面时用封面(排阅读顺序首位),否则用标题页;
   - 目录指向真实存在的章节、层级正确;
   - 图片 / 公式 / 表格 / 代码 / 脚注 / 硬换行(诗行)数量与源 Markdown 一致;
   - XHTML 全部是良构 XML(一个 `<br>` 就能毁掉整章);
@@ -62,8 +62,8 @@ def test_real_text_book_passes_both_verification_layers(tmp_path: Path) -> None:
     assert structure.ok
     assert structure.errors == []
     assert structure.warnings == [], [i.message for i in structure.warnings]
-    assert structure.stats["cover"] == 1          # 封面来自 PDF 首页
-    assert structure.stats["images"] >= 3         # 正文图片 + 封面
+    assert structure.stats["cover"] == 0          # 首页是正文页 → 不硬当封面
+    assert structure.stats["images"] >= 2         # 正文插图(没有封面图)
     assert structure.stats["toc_links"] >= 3      # 书名 + 三章
     assert structure.stats["css"] == 1
 
@@ -97,29 +97,30 @@ def test_real_book_epub_is_structurally_valid(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(not TEXT_BOOK.exists(), reason=f"缺少真实样本 {TEXT_BOOK.name}")
-def test_real_book_cover_comes_from_pdf_first_page(tmp_path: Path) -> None:
-    """封面默认取 PDF 首页(而不是 pandoc 的 title page)。"""
-    import pymupdf
+def test_real_book_without_a_cover_page_gets_a_title_page(tmp_path: Path) -> None:
+    """这个样本首页就是正文(不是封面):不拿正文页冒充封面,改生成 pandoc 标题页。
 
+    两条路都只允许**一处**书名页 —— 有封面用封面,没封面用标题页,不能既没封面
+    又不给标题页(读者打开书看到一个"第1章")。
+    """
     result = _convert(TEXT_BOOK, tmp_path)
-    cover = tmp_path / "work" / batch.sanitize_name(TEXT_BOOK.stem) / "cover.jpg"
-    assert cover.exists() and cover.stat().st_size > 0
+    work = tmp_path / "work" / batch.sanitize_name(TEXT_BOOK.stem)
 
-    with pymupdf.open(TEXT_BOOK) as doc:
-        page = doc[0].rect
-    with pymupdf.open(cover) as rendered:
-        image = rendered[0].rect
-
-    # 首页整页渲染、不裁切:长宽比与 PDF 首页一致
-    assert abs((image.width / image.height) / (page.width / page.height) - 1) < 0.02
+    assert not (work / "cover.jpg").exists()               # 没被硬当成封面
 
     with zipfile.ZipFile(result.epub) as z:
+        names = z.namelist()
         opf = z.read("EPUB/content.opf").decode("utf-8")
-        assert 'properties="cover-image"' in opf              # manifest 声明封面
-        assert '<meta name="cover"' in opf                    # EPUB2 阅读器用的那份
-        # 包里的封面就是首页渲染出的那张(不是 title page,也不是别的图)
-        covers = [n for n in z.namelist() if n.lower().endswith((".jpg", ".jpeg", ".png"))]
-        assert any(z.read(n) == cover.read_bytes() for n in covers), covers
+        assert 'properties="cover-image"' not in opf        # manifest 里也没有封面项
+        assert '<meta name="cover"' not in opf
+        assert "EPUB/text/cover.xhtml" not in names
+        assert "EPUB/text/title_page.xhtml" in names        # 标题页顶上了
+        # 书名页里确实写着书名 + 作者(标题页不是空壳)
+        title_page = z.read("EPUB/text/title_page.xhtml").decode("utf-8")
+    title, author = batch.parse_title_author(TEXT_BOOK.stem)
+    assert title in title_page
+    if author:                                   # 文件名里没有作者时只校验书名
+        assert author in title_page
 
 
 @pytest.mark.skipif(not TWO_COLUMN_BOOK.exists(), reason=f"缺少真实样本 {TWO_COLUMN_BOOK.name}")

@@ -1,0 +1,15 @@
+{
+  "note": "front_matter_scan 样本的结构证据层:第 1 页只有书名/作者/出版社三块。",
+  "why": "扫描书的封面经 OCR 会变成一段文字。封面图已作为 cover.jpg 放在首位,\n     这段文字必须从正文里去掉,否则读者会看到两遍书名。判据用证据层的 page_idx\n     定位「第 1 页」,不用字符位置猜。",
+  "backend": "mineru",
+  "total_pages": 3,
+  "items": [
+    { "type": "text", "text": "全球通史", "page_idx": 0, "text_level": 1 },
+    { "type": "text", "text": "[美] 斯塔夫里阿诺斯 著", "page_idx": 0 },
+    { "type": "text", "text": "北京大学出版社", "page_idx": 0 },
+    { "type": "text", "text": "第一编 史前人类", "page_idx": 1, "text_level": 2 },
+    { "type": "text", "text": "人类起源于非洲,随后逐渐扩散到世界各地。", "page_idx": 1 },
+    { "type": "text", "text": "第二编 古典文明", "page_idx": 2, "text_level": 2 },
+    { "type": "text", "text": "古典文明在欧亚大陆的几个中心独立发展起来。", "page_idx": 2 }
+  ]
+}

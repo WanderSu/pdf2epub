@@ -34,6 +34,8 @@ from backends.base import (VARIANT_ORIGINAL, BackendError, collect_evidence,
 from clean import CleanEngineError, CleanOutcome, clean_book_md
 from clean.options import CleanOptions, resolve_options
 from convert import convert_auto, load_config
+from cover import COVER_QUALITY, COVER_WIDTH, CoverInfo, detect_cover
+from cover import render_cover as render_cover_page
 from epub.content import verify_content
 from epub.pandoc import (MISSING_PANDOC_HINT, PandocError, PandocMissingError,
                         build_epub, pandoc_available)
@@ -41,12 +43,10 @@ from epub.verify import (VerifyResult, archive_issue, fatal_issue, verify_epub)
 from ir import Producer
 from lang_detect import resolve_language
 from detector.pdf_detector import PDFType
+from metadata import first_heading, front_fields, pdf_document_meta, resolve_book_meta
 from paths import config_file
 import events
 
-#: 封面 JPEG 宽度 / 质量(PDF 首页渲染,不裁切)
-COVER_WIDTH = 1200
-COVER_QUALITY = 88
 #: 语言检测读取的正文前多少字符(整本读没必要,前几万字足够定脚本)
 LANG_SAMPLE_CHARS = 20000
 #: 失败产物的改名后缀:失败产物要移出「完成判定」的视野,但保留现场供排查
@@ -88,28 +88,19 @@ def _parse_pdf_date(raw: str) -> str | None:
 
 
 def render_cover(pdf: Path, work_dir: Path, *, width: int = COVER_WIDTH,
-                 quality: int = COVER_QUALITY) -> Path | None:
-    """把 PDF 首页渲染成封面 JPEG(见 docs/design.md §6:封面用 PDF 第一页)。
+                 quality: int = COVER_QUALITY,
+                 info: "CoverInfo | None" = None) -> Path | None:
+    """把封面页写成 ``<work>/cover.jpg``(见 :mod:`cover`)。
 
     返回 None 表示这次没做成封面(渲染失败 / 空 PDF)—— 不阻断转换,EPUB 只是没封面。
+    取图规则(原书封面图优先、按主图矩形裁切)在 :func:`cover.render_cover`;
+    这里只负责把路径固定成 ``work/cover.jpg``。
     """
-    try:
-        import pymupdf
-
-        work_dir = Path(work_dir)
-        work_dir.mkdir(parents=True, exist_ok=True)
-        with pymupdf.open(pdf) as doc:
-            if doc.page_count == 0:
-                return None
-            page = doc[0]
-            zoom = width / max(1.0, page.rect.width)
-            pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom))
-            out = work_dir / "cover.jpg"
-            pix.save(str(out), jpg_quality=quality)
-        return out if out.exists() and out.stat().st_size else None
-    except Exception as e:  # noqa: BLE001 - 封面失败不影响正文
-        logger.warning("封面渲染失败(%s): %s", pdf.name, e)
-        return None
+    out = Path(work_dir) / "cover.jpg"
+    cover = render_cover_page(pdf, out, info=info, width=width, quality=quality)
+    if cover is None:
+        logger.warning("封面渲染失败(%s);本次 EPUB 不带封面", Path(pdf).name)
+    return cover
 
 
 def epub_language(book_md: Path, override: str | None) -> str:
@@ -604,7 +595,8 @@ def process_one(
 
 def clean_stage(book_md: Path, *, backend: str, work: Path, source: Path,
                 total_pages: int = 0, options: CleanOptions | None = None,
-                images_dir: Path | None = None) -> CleanOutcome:
+                images_dir: Path | None = None,
+                title_hint: str | None = None) -> CleanOutcome:
     """正式清理阶段(IR 引擎的唯一入口)。
 
     P6 起没有第二条路:清理只有 ``clean.clean_book_md`` 一条实现,失败就抛
@@ -617,7 +609,9 @@ def clean_stage(book_md: Path, *, backend: str, work: Path, source: Path,
     - ``backend``:这份 md 是哪个后端产出的(``hybrid(paddleocr)`` 这类复合名原样传);
     - ``source`` + 内容指纹:回放时据此判断"这份 IR 对应的还是不是同一个 PDF";
     - ``total_pages``:后端/检测给出的真实页数(页账的分母),没有就交给证据层;
-    - ``evidence``:段缓存里的 ``content_list``,页归属与跨块删除的唯一结构依据。
+    - ``evidence``:段缓存里的 ``content_list``,页归属与跨块删除的唯一结构依据;
+    - ``title_hint``:书名。``front_matter`` 用它判断"第 1 页那个大标题是不是书名",
+      从而把封面/扉页从正文里去掉(封面图另由 cover.jpg 承担)。
     """
     events.stage("clean", "start")
     bundle = collect_evidence(work, backend=backend)
@@ -632,7 +626,7 @@ def clean_stage(book_md: Path, *, backend: str, work: Path, source: Path,
             book_md, backend=backend, evidence=list(bundle.items),
             total_pages=total_pages or bundle.total_pages,
             variant=VARIANT_ORIGINAL, source=str(source), producer=producer,
-            options=options, images_dir=images_dir,
+            options=options, images_dir=images_dir, title_hint=title_hint,
         )
     except CleanEngineError:
         events.stage("clean", "done", failed=True)
@@ -675,19 +669,43 @@ def _process_pdf(source, config, work_root, output_dir, backend_override, t0, re
                         message=f"{detection.suspicious_pages}/{detection.total_pages} 页疑似文字层损坏",
                         pages=detection.total_pages, suspicious_pages=detection.suspicious_pages)
 
+    # 书名/作者先解析:清理阶段要用它判定「第 1 页那个大标题是不是书名」
+    stem_title, stem_author = parse_title_author(source.stem)
+
     # Markdown 清理(IR 引擎;按 clean_options 开关,失败即判该文件失败)
-    clean_stage(conv.book_md, backend=conv.backend, work=work, source=source,
-                total_pages=(getattr(detection, "total_pages", None)
-                             or int(conv.stats.get("pages") or 0)),
-                options=clean_options, images_dir=conv.images_dir)
+    cleaned = clean_stage(conv.book_md, backend=conv.backend, work=work, source=source,
+                          total_pages=(getattr(detection, "total_pages", None)
+                                       or int(conv.stats.get("pages") or 0)),
+                          options=clean_options, images_dir=conv.images_dir,
+                          title_hint=stem_title)
+
+    # 元数据分级(文件名 > PDF 元数据 > 卷首字段 > 首个 H1)。
+    # 卷首字段要从**清理前**的正文里读(front_matter 规则正是把它们删掉的那一步),
+    # 首个 H1 要从**清理后**的正文里读(清理会把书名那一级标题归一到 H1 之下)。
+    meta = resolve_book_meta(
+        stem_title=stem_title, stem_author=stem_author,
+        pdf_meta=pdf_document_meta(source),
+        front=front_fields(cleaned.md_before),
+        heading=first_heading(cleaned.md_after),
+    )
+    events.emit("metadata", **meta.to_dict())
 
     events.stage("build", "start")
-    title, author = parse_title_author(source.stem)
-    cover = render_cover(source, work)
-    epub = build_epub(conv.book_md, work, output_dir, title=title, author=author, out_name=out_name,
+    # 封面:先判定第 1 页是不是封面,再决定「封面图怎么取 + 要不要生成标题页」。
+    # 两种形态互斥,不会同时出现两张"书名页":
+    #   有封面(整页图 / 只有几十个字的扉页)→ 原书封面图放首位,**不生成**标题页;
+    #   没有封面(第 1 页就是正文)→ 不硬拿正文页当封面,改为生成 pandoc 标题页。
+    info = detect_cover(source)
+    cover = render_cover(source, work, info=info) if info.is_cover else None
+    events.emit("cover", is_cover=info.is_cover, reason=info.reason,
+                image_ratio=round(info.image_ratio, 3), text_chars=info.text_chars)
+    epub = build_epub(conv.book_md, work, output_dir, title=meta.title, author=meta.author,
+                      publisher=meta.publisher, translator=meta.translator,
+                      out_name=out_name,
                       lang=epub_language(conv.book_md, lang_override),
                       identifier=stable_identifier(source, out_name),
-                      date=source_date(source), cover_image=cover)
+                      date=source_date(source), cover_image=cover,
+                      title_page=not info.is_cover)
     events.stage("build", "done", cover=bool(cover))
     result.epub = epub
     events.stage("verify", "start")
@@ -763,11 +781,21 @@ def _process_markdown(source, work_root, output_dir, t0, result, safe_stem, out_
     events.stage("extract", "done", backend="markdown", skipped=True)
     # 现成的 md 没有证据层(没有 content_list):页账记 undecided,
     # 需要结构证据的跨块拼接/删除只产建议 —— 不猜、不补页号
-    clean_stage(book_md, backend="markdown", work=work, source=source,
-                options=clean_options, images_dir=work / "images")
+    stem_title, stem_author = parse_title_author(source.stem)
+    cleaned = clean_stage(book_md, backend="markdown", work=work, source=source,
+                          options=clean_options, images_dir=work / "images",
+                          title_hint=stem_title)
+    # 没有 PDF 元数据这一级:文件名 > 卷首字段 > 首个 H1
+    meta = resolve_book_meta(
+        stem_title=stem_title, stem_author=stem_author,
+        front=front_fields(cleaned.md_before),
+        heading=first_heading(cleaned.md_after),
+    )
+    events.emit("metadata", **meta.to_dict())
     events.stage("build", "start")
-    title, author = parse_title_author(source.stem)
-    epub = build_epub(book_md, work, output_dir, title=title, author=author, out_name=out_name,
+    epub = build_epub(book_md, work, output_dir, title=meta.title, author=meta.author,
+                      publisher=meta.publisher, translator=meta.translator,
+                      out_name=out_name,
                       lang=epub_language(book_md, lang_override),
                       identifier=stable_identifier(source, out_name),
                       date=source_date(source))

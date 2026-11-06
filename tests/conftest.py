@@ -194,6 +194,34 @@ def make_pdf(path: Path, *, pages: int = 2, with_image: bool = True) -> Path:
     return path
 
 
+def make_pdf_with_cover(path: Path, *, text_pages: int = 2) -> Path:
+    """第 1 页整页是一张封面图(模拟扫描书的封面),其余页是正文。
+
+    用来验证「有封面 → 原封面页作 cover.jpg 排首位 + 不生成标题页」这条链路;
+    第 1 页是**图**而不是文字,是因为正文页不该被当成封面(见 ``cover.detect_cover``)。
+    """
+    import pymupdf
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    img = write_png(path.parent / "cover_src.png", size=600)
+    doc = pymupdf.open()
+    cover = doc.new_page(width=595, height=842)
+    cover.insert_image(cover.rect, filename=str(img))
+    for i in range(text_pages):
+        page = doc.new_page(width=595, height=842)
+        page.insert_textbox(
+            pymupdf.Rect(60, 60, 535, 320),
+            f"第 {i + 1} 章 测试标题\n\n"
+            f"这是第 {i + 1} 页用于管线测试的正文段落,内容长度足以被判定为文字页,"
+            f"并以句号结尾;再补一句保证有效字符数稳定超过检测阈值。"
+            f"第二段同样保持足够长度,避免样本被判成扫描版。",
+            fontname="china-s", fontsize=11, lineheight=1.6,
+        )
+    doc.save(path)
+    doc.close()
+    return path
+
+
 def make_fake_text_layer_pdf(path: Path, *, text_pages: int = 2,
                              junk_pages: int = 1) -> Path:
     """生成「部分页文字层损坏(伪文字层)」的 PDF,供检测器 golden 样本使用。

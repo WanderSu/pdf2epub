@@ -17,16 +17,20 @@
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
 import subprocess
 import zipfile
 from pathlib import Path
+from xml.sax.saxutils import escape
 
 from paths import book_css
 
 DEFAULT_CSS = book_css()
+
+logger = logging.getLogger("pdf2epub.pandoc")
 
 #: pandoc 可执行文件名(Windows 上同样是 `pandoc`,PATHEXT 由 shutil.which 处理)
 PANDOC = "pandoc"
@@ -221,6 +225,20 @@ def infer_title(book_md: Path, fallback: str | None = None) -> str:
     return fallback or book_md.parent.name
 
 
+#: 标题行(`#{1,6} 文字`),用于算目录深度
+HEADING_RE = re.compile(r"^(#{1,6})\s+\S", re.MULTILINE)
+
+
+def heading_depth(text: str) -> int:
+    """Markdown 里最深到第几级标题(没有标题时为 1)。
+
+    ``--toc-depth`` 跟着它走,而不是写死 3:章在 1 级、节在 2 级的书,目录写到 3 级
+    只会把三级小标题也塞进去,目录变得又长又碎;反过来只到 1 级的书写 3 也没用。
+    """
+    levels = [len(m.group(1)) for m in HEADING_RE.finditer(FENCE_RE.sub("", text))]
+    return max(levels) if levels else 1
+
+
 #: 脚注块(pandoc 生成:`<aside epub:type="footnote" … id="fn1">…</aside>`)
 FOOTNOTE_ASIDE_RE = re.compile(
     r'(<aside\b[^>]*epub:type="footnote"[^>]*>)(.*?)</aside>', re.S)
@@ -277,23 +295,16 @@ def _rewrite_footnotes(text: str) -> tuple[str, int]:
     return FOOTNOTE_ASIDE_RE.sub(fix, text), changed
 
 
-def add_footnote_marks(epub_path: str | Path) -> int:
-    """给脚注块补序号(`1.`)与「回到正文引用处」的回链(↩),返回改动的脚注条数。
+def _rewrite_zip(path: Path, transform) -> int:
+    """就地重写 EPUB 里的条目,返回改动条数(0 = 没写文件)。
 
-    **为什么要补这两样**:
+    ``transform(name, data) -> (new_data, changed)``。抽出这一层是因为「产物侧补东西」
+    不止一处(脚注回链、译者 contributor),而**重写 zip 的规矩只有一套**:
 
-    - pandoc 3.x 的 epub3 writer 只写正文侧的引用
-      (`<a href="#fn1" class="footnote-ref" id="fnref1" epub:type="noteref">`),
-      **不写**脚注侧的 `doc-backlink`;没有回链时「返回正文」只能靠阅读器自己的
-      返回键,规范推荐的形式是脚注里带 `<a role="doc-backlink">`。
-    - 脚注块(`<aside>`)里**没有序号**:正文标着 1、2、3,书末的注释却是几段没有
-      编号的文字,读者对不上。产物侧补成 `1.`、`2.`……,与正文标注一一对应。
-
-    **只在产物里确实有脚注时才动文件**:没有脚注的书连 zip 都不重写(零风险)。
-    重写时 `mimetype` 必须仍是第一个条目且不压缩(EPUB 规范要求,否则严格阅读器报废)。
-    两处改动都幂等:重复调用不会补出第二条回链或第二个序号。
+    - `mimetype` 必须仍是第一个条目且**不压缩**(EPUB 规范要求,否则严格阅读器报废);
+    - 一条都没改就根本不动文件(零风险);
+    - 先写临时文件再 ``os.replace``,中途失败不会留下半个 EPUB。
     """
-    path = Path(epub_path)
     try:
         with zipfile.ZipFile(path) as zf:
             items = [(i, zf.read(i.filename)) for i in zf.infolist()]
@@ -303,14 +314,9 @@ def add_footnote_marks(epub_path: str | Path) -> int:
     changed = 0
     new_items: list[tuple[zipfile.ZipInfo, bytes]] = []
     for info, data in items:
-        name = info.filename
-        if not name.endswith((".xhtml", ".html", ".htm")) or b"footnote" not in data:
-            new_items.append((info, data))
-            continue
-        text = data.decode("utf-8", errors="replace")
-        text, n = _rewrite_footnotes(text)
+        data, n = transform(info.filename, data)
         changed += n
-        new_items.append((info, text.encode("utf-8")))
+        new_items.append((info, data))
 
     if not changed:
         return 0
@@ -325,6 +331,88 @@ def add_footnote_marks(epub_path: str | Path) -> int:
     return changed
 
 
+def add_footnote_marks(epub_path: str | Path) -> int:
+    """给脚注块补序号(`1.`)与「回到正文引用处」的回链(↩),返回改动的脚注条数。
+
+    **为什么要补这两样**:
+
+    - pandoc 3.x 的 epub3 writer 只写正文侧的引用
+      (`<a href="#fn1" class="footnote-ref" id="fnref1" epub:type="noteref">`),
+      **不写**脚注侧的 `doc-backlink`;没有回链时「返回正文」只能靠阅读器自己的
+      返回键,规范推荐的形式是脚注里带 `<a role="doc-backlink">`。
+    - 脚注块(`<aside>`)里**没有序号**:正文标着 1、2、3,书末的注释却是几段没有
+      编号的文字,读者对不上。产物侧补成 `1.`、`2.`……,与正文标注一一对应。
+
+    **只在产物里确实有脚注时才动文件**:没有脚注的书连 zip 都不重写(零风险)。
+    两处改动都幂等:重复调用不会补出第二条回链或第二个序号。
+    """
+
+    def transform(name: str, data: bytes) -> tuple[bytes, int]:
+        if not name.endswith((".xhtml", ".html", ".htm")) or b"footnote" not in data:
+            return data, 0
+        text, n = _rewrite_footnotes(data.decode("utf-8", errors="replace"))
+        return text.encode("utf-8"), n
+
+    return _rewrite_zip(Path(epub_path), transform)
+
+
+def add_contributor(epub_path: str | Path, name: str, *, role: str = "trl") -> bool:
+    """把译者写进 OPF 的 `dc:contributor`(角色 `trl` = translator),返回是否改动。
+
+    pandoc 认 `--metadata author`,**不认** `translator`:传了也悄无声息地丢掉。
+    而译者既不能塞进 author(阅读器会把译本显示成「柏拉图、郭斌和 著」两个作者),
+    也不该只留在文件名里 —— 规范做法就是 dc:contributor + marc:relators 的 trl。
+
+    幂等:同一名字(或同一 role 的 id)已存在就不再插第二条;OPF 里没有
+    `xmlns:dc`(非标准产物)时也直接放弃,绝不写出半个不合法的 metadata 块。
+    """
+    name = (name or "").strip()
+    if not name:
+        return False
+    element_id = f"epub-contributor-{role}"
+    block = (
+        f'    <dc:contributor id="{element_id}">{escape(name)}</dc:contributor>\n'
+        f'    <meta refines="#{element_id}" property="role" '
+        f'scheme="marc:relators">{role}</meta>\n'
+    )
+
+    def transform(file_name: str, data: bytes) -> tuple[bytes, int]:
+        if not file_name.endswith(".opf") or b"</metadata>" not in data:
+            return data, 0
+        text = data.decode("utf-8", errors="replace")
+        if 'xmlns:dc' not in text or element_id in text or name in text:
+            return data, 0
+        cut = text.rindex("</metadata>")
+        return (text[:cut] + block + text[cut:]).encode("utf-8"), 1
+
+    return _rewrite_zip(Path(epub_path), transform) > 0
+
+
+#: 老 pandoc 不认识某个选项时的 stderr 特征(pandoc 3.x: `Unknown option ...`)
+_UNKNOWN_OPTION_RE = re.compile(r"unknown option|unrecognized option|invalid option",
+                                re.I)
+
+
+def _run_pandoc(cmd: list[str], *, allow_drop_title_page: bool = False):
+    """执行 pandoc;``--epub-title-page`` 不被支持时去掉它重跑一次。
+
+    这个开关是 pandoc 2.11 才加的。老版本遇到未知参数会直接以「未知选项」退出,
+    于是「不要标题页」这个纯显示要求会把整本书变成一次转换失败 —— 为一行 flag
+    赔掉整条链路(含云端 OCR 额度)不值得。所以退化为「照旧生成标题页」并告警,
+    书照出,只是多一页。
+    """
+    proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                          errors="replace")
+    flag = "--epub-title-page=false"
+    if proc.returncode == 0 or not allow_drop_title_page or flag not in cmd:
+        return proc
+    if not _UNKNOWN_OPTION_RE.search(proc.stderr or ""):
+        return proc
+    logger.warning("当前 pandoc 不支持 %s,将保留生成的标题页(建议升级到 2.11+)", flag)
+    return subprocess.run([a for a in cmd if a != flag], capture_output=True,
+                          text=True, encoding="utf-8", errors="replace")
+
+
 def build_epub(
     book_md: str | Path,
     work_dir: str | Path,
@@ -337,6 +425,11 @@ def build_epub(
     identifier: str | None = None,
     date: str | None = None,
     cover_image: str | Path | None = None,
+    title_page: bool = True,
+    toc_depth: int | None = None,
+    publisher: str | None = None,
+    translator: str | None = None,
+    split_level: int = 1,
 ) -> Path:
     """用 Pandoc 将 work/book.md 转为 EPUB,返回 epub 路径。
 
@@ -346,6 +439,14 @@ def build_epub(
     identifier: dc:identifier(稳定 UUID,见 batch.stable_identifier)。
     date: dc:date(ISO 日期)。
     cover_image: 封面 JPEG(pandoc --epub-cover-image)。
+    title_page: 是否让 pandoc 生成「书名 + 作者 + 日期」标题页。**有封面时必须关**:
+        封面本身就写着书名与作者,再生成一张就是两遍(见 src/cover.py)。
+    toc_depth: 目录深度,默认按正文实际最深标题级别算(clamp 2..4)。
+    publisher: dc:publisher(出版社)。只有卷首有「出版社:」时才有值。
+    translator: 译者 —— pandoc 不认 `--metadata translator`,由
+        :func:`add_contributor` 在产物 OPF 里补 `dc:contributor role="trl"`。
+        译者**不进** author:那会让阅读器把译者当成第二个作者。
+    split_level: 分卷级别,默认 1(一章一个 XHTML)。显式传给 pandoc,不靠默认值。
 
     Raises:
         PandocMissingError: pandoc 不在 PATH(环境缺失,不该重试)
@@ -372,9 +473,15 @@ def build_epub(
         source_md = book_md.parent / f"{book_md.stem}.pandoc.md"
         source_md.write_text(prepared, encoding="utf-8")
 
+    depth = toc_depth or min(4, max(2, heading_depth(md_text)))
     cmd = [
         "pandoc", str(source_md), "-o", str(epub),
-        "--toc", "--toc-depth=3",
+        "--toc", f"--toc-depth={depth}",
+        # 显式写死分卷级别:一章一个 XHTML 是「脚注落在本章末尾」的前提,
+        # 而 pandoc 只把每条注释写进它所在的文件。默认值恰好也是 1,但默认值
+        # 会随版本变化、也可能被用户的 PANDOC_* 配置改掉 —— 这本书的目录层级与
+        # 注释位置都建立在这个 1 上,不能靠别人的默认值担保。
+        f"--split-level={split_level}",
         "--css", str(css),
         "--resource-path", str(work_dir),
         "--mathml",
@@ -387,11 +494,16 @@ def build_epub(
         cmd += ["--metadata", f"identifier={identifier}"]
     if date:
         cmd += ["--metadata", f"date={date}"]
+    if publisher:
+        cmd += ["--metadata", f"publisher={publisher}"]
     if cover_image:
         cmd += ["--epub-cover-image", str(cover_image)]
+    if not title_page:
+        # pandoc ≥2.11 才有这个开关;老版本会以「未知参数」退出 —— 由 _run_pandoc
+        # 识别后去掉重试,而不是让整本书因为一个显示选项失败。
+        cmd += ["--epub-title-page=false"]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
-                              errors="replace")
+        proc = _run_pandoc(cmd, allow_drop_title_page=not title_page)
     except FileNotFoundError as e:
         # 极少数情况下 which() 能解析、真正执行时却找不到(Windows: [WinError 2])。
         # 这同样是环境缺失,不是「临时故障」—— 归成可重试错误会让整条链路白跑。
@@ -404,4 +516,7 @@ def build_epub(
         raise PandocError(f"Pandoc 返回成功但没有写出 EPUB(产物缺失或为空): {epub}")
     # 脚注回链:pandoc 的 epub3 writer 不写 doc-backlink,产物侧补上(没有脚注就不动文件)
     add_footnote_marks(epub)
+    # 译者:pandoc 没有 translator → dc:contributor 的映射,产物侧补(见 add_contributor)
+    if translator:
+        add_contributor(epub, translator)
     return epub
