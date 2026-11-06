@@ -63,11 +63,20 @@ _SENTENCE_END = "。！？!?…"
 #: 定位用的锚点长度:取该页第一条正文的这一段前缀,用它反查 md 里的落点
 _ANCHOR_CHARS = 24
 
-#: 锚点最短长度:章首句可能很短(实测「老金见到那个孩子是在一个夏夜。」只有 16 字),
-#: 门槛定高了会把整段跳过,标题就落到第二段之后 —— 也就是「标题前还漏一段」
-_ANCHOR_MIN_CHARS = 4
+#: 锚点最短长度:章首可能是很短的一行(实测小说里紧跟章标题的是个三字栏目名
+#: 「生存者」),门槛定高了会整块跳过,标题就落到它下面 —— 章标题跑到小节标题之后。
+#: 短锚点一律要求整行相等(见 ``usable``),不会因为短就乱配。
+_ANCHOR_MIN_CHARS = 2
 
 _HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.*\S)[ \t]*$")
+
+#: 卷首/卷末的独立部分:目录常常不列它们(实测「译序」只在页眉里出现),
+#: 但它们是货真价实的章节级标题 —— 丢了就会和前后的正文粘成一整章
+_FRONT_BACK_SECTION_RE = re.compile(
+    r"^(译序|自序|代序|序言|序|前言|引言|导言|楔子|后记|后语|译后记|尾声|跋|附录|结语|致谢)")
+
+#: 章号前缀(第X章 / 第X节 / 第X回…):同一章号只该有一个章标题
+_CHAPTER_NO_RE = re.compile("^第[〇零一二三四五六七八九十百千0-9]+[章節节卷篇回]")
 
 #: 目录条目的「标题 … 页码」尾部(页码可以是阿拉伯数字或罗马数字)
 _TOC_TAIL_RE = re.compile(
@@ -97,9 +106,31 @@ def _norm(text: str) -> str:
     return re.sub(r"\s+", "", text)
 
 
+def _fold(text: str) -> str:
+    """比对用的折叠:去空白 + 全角标点折成 ASCII。
+
+    证据层文本与 md 正文常差在标点全半角/空格上(同一句在 ``content_list`` 里是
+    半角逗号、在 ``full.md`` 里是全角):只去空白不够,锚点会假性失配,标题就被
+    插到下一条候选所在的位置 —— 表现为「标题前还漏几段」。
+    """
+    return _norm(text).translate(_PUNCT_FOLD)
+
+
 def _key(text: str) -> str:
     """比对键:去空白 + 全角标点折叠 + 去掉首尾装饰符号。"""
-    return _norm(text).translate(_PUNCT_FOLD).strip("-\"'.,:;<>()*_#").lower()
+    return _fold(text).strip("-\"'.,:;<>()*_#").lower()
+
+
+def _title_key(text: str) -> str:
+    """标题比对键:在 :func:`_key` 基础上再剥掉脚注/公式标记。
+
+    ``第七章 十王 $^{①}$`` 与目录里的 ``第七章 十王`` 是同一个标题;不剥标记,
+    两者会被当成两个标题,层级归一和去重都认不出它。
+    """
+    cleaned = re.sub(r"\$\^\{[^}]*\}\$", "", text)     # $^{①}$
+    cleaned = re.sub(r"\[\^[^\]\s]+\]", "", cleaned)   # [^31]
+    cleaned = re.sub(r"\{#[-\w]+\}", "", cleaned)        # {#id}
+    return _key(cleaned)
 
 
 def _sentence_like(text: str) -> bool:
@@ -142,14 +173,15 @@ def _clean_title(text: str) -> str:
 class _Title:
     """一个待裁决的标题:名称 + 证据层序号(定位用)+ 只有目录页时的印刷页码。"""
 
-    __slots__ = ("key", "text", "ev_idx", "page")
+    __slots__ = ("key", "text", "ev_idx", "page", "kind")
 
     def __init__(self, key: str, text: str, ev_idx: int | None = None,
-                 page: int | None = None) -> None:
+                 page: int | None = None, kind: str = "") -> None:
         self.key = key
         self.text = text
         self.ev_idx = ev_idx
         self.page = page
+        self.kind = kind
 
 
 # ---------------------------------------------------------------- 版面
@@ -176,8 +208,19 @@ def _page_top(block: Block, heights: dict[int, float]) -> bool | None:
 
 # ---------------------------------------------------------------- 索引
 
-def _index_evidence(evidence: Sequence[Block]) -> tuple[dict[str, _Title], set[str]]:
-    """证据层 → (标题候选, 页中部被判成标题的键)。
+def _index_evidence(evidence: Sequence[Block],
+                    toc_keys: set[str] | frozenset[str] = frozenset(),
+                    ) -> tuple[dict[str, _Title], set[str], set[str]]:
+    """证据层 → (标题候选, 被当作标题但其实是一句话的键)。
+
+    两类标题块必须分开看,否则会把**每页都有的书眉**当成章标题:
+
+    - ``heading``(后端给的字号层级)通常是**真标题**:它可能落在页面中部(实测一本
+      小说的章标题在 y≈页高 27% 处),所以不按位置淘汰;只有「页中部 + 看着像一句话」
+      (对白)才记进 ``mid_page`` 等降级。
+    - ``header``(后端判定的页眉位置)既可能是真章标题(书的版式把章名排页首),
+      也可能是**每页重复的书眉**。判据用重复:同一文本出现在 ≥3 个页面上就是书眉,
+      除非目录页也列了它(那是真章名,只是被排成了书眉)。
 
     **不看**「这条文本在证据里是普通正文」:书名页、扉页上的书名/作者在证据层里同样
     是 ``text``,拿它当"该标题是假的"的证据会把书名标题一起降级(实测一本政经读物:
@@ -186,23 +229,30 @@ def _index_evidence(evidence: Sequence[Block]) -> tuple[dict[str, _Title], set[s
     titles: dict[str, _Title] = {}
     mid_page: set[str] = set()
     heights = _page_heights(evidence)
+    pages_of: dict[str, set[int]] = {}
+    for block in evidence:
+        if block.kind in _TITLE_KINDS and block.page_idx is not None:
+            pages_of.setdefault(_title_key(block.text), set()).add(block.page_idx)
     for idx, block in enumerate(evidence):
-        key = _key(block.text)
+        key = _title_key(block.text)
         if not key:
             continue
         if block.kind not in _TITLE_KINDS:
             continue
         text = block.text.strip()
-        top = _page_top(block, heights)
-        # ``header`` 是「这块在页眉位置」的版面判定,位置已经由后端给出;
-        # ``heading`` 只说明层级,位置要自己核:页中部的 heading 多半是句中的强调。
-        if block.kind == "heading" and top is False:
-            mid_page.add(key)
+        if block.kind == "header":
+            repeated = len(pages_of.get(key, ())) >= _RUNNING_HEAD_PAGES
+            if repeated and key not in toc_keys:
+                continue                        # 每页重复 = 书眉
+        elif _sentence_like(text) and _page_top(block, heights) is False:
+            mid_page.add(key)                   # 页中部的一句话(对白),不是标题
             continue
         if key in titles or not _title_like(block):
             continue
-        titles[key] = _Title(key, _clean_title(text), idx, block.page_idx)
-    return titles, mid_page
+        titles[key] = _Title(key, _clean_title(text), idx, block.page_idx,
+                             kind=block.kind)
+    running = {k for k, pages in pages_of.items() if len(pages) >= _RUNNING_HEAD_PAGES}
+    return titles, mid_page, running
 
 
 def _title_like(block: Block) -> bool:
@@ -255,6 +305,26 @@ def _toc_titles(lines: Sequence[str]) -> dict[str, _Title]:
     return found
 
 
+def _dedupe_chapter_numbers(titles: dict[str, _Title], toc_keys: set[str]) -> None:
+    """同一章号只留一个标题(OCR 会把书眉认成不同的字,如「第一章 托神」/「托襟」)。
+
+    真章名在目录里;目录点名的那个优先,目录一条都没命中时才留第一个。没有章号前缀
+    的标题(短篇名)不受影响 —— 同名短篇集里的「烧纸」是章节名,不是重复。
+    """
+    groups: dict[str, list[str]] = {}
+    for key, entry in titles.items():
+        found = _CHAPTER_NO_RE.match(_fold(entry.text))
+        if found:
+            groups.setdefault(found.group(0), []).append(key)
+    for keys in groups.values():
+        if len(keys) < 2:
+            continue
+        kept = [k for k in keys if k in toc_keys] or keys[:1]
+        for key in keys:
+            if key not in kept:
+                titles.pop(key, None)
+
+
 def _drop_running_heads(titles: dict[str, _Title], evidence: Sequence[Block],
                         keep: set[str]) -> None:
     """同名页眉出现在 ≥3 页上 → 是书眉,不当标题(目录页列了它的除外)。"""
@@ -290,9 +360,9 @@ def _anchors_for(title: Block, evidence: Sequence[Block]) -> list[tuple[str, boo
     page, box = title.page_idx, title.prov.bbox
 
     def usable(block: Block) -> tuple[str, bool] | None:
-        if block.kind in _ANCHOR_SKIP_KINDS:
-            return None
-        key = _norm(block.text)
+        if block.kind in _ANCHOR_SKIP_KINDS or block.id == title.id:
+            return None                       # 标题自己不能当锚点(会匹配到标题行本身)
+        key = _fold(block.text)
         if len(key) < _ANCHOR_MIN_CHARS:
             return None
         # 短块必须整行相等:它的文字很可能出现在别处的长段落里(实测:前言里引用了
@@ -329,17 +399,24 @@ def _find_line(lines: Sequence[str], anchor: str, start: int, *,
                exact: bool = False) -> int | None:
     """从 ``start`` 起找锚点所在行(单调前进,避免同一段出现两次时错位)。
 
+    比较用 :func:`_fold`(忽略空白与全半角标点差异),并**剥掉行首的 md 标题标记** ——
+    否则 ``## 死后所留下的`` 配不上锚点 ``死后所留下的``,标题就会跳到本章第 3、4 段
+    之后(实测:楔子、第八章都因此插晚)。
+
     ``exact=True`` 要求整行与锚点相等(锚点本身就是整块的完整文字):短句常常被别处
     的长段落引用,按"包含"匹配会落到引用它的那段文字里。
     """
     for pos in range(max(0, start), len(lines)):
-        norm = _norm(lines[pos])
-        if (norm == anchor) if exact else (anchor in norm):
+        text = lines[pos].strip()
+        while text.startswith("#"):
+            text = text.lstrip("#").strip()
+        folded = _fold(text)
+        if (folded == anchor) if exact else (anchor in folded):
             return pos
     return None
 
 
-def _heading_above(lines: Sequence[str], pos: int, key: str) -> bool:
+def _heading_near(lines: Sequence[str], pos: int, key: str) -> bool:
     """``pos`` 正上方(跳过空行与页码注释)**紧邻**的是不是同名标题。
 
     只认紧邻:同名标题出现在更远的位置时,它八成是书名页上的书名或被正文引用的同一句,
@@ -350,7 +427,7 @@ def _heading_above(lines: Sequence[str], pos: int, key: str) -> bool:
         if not s or _is_page_mark(s):
             continue
         m = _HEADING_RE.match(s)
-        return bool(m) and _key(m.group(2)) == key
+        return bool(m) and _title_key(m.group(2)) == key
     return False
 
 
@@ -389,8 +466,9 @@ def restore_headings(md: str, evidence: Sequence[Block], *,
         return md, ()
 
     lines = md.split("\n")
-    ev_titles, mid_page = _index_evidence(evidence)
     toc = _toc_titles(lines)
+    toc_keys = set(toc)
+    ev_titles, mid_page, running_heads = _index_evidence(evidence, toc_keys)
     hint_key = _key(title_hint) if title_hint else ""
 
     titles: dict[str, _Title] = dict(ev_titles)
@@ -400,9 +478,19 @@ def restore_headings(md: str, evidence: Sequence[Block], *,
             titles[key].text = entry.text
         else:
             titles[key] = entry
-    _drop_running_heads(titles, evidence, keep=set(toc))
+    _drop_running_heads(titles, evidence, keep=toc_keys)
+    if len(toc_keys) >= _MIN_TITLE_SOURCES:
+        # 目录是权威:目录列出来的才是「章」。证据层里其余的 ``heading`` 是章内小节
+        # (实测小说每章下面还有 2–3 个栏目名),保持自己的层级,不提升成章。
+        # 但 ``header`` 类的单次标题要留下:那是「书的版式把章/节名排成页眉」——
+        # 目录不列它(如译序),丢了就少一章。
+        titles = {k: v for k, v in titles.items()
+                  if k in toc_keys
+                  or (v.kind == "header"
+                      and _FRONT_BACK_SECTION_RE.match(_fold(v.text)))}
+    _dedupe_chapter_numbers(titles, toc_keys)
 
-    existing = {_key(m.group(2)) for m in map(_HEADING_RE.match, lines) if m}
+    existing = {_title_key(m.group(2)) for m in map(_HEADING_RE.match, lines) if m}
     struct_keys = {_key(label) for label in _STRUCT_LABELS}
     inserted = promoted = 0
     missing: list[str] = []
@@ -412,17 +500,24 @@ def restore_headings(md: str, evidence: Sequence[Block], *,
                         key=lambda t: t.ev_idx if t.ev_idx is not None else 10 ** 9):
         if entry.key in struct_keys:
             continue
-        if hint_key and entry.key == hint_key and (entry.page or 0) == 0:
-            continue                        # 第 1 页上的书名不是章标题
+        if (entry.page or 0) == 0:
+            continue                        # 第 1 页 = 卷首(书名页),由 front_matter 处理
         pos = None
         if entry.ev_idx is not None:
             for anchor, exact in _anchors_for(evidence[entry.ev_idx], evidence):
                 pos = _find_line(lines, anchor, cursor, exact=exact)
                 if pos is not None:
                     break
-        if pos is not None and entry.key in existing and _heading_above(lines, pos, entry.key):
-            cursor = pos                      # 章首已经有这个标题,不重复插
-            continue
+        if pos is not None and entry.key in existing:
+            if _heading_near(lines, pos, entry.key):
+                cursor = pos                  # 章首已经有这个标题,不重复插
+                continue
+            # 同名标题不在章首 = 别处的同名文字(书名页/正文里的引用),先降级再补
+            for j, line in enumerate(lines):
+                m = _HEADING_RE.match(line)
+                if m and _title_key(m.group(2)) == entry.key:
+                    lines[j] = m.group(2).strip()
+            existing.discard(entry.key)
         if pos is None:
             if len(_norm(entry.text)) < _PROMOTE_MIN_CHARS:
                 missing.append(entry.text)
@@ -450,37 +545,56 @@ def restore_headings(md: str, evidence: Sequence[Block], *,
     # (实测:第二个「烧纸」跳回书名页)。章在书里出现得比书名页晚,所以留最后一个。
     for key in titles:
         spots = [pos for pos, line in enumerate(lines)
-                 if (m := _HEADING_RE.match(line)) and _key(m.group(2)) == key]
+                 if (m := _HEADING_RE.match(line)) and _title_key(m.group(2)) == key]
         for pos in spots[:-1]:
             lines[pos] = _HEADING_RE.match(lines[pos]).group(2).strip()
 
     # 章标题统一到最外层:目录/证据点名的标题若还带着 ``##``(后端标的层级),pandoc
     # 会把它挂到上一章下面 —— 导航里就成了子项,按章切分也跟着错。
     levels = [len(m.group(1)) for m in map(_HEADING_RE.match, lines)
-              if m and _key(m.group(2)) in titles]
+              if m and _title_key(m.group(2)) in titles]
     base = min(levels) if levels else 0
     if base:
         for pos, line in enumerate(lines):
             m = _HEADING_RE.match(line)
-            if not m or _key(m.group(2)) not in titles:
+            if not m or _title_key(m.group(2)) not in titles:
                 continue
             if len(m.group(1)) != base:
                 lines[pos] = "#" * base + " " + m.group(2)
 
     demoted: list[str] = []
     if len(titles) >= _MIN_TITLE_SOURCES:
-        toc_keys = set(toc)
+        first_heading = next((pos for pos, line in enumerate(lines)
+                              if _HEADING_RE.match(line)), None)
+        first_chapter = next((pos for pos, line in enumerate(lines)
+                              if (m := _HEADING_RE.match(line))
+                              and _title_key(m.group(2)) in titles), None)
         for pos, line in enumerate(lines):
             m = _HEADING_RE.match(line)
             if not m:
                 continue
             text = m.group(2).strip()
-            key = _key(text)
+            key = _title_key(text)
             if key in toc_keys:
                 continue                       # 目录点名 = 真章名,不降
+            if (key in running_heads and key not in toc_keys
+                    and pos != first_heading):
+                # 书眉上的文字被 md 写成了标题(实测:每页都印书名,后端把某一页的
+                # 书名标成了 heading)。它每页都有,不是章节标题。
+                lines[pos] = text
+                demoted.append(text[:24])
+                continue
+                demoted.append(text[:24])
+                continue
             if key in titles and not _never_a_title(text):
                 continue                       # 证据层背书
             if _impossible_title(text) or (key in mid_page and _sentence_like(text)):
+                lines[pos] = text
+                demoted.append(text[:24])
+                continue
+            if (len(toc_keys) >= _MIN_TITLE_SOURCES and first_chapter is not None
+                    and pos < first_chapter and text not in _STRUCT_LABELS):
+                # 卷首(第一个章标题之前)的杂标题:版权声明/刊印说明之类
                 lines[pos] = text
                 demoted.append(text[:24])
 

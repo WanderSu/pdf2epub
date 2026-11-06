@@ -69,13 +69,13 @@ def _evidence(*rows):
 def _run(md=MD, rows=None):
     evidence = parse_evidence(
         rows if rows is not None else _evidence(
-            ("header", "第一章 起头", 0),
-            ("text", BODY_A, 0),
-            ("text", "2", 1),
-            ("heading", DIALOGUE, 1, MID),
-            ("header", "第二章 续篇", 2),
-            ("text", BODY_B, 2),
-            ("text", BODY_C, 4),
+            ("header", "第一章 起头", 1),
+            ("text", BODY_A, 1),
+            ("text", "2", 2),
+            ("heading", DIALOGUE, 2, MID),
+            ("header", "第二章 续篇", 3),
+            ("text", BODY_B, 3),
+            ("text", BODY_C, 5),
         ),
         backend="mineru", part_id="book",
     )
@@ -151,12 +151,12 @@ def test_title_block_listed_after_its_own_body_is_still_inserted_on_top() -> Non
     会取到本章第二段甚至下一页,于是标题前留下几段正文。
     """
     rows = _evidence(
-        ("header", "第一章 起头", 0),                      # 标题在第 1 页页首
-        ("text", BODY_A, 0, [10.0, 400.0, 300.0, 440.0]),   # 但块列表里排在标题之前
-        ("text", BODY_B, 0, [10.0, 600.0, 300.0, 640.0]),
-        ("text", "2", 1),
-        ("header", "第二章 续篇", 2),
-        ("text", BODY_C, 2, [10.0, 400.0, 300.0, 440.0]),
+        ("header", "第一章 起头", 1, [10.0, 20.0, 300.0, 40.0]),   # 标题在页首
+        ("text", BODY_A, 1, [10.0, 400.0, 300.0, 440.0]),         # 但块列表里排在标题之前
+        ("text", BODY_B, 1, [10.0, 600.0, 300.0, 640.0]),
+        ("text", "2", 2),
+        ("header", "第二章 续篇", 3),
+        ("text", BODY_C, 3, [10.0, 400.0, 300.0, 440.0]),
     )
     md, _ = _run(rows=rows)
     nl2 = "\n\n"
@@ -170,9 +170,9 @@ def test_short_opening_paragraph_is_used_as_anchor() -> None:
     short = "老金见到那个孩子是在一个夏夜。"
     long_ = "自从来到首尔,老金很少能睡一个安稳觉,要么被儿子的长途电话惊醒。"
     rows = _evidence(
-        ("header", "为了超级明星", 0, [10.0, 20.0, 300.0, 40.0]),
-        ("text", short, 0, [10.0, 400.0, 300.0, 440.0]),
-        ("text", long_, 0, [10.0, 600.0, 300.0, 640.0]),
+        ("header", "为了超级明星", 1, [10.0, 20.0, 300.0, 40.0]),
+        ("text", short, 1, [10.0, 400.0, 300.0, 440.0]),
+        ("text", long_, 1, [10.0, 600.0, 300.0, 640.0]),
     )
     md_in = "无关前言。\n\n" + short + "\n\n" + long_ + "\n"
     md, _ = _run(md=md_in, rows=rows)
