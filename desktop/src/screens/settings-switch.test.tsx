@@ -105,6 +105,7 @@ describe("规范页校勘流水线", () => {
         setCleanOpts={setCleanOpts}
         strictVerify={false}
         setStrictVerify={noop}
+        onInstallPandoc={async () => false}
         onSave={noop}
       />,
     );

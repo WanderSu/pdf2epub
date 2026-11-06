@@ -144,3 +144,60 @@ def test_perms_can_be_disabled(tmp_path: Path, monkeypatch) -> None:
 
     assert paths.api_key_file() == key
     assert seen == []
+
+
+def test_exe_parent_config_used_in_onedir_layout(tmp_path: Path, monkeypatch) -> None:
+    """v0.6+ onedir 布局:引擎在安装根的 cli/ 子目录,config/ 在安装根。
+
+    壳以任意 cwd 调用 → 引擎按「exe 同级 → exe 上级」找到安装根的 config/。
+    """
+    monkeypatch.delenv("PDF2EPUB_HOME", raising=False)
+    install_root = tmp_path / "install"
+    exe_dir = install_root / "cli"
+    cfg = _make_config(install_root)
+    exe_dir.mkdir(parents=True)
+    (exe_dir / "cli.exe").write_bytes(b"")
+    work = tmp_path / "elsewhere"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(exe_dir / "cli.exe"))
+    assert paths.exe_dir() == exe_dir.resolve()
+    assert paths.config_dir() == cfg
+    assert paths.book_css() == cfg / "book.css"
+
+
+def test_exe_sibling_beats_exe_parent(tmp_path: Path, monkeypatch) -> None:
+    """两种布局短暂共存时(升级覆盖):exe 同级(旧)优先于 exe 上级(新)。"""
+    monkeypatch.delenv("PDF2EPUB_HOME", raising=False)
+    install_root = tmp_path / "install"
+    exe_dir = install_root / "cli"
+    exe_dir.mkdir(parents=True)
+    (exe_dir / "cli.exe").write_bytes(b"")
+    cfg_sibling = _make_config(exe_dir)      # 旧布局:cli/config/
+    cfg_parent = _make_config(install_root)  # 新布局:install/config/
+    work = tmp_path / "elsewhere"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(exe_dir / "cli.exe"))
+    assert paths.config_dir() == cfg_sibling
+
+
+def test_api_key_found_in_install_root_for_onedir(tmp_path: Path, monkeypatch) -> None:
+    """onedir 布局:apikey.json 与 config/ 一样在安装根(exe 上级)。"""
+    monkeypatch.delenv("PDF2EPUB_HOME", raising=False)
+    install_root = tmp_path / "install"
+    exe_dir = install_root / "cli"
+    exe_dir.mkdir(parents=True)
+    key = install_root / "apikey.json"
+    key.write_text('{"MinerU": "t"}', encoding="utf-8")
+    work = tmp_path / "elsewhere"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(exe_dir / "cli.exe"))
+    assert paths.api_key_file() == key

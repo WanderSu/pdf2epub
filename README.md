@@ -202,7 +202,7 @@ pdf2epub.exe
 
 桌面版已经包含转换所需的 Python 运行环境，不需要另外安装 Python。
 
-注意保持 `pdf2epub.exe`、`cli.exe` 和 `config/` 在同一个文件夹里，不要把 exe 单独挪出去。
+注意保持 `pdf2epub.exe`、`cli/`（引擎目录）和 `config/` 在同一个文件夹里，不要把 exe 或 `cli/` 单独挪出去；解压目录的整体结构不要打乱。
 
 ### 设置与书库放在哪里
 

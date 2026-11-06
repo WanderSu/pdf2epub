@@ -3,10 +3,11 @@
 config/ 查找顺序:
   1. 环境变量 PDF2EPUB_HOME(项目根)
   2. 当前工作目录下的 config/(CLI 在项目根运行)
-  3. **exe 同级 config/**(打包绿色版:解压目录即根,与发布包约定一致)
-  4. 模块相对位置(源码开发模式)
+  3. **exe 同级 config/**(旧绿色版:解压目录即根)
+  4. **exe 上级 config/**(v0.6+ onedir 布局:引擎在 cli/ 子目录,config/ 在安装根)
+  5. 模块相对位置(源码开发模式)
 
-apikey.json 同理(工作目录 → exe 同级 → 项目根),与桌面端 Rust 侧的
+apikey.json 同理(工作目录 → exe 同级 → exe 上级 → 项目根),与桌面端 Rust 侧的
 候选顺序保持一致,避免「设置页保存了凭证、引擎却读不到」。
 """
 from __future__ import annotations
@@ -30,8 +31,10 @@ _HARDENED: set[str] = set()
 def exe_dir() -> Path | None:
     """冻结(PyInstaller/打包)运行时的 exe 所在目录;源码运行返回 None。
 
-    绿色版把 `pdf2epub.exe`(壳)、`cli.exe`(引擎)、`config/` 放在同级,
-    而引擎可能被壳以任意 cwd 调用(绝对路径),所以必须按 exe 位置找配置。
+    v0.6+ onedir 布局把引擎放在安装根的 `cli/` 子目录(`pdf2epub.exe`(壳)、
+    `cli/cli.exe`(引擎)、`config/` 在安装根),而引擎可能被壳以任意 cwd 调用
+    (绝对路径),所以必须按 exe 位置找配置 —— 同级(旧布局)与上级(新布局)
+    都要认,升级用户解压覆盖后两种布局可能短暂共存。
     """
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
@@ -44,11 +47,16 @@ def _module_root() -> Path:
 
 
 def _roots() -> list[Path]:
-    """按优先级排列的候选根目录(cwd → exe 同级 → 源码根)。"""
+    """按优先级排列的候选根目录(cwd → exe 同级 → exe 上级 → 源码根)。
+
+    exe 上级只在冻结运行时加入:源码模式下 `src/` 的上级也常常是各种
+    无关目录,加进去只会让「碰巧有 config/ 的父目录」劫持定位。
+    """
     roots: list[Path] = [Path.cwd()]
     exe = exe_dir()
     if exe is not None:
         roots.append(exe)
+        roots.append(exe.parent)
     roots.append(_module_root())
     return roots
 

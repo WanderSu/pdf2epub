@@ -4,11 +4,12 @@
     uv run python scripts/check_release.py dist_release/v0.5.0        # 也可给已解压目录
 
 检查项:
-  1. 包内必备文件齐全(pdf2epub.exe / cli.exe / config/config.yaml / config/book.css)
-  2. 在**别的目录**用绝对路径调用 cli.exe 能把 PDF 转成 EPUB(退出码 0)
+  1. 包内必备文件齐全(pdf2epub.exe / cli/cli.exe / config/config.yaml / config/book.css)
+  2. 在**别的目录**用绝对路径调用 cli/cli.exe 能把 PDF 转成 EPUB(退出码 0)
   3. 产物通过 EPUB 结构校验(0 失败)
-  4. cli.exe 取到的是**同级 config/book.css**(改一处标记后重跑,与 EPUB 内嵌 CSS 比对)
-     —— 这一项同时验证「绿色版不依赖 cwd」的配置定位
+  4. cli.exe 取到的是**安装根 config/book.css**(改一处标记后重跑,与 EPUB 内嵌 CSS 比对)
+     —— 这一项同时验证「绿色版不依赖 cwd」的配置定位(v0.6+ onedir 布局:
+     引擎在 cli/ 子目录,config/ 在安装根,靠 exe 上级查找命中)
 """
 from __future__ import annotations
 
@@ -26,7 +27,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from epub.verify import verify_epub   # noqa: E402
 
-REQUIRED = ("pdf2epub.exe", "cli.exe", "config/config.yaml", "config/book.css")
+REQUIRED = ("pdf2epub.exe", "cli/cli.exe", "config/config.yaml", "config/book.css")
 CSS_MARKER = "\n/* release-check: config 定位标记 */\n"
 
 
@@ -68,7 +69,7 @@ def _run_engine(app_dir: Path, pdf: Path, out_dir: Path, cwd: Path) -> subproces
     显式 `--backend pymupdf`:发布包自检必须能在**无网络/无云端凭证**的机器上跑通
     (自检验证的是「引擎可独立完成转换 + 产物结构 + 配置定位」,不是云端 OCR)。
     """
-    cmd = [str(app_dir / "cli.exe"), str(pdf), "-o", str(out_dir),
+    cmd = [str(app_dir / "cli" / "cli.exe"), str(pdf), "-o", str(out_dir),
            "--backend", "pymupdf",
            "--force", "--no-log", "--strict"]
     return subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True,
@@ -152,9 +153,9 @@ def _check(target: Path, tmp: Path, ok, fail, failures: list[str]) -> int:
     for line in tail:
         print(f"    | {line}")
     if proc.returncode != 0:
-        fail(f"cli.exe 退出码 {proc.returncode}: {(proc.stderr or '').strip()[:300]}")
+        fail(f"cli/cli.exe 退出码 {proc.returncode}: {(proc.stderr or '').strip()[:300]}")
         return 1
-    ok("cli.exe 退出码 0")
+    ok("cli/cli.exe 退出码 0")
 
     epubs = list(out_dir.glob("*.epub"))
     if not epubs:
@@ -175,7 +176,7 @@ def _check(target: Path, tmp: Path, ok, fail, failures: list[str]) -> int:
            f"图片 {result.stats.get('img_refs', 0)}, CSS {result.stats.get('css', 0)}")
 
     # ---- 4. 配置定位:改动同级 book.css 必须生效 ----
-    print("\n[4] config 定位(exe 同级 config/book.css)")
+    print("\n[4] config 定位(安装根 config/book.css,引擎在 cli/ 子目录)")
     css_path = app_dir / "config" / "book.css"
     original = css_path.read_text(encoding="utf-8")
     css_path.write_text(original + CSS_MARKER, encoding="utf-8")

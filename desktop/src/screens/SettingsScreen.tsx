@@ -110,7 +110,7 @@ function TokenRow({ lang, label, configured, pending, value, onChange, onClear }
 export function SettingsScreen({
   lang, setLang, darkMode, setDarkMode, backendPref, setBackendPref,
   outputDir, setOutputDir, cliPath, setCliPath, env,
-  cleanOpts, cleanBaseline, setCleanOpts, strictVerify, setStrictVerify, onSave,
+  cleanOpts, cleanBaseline, setCleanOpts, strictVerify, setStrictVerify, onInstallPandoc, onSave,
 }: {
   lang: Lang;
   setLang: (l: Lang) => void;
@@ -128,6 +128,8 @@ export function SettingsScreen({
   cleanBaseline: Record<string, boolean>;
   setCleanOpts: (v: CleanOpts) => void;
   strictVerify: boolean;
+  /** pandoc 缺失时的一键下载(进度 overlay 由 App 渲染);成功返回 true */
+  onInstallPandoc: () => Promise<boolean>;
   setStrictVerify: (v: boolean) => void;
   onSave: () => void;
 }) {
@@ -138,6 +140,7 @@ export function SettingsScreen({
   const [note, setNote] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [pandocBusy, setPandocBusy] = useState(false);
   const [savedFlash, setSavedFlash] = useState(false);
 
   const snapRef = useRef<SettingsSnapshot>({
@@ -228,10 +231,23 @@ export function SettingsScreen({
     } catch { /* 剪贴板不可用时忽略 */ }
   };
 
+  // pandoc 行的 path 非空 = 内置副本(detect_pandoc 只有内置命中才填 path;
+  // PATH 命中时为 null)——与 Rust 侧的约定,前端靠它显示「内置」徽标
+  const pandocBundled = (env?.pandoc.path ?? null) != null;
   const envRows = [
-    { name: t.pandoc, status: env?.pandoc.status ?? "missing", version: env?.pandoc.version ?? null, path: env?.pandoc.path ?? null },
-    { name: t.cli, status: env?.engine.status ?? "missing", version: env?.engine.version ?? null, path: env?.engine.path ?? null },
+    { name: t.pandoc, status: env?.pandoc.status ?? "missing", version: env?.pandoc.version ?? null, path: env?.pandoc.path ?? null, bundled: pandocBundled },
+    { name: t.cli, status: env?.engine.status ?? "missing", version: env?.engine.version ?? null, path: env?.engine.path ?? null, bundled: false },
   ];
+
+  const installPandoc = async () => {
+    if (pandocBusy) return;
+    setPandocBusy(true);
+    try {
+      await onInstallPandoc();
+    } finally {
+      setPandocBusy(false);
+    }
+  };
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
@@ -271,6 +287,9 @@ export function SettingsScreen({
               <div key={item.name} className="flex items-center gap-3 py-2 border-b border-[var(--border)]">
                 <div className={`w-1.5 h-1.5 shrink-0 ${item.status === "ok" ? "bg-[var(--ok)]" : "bg-[var(--danger)]"}`} />
                 <span className="font-mono text-[11px] text-[var(--foreground)] flex-1">{item.name}</span>
+                {item.bundled && (
+                  <span className={`font-mono text-[10px] tracking-[0.08em] px-1.5 py-0.5 border border-[var(--primary)] text-[var(--primary)] ${lang === "zh" ? "cjk font-sans" : ""}`}>{t.pandocBundled}</span>
+                )}
                 {item.version && <span className="font-mono text-[10px] text-[var(--muted-foreground)] tabular-nums">{item.version}</span>}
                 {item.path && <span className="font-mono text-[10px] text-[var(--muted-foreground)] truncate max-w-[280px]">{item.path}</span>}
                 <span className={`font-mono text-[10px] tracking-[0.08em] px-1.5 py-0.5 border ${item.status === "ok" ? "border-[var(--ok)] text-[var(--ok)]" : "border-[var(--danger)] text-[var(--danger)]"}`}>
@@ -281,7 +300,15 @@ export function SettingsScreen({
             {env && env.pandoc.status !== "ok" && (
               <div className="my-2 border-l-[3px] border-[var(--danger)] pl-4 py-2">
                 <p className={`text-[13px] text-[var(--foreground)] mb-2 ${lang === "zh" ? "cjk" : ""}`}>{t.pandocMissing}</p>
+                <p className={`text-[12px] text-[var(--muted-foreground)] mb-3 ${lang === "zh" ? "cjk" : ""}`}>{t.pandocManualHint}</p>
                 <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => void installPandoc()}
+                    disabled={pandocBusy}
+                    className={`font-mono text-[11px] tracking-[0.08em] uppercase border border-[var(--primary)] text-[var(--primary)] px-4 py-1.5 hover:bg-[var(--primary)] hover:text-[var(--background)] disabled:opacity-50 disabled:pointer-events-none ${lang === "zh" ? "cjk font-sans" : ""}`}
+                  >
+                    {pandocBusy ? "…" : t.pandocDownload}
+                  </button>
                   <code className="font-mono text-[11px] text-[var(--foreground)] bg-[var(--secondary)] px-3 py-1">{t.installCmd}</code>
                   <button onClick={copyInstall} className="font-mono text-[10px] tracking-[0.08em] border border-[var(--border)] px-2 py-1 text-[var(--muted-foreground)] hover:text-[var(--foreground)]">
                     {copied ? t.copied : t.copy}

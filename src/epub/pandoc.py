@@ -22,6 +22,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import zipfile
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -38,7 +39,8 @@ PANDOC = "pandoc"
 #: 环境缺失时的提示(装完 pandoc 需要重开终端/桌面端才会进 PATH)
 MISSING_PANDOC_HINT = (
     "未找到 pandoc(生成 EPUB 的必需组件):请安装 pandoc 并确保它在 PATH 中"
-    "(Windows 上装完需要重开终端或桌面端),然后重跑"
+    "(Windows 上装完需要重开终端或桌面端),或把 pandoc.exe 放进安装目录的 "
+    "pandoc/ 子目录,然后重跑"
 )
 
 
@@ -61,8 +63,51 @@ class PandocError(RuntimeError):
     retryable = False
 
 
+def _pandoc_candidates() -> list[str]:
+    """随包内置 pandoc 的候选位置(返回可执行文件绝对路径)。
+
+    查找顺序(命中即止,`pandoc_available` 与真正执行共用同一条链,
+    避免「探测到了、执行时却找不到」):
+      1. 环境变量 PDF2EPUB_PANDOC(显式覆盖,测试/高级用户用)
+      2. exe 同级 pandoc/(旧绿色版:cli.exe 与 pandoc/ 平级)
+      3. exe 上级 pandoc/(v0.6+ onedir 布局:引擎在 cli/ 里,pandoc/ 在安装根)
+      4. 源码根 pandoc/(开发模式:仓库里放了就能用)
+      5. PATH(shutil.which)
+    """
+    candidates: list[str] = []
+    env = os.environ.get("PDF2EPUB_PANDOC")
+    if env:
+        candidates.append(env)
+    exe = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else None
+    if exe is not None:
+        candidates.append(str(exe / "pandoc" / PANDOC_EXE))
+        candidates.append(str(exe.parent / "pandoc" / PANDOC_EXE))
+    candidates.append(str(Path(__file__).resolve().parents[2] / "pandoc" / PANDOC_EXE))
+    return candidates
+
+
+#: pandoc 实际的可执行文件名:Windows 上是 pandoc.exe,其余平台不带后缀
+PANDOC_EXE = "pandoc.exe" if sys.platform == "win32" else "pandoc"
+
+
+def _resolve_pandoc() -> str:
+    """解析 pandoc 可执行路径:内置位置优先,最后回退 PATH 里的裸命令名。
+
+    返回值直接用作子进程 argv[0] —— 内置命中时是绝对路径,PATH 命中时是
+    "pandoc"(交给系统解析,行为与旧版完全一致)。
+    """
+    for cand in _pandoc_candidates():
+        if cand and Path(cand).is_file():
+            return cand
+    if shutil.which(PANDOC):
+        return PANDOC
+    return PANDOC  # 找不到也返回裸名:让调用方在执行时拿到真实的 FileNotFoundError
+
+
 def pandoc_available() -> bool:
-    """pandoc 是否在 PATH 里(只探测,不执行)。"""
+    """pandoc 是否可用(内置目录或 PATH,只探测,不执行)。"""
+    if any(Path(c).is_file() for c in _pandoc_candidates() if c):
+        return True
     return shutil.which(PANDOC) is not None
 
 
@@ -475,7 +520,7 @@ def build_epub(
 
     depth = toc_depth or min(4, max(2, heading_depth(md_text)))
     cmd = [
-        "pandoc", str(source_md), "-o", str(epub),
+        _resolve_pandoc(), str(source_md), "-o", str(epub),
         "--toc", f"--toc-depth={depth}",
         # 显式写死分卷级别:一章一个 XHTML 是「脚注落在本章末尾」的前提,
         # 而 pandoc 只把每条注释写进它所在的文件。默认值恰好也是 1,但默认值

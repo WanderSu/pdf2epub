@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -33,10 +33,11 @@ pub struct RunningTasks {
 /// 探测 ebook-converter 可执行文件,优先级:
 /// 1. 设置页传入的 cli_path(调用方传参)
 /// 2. 环境变量 PDF2EPUB_CLI / PDF2EPUB_HOME
-/// 3. 与 exe 同目录的 cli.exe(发布形态:绿色版 = pdf2epub.exe + cli.exe 同级)
-/// 4. 基于 exe 位置向上查找项目 .venv(dev 与 release 均有效)
-/// 5. 基于 cwd 的候选路径
-/// 6. 兜底:PATH 中的 ebook-converter
+/// 3. exe 同级的 `cli/cli.exe`(v0.6+ onedir 发布形态:引擎目录与壳平级)
+/// 4. exe 同目录的 cli.exe(旧绿色版 = pdf2epub.exe + cli.exe 平铺)
+/// 5. 基于 exe 位置向上查找项目 .venv(dev 与 release 均有效)
+/// 6. 基于 cwd 的候选路径
+/// 7. 兜底:PATH 中的 ebook-converter
 fn resolve_cli_path() -> String {
     if let Ok(p) = std::env::var("PDF2EPUB_CLI") {
         if !p.is_empty() {
@@ -52,12 +53,16 @@ fn resolve_cli_path() -> String {
             }
         }
     }
-    // 发布形态:exe 同目录的 cli.exe
+    // 发布形态:exe 同级的引擎(cli/cli.exe 新布局优先,cli.exe 旧布局兜底)
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let p = dir.join("cli.exe");
-            if p.exists() {
-                return p.to_string_lossy().into_owned();
+            let onedir = dir.join("cli").join("cli.exe");
+            if onedir.exists() {
+                return onedir.to_string_lossy().into_owned();
+            }
+            let flat = dir.join("cli.exe");
+            if flat.exists() {
+                return flat.to_string_lossy().into_owned();
             }
         }
     }
@@ -193,14 +198,17 @@ async fn convert_file(
     // 从 GUI 进程 spawn 默认会弹出一个空终端;输出经 stdout 管道实时推给前端)
     #[cfg(windows)]
     cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    // 发布形态(cli.exe 与壳同目录):固定子进程 cwd 为该目录,
-    // 保证 CLI 的 config_dir() 能定位到同级的 config/(config.yaml / book.css)
+    // 发布形态(cli 在壳同级,或壳的 cli/ 子目录):固定子进程 cwd 为**安装根**,
+    // 保证 CLI 的 config_dir() 能定位到安装根的 config/(config.yaml / book.css)
     let cli_dir = PathBuf::from(&cli).parent().map(|p| p.to_path_buf());
     let exe_dir = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf()));
-    if cli_dir.is_some() && cli_dir == exe_dir {
-        if let Some(dir) = &cli_dir {
-            cmd.current_dir(dir);
-        }
+    let install_root = match (&cli_dir, &exe_dir) {
+        (Some(c), Some(e)) if c == e => Some(e.clone()),
+        (Some(c), Some(e)) if c.parent() == Some(e.as_path()) => Some(e.clone()),
+        _ => None,
+    };
+    if let Some(dir) = &install_root {
+        cmd.current_dir(dir);
     }
     cmd.arg(&file_path)
         .arg("-o")
@@ -366,14 +374,17 @@ async fn preflight(
     let mut cmd = Command::new(&cli);
     #[cfg(windows)]
     cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    // cwd 规则与 convert_file 一致:发布形态(cli.exe 与壳同目录)固定 cwd,
-    // 保证 CLI 的 config_dir() 能定位同级的 config/
+    // cwd 规则与 convert_file 一致:发布形态(cli 在壳同级或壳的 cli/ 子目录)
+    // 固定 cwd 为安装根,保证 CLI 的 config_dir() 能定位安装根的 config/
     let cli_dir = PathBuf::from(&cli).parent().map(|p| p.to_path_buf());
     let exe_dir = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf()));
-    if cli_dir.is_some() && cli_dir == exe_dir {
-        if let Some(dir) = &cli_dir {
-            cmd.current_dir(dir);
-        }
+    let install_root = match (&cli_dir, &exe_dir) {
+        (Some(c), Some(e)) if c == e => Some(e.clone()),
+        (Some(c), Some(e)) if c.parent() == Some(e.as_path()) => Some(e.clone()),
+        _ => None,
+    };
+    if let Some(dir) = &install_root {
+        cmd.current_dir(dir);
     }
     cmd.arg("--dry-run").arg("--json");
     if let Some(b) = backend.filter(|b| !b.trim().is_empty() && b != "auto") {
@@ -1322,8 +1333,231 @@ struct EnvCheckResult {
     apikey_path: Option<String>,
 }
 
-/// 探测 pandoc(pandoc --version 首行)。
+/// 随包内置 pandoc 的候选位置(安装根的 pandoc/ 子目录;新旧布局都查)。
+fn bundled_pandoc() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    // v0.6+ onedir 布局:exe、cli/、pandoc/ 平级;旧布局:cli.exe 与 pandoc/ 平级
+    for p in [dir.join("pandoc").join("pandoc.exe"), dir.join("pandoc").join("pandoc")] {
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+// ---------- pandoc 首启下载(用户可选) ----------
+
+/// 下载源:官方 GitHub Release(版本钉死,升级只改这一处)。
+const PANDOC_VERSION: &str = "3.13";
+
+fn pandoc_url() -> String {
+    format!(
+        "https://github.com/jgm/pandoc/releases/download/{v}/pandoc-{v}-windows-x86_64.zip",
+        v = PANDOC_VERSION
+    )
+}
+
+#[derive(serde::Serialize, Clone)]
+struct PandocInstallEvent {
+    /// downloading | extracting | verifying | done
+    stage: String,
+    percent: Option<u32>,
+}
+
+fn emit_pandoc_progress(app: &AppHandle, stage: &str, percent: Option<u32>) {
+    let _ = app.emit(
+        "pandoc-install",
+        PandocInstallEvent { stage: stage.into(), percent },
+    );
+}
+
+/// 解析 curl `--progress-bar` 的 stderr 帧(形如 `###------  34.7%`),取百分比。
+fn parse_curl_percent(frame: &str) -> Option<u32> {
+    let idx = frame.rfind('%')?;
+    let digits: String = frame[..idx]
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    digits.parse::<f64>().ok().map(|v| v.clamp(0.0, 100.0) as u32)
+}
+
+/// 下载并内置 pandoc 到安装根的 pandoc/(幂等:已内置时直接返回路径)。
+///
+/// 下载用系统自带的 curl.exe(Windows 10 1803+),避免为了一次性下载引入
+/// HTTP 客户端依赖;解压复用已有的 zip crate。进度通过 `pandoc-install`
+/// 事件推给前端(downloading 带 percent)。
+#[tauri::command]
+async fn install_pandoc(app: AppHandle) -> Result<String, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("无法定位应用目录: {e}"))?;
+    let root = exe.parent().ok_or("无法定位应用目录")?.to_path_buf();
+    let pandoc_dir = root.join("pandoc");
+    let target = pandoc_dir.join("pandoc.exe");
+    if target.is_file() {
+        return Ok(target.to_string_lossy().into_owned());
+    }
+    let tmp_zip = root.join("pandoc-download.zip");
+
+    // ---- 1. 下载(curl 的进度条走 stderr,\r 分帧) ----
+    emit_pandoc_progress(&app, "downloading", Some(0));
+    #[cfg(windows)]
+    let mut curl = {
+        let mut c = Command::new("curl");
+        c.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        c
+    };
+    #[cfg(not(windows))]
+    let mut curl = Command::new("curl");
+    let mut child = curl
+        .args(["-L", "--progress-bar", "--fail", "-o"])
+        .arg(&tmp_zip)
+        .arg(pandoc_url())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("启动 curl 失败(需要 Windows 10+ 自带的 curl.exe): {e}"))?;
+    if let Some(stderr) = child.stderr.take() {
+        let mut reader = BufReader::new(stderr);
+        let mut frame = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            match reader.read(&mut byte) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    if byte[0] == b'\r' || byte[0] == b'\n' {
+                        let text = String::from_utf8_lossy(&frame).to_string();
+                        if let Some(p) = parse_curl_percent(&text) {
+                            emit_pandoc_progress(&app, "downloading", Some(p));
+                        }
+                        frame.clear();
+                    } else {
+                        frame.push(byte[0]);
+                    }
+                }
+            }
+        }
+    }
+    let status = child.wait().map_err(|e| format!("等待 curl 退出失败: {e}"))?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&tmp_zip);
+        return Err("下载失败:网络不可用、代理拦截或 GitHub 不可达".into());
+    }
+    if tmp_zip.metadata().map(|m| m.len()).unwrap_or(0) < 10_000_000 {
+        // 官方包约 43MB;过小说明拿到的不是真包(--fail 之外的 HTML 错误页等)
+        let _ = std::fs::remove_file(&tmp_zip);
+        return Err("下载内容异常(小于 10MB,疑似错误页),已放弃".into());
+    }
+
+    // ---- 2. 解压:zip 内路径形如 pandoc-3.13/pandoc.exe,按文件名匹配 ----
+    emit_pandoc_progress(&app, "extracting", None);
+    std::fs::create_dir_all(&pandoc_dir)
+        .map_err(|e| format!("创建 {} 失败(目录只读?): {e}", pandoc_dir.display()))?;
+    let file = std::fs::File::open(&tmp_zip).map_err(|e| format!("打开下载包失败: {e}"))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("下载包损坏: {e}"))?;
+    let mut extracted = false;
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| format!("读取下载包条目失败: {e}"))?;
+        if !entry.name().replace('\\', "/").ends_with("/pandoc.exe") {
+            continue;
+        }
+        let mut out = std::fs::File::create(&target)
+            .map_err(|e| format!("写出 pandoc.exe 失败: {e}"))?;
+        std::io::copy(&mut entry, &mut out)
+            .map_err(|e| format!("解压 pandoc.exe 失败: {e}"))?;
+        extracted = true;
+        break;
+    }
+    let _ = std::fs::remove_file(&tmp_zip);
+    if !extracted {
+        let _ = std::fs::remove_file(&pandoc_dir);
+        return Err("下载包里没有 pandoc.exe(发行版结构变了?)".into());
+    }
+
+    // ---- 3. 校验:跑得起来才算装好 ----
+    emit_pandoc_progress(&app, "verifying", None);
+    #[cfg(windows)]
+    let mut verify = {
+        let mut c = Command::new(&target);
+        c.creation_flags(0x08000000);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut verify = Command::new(&target);
+    let ok = verify.arg("--version").output().map(|o| o.status.success()).unwrap_or(false);
+    if !ok {
+        let _ = std::fs::remove_file(&target);
+        return Err("pandoc.exe 校验失败(下载不完整或与系统不兼容),已清理".into());
+    }
+
+    emit_pandoc_progress(&app, "done", None);
+    Ok(target.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod pandoc_tests {
+    use super::parse_curl_percent;
+
+    #[test]
+    fn curl_percent_frames() {
+        assert_eq!(parse_curl_percent("##------  10.5%"), Some(10));
+        assert_eq!(parse_curl_percent("######## 100.0%"), Some(100));
+        assert_eq!(parse_curl_percent("  0  41.2M    0     0"), None);
+        assert_eq!(parse_curl_percent(""), None);
+    }
+}
+
+/// 探测 pandoc:内置目录优先(存在即用,免装),其次 PATH(`pandoc --version` 首行)。
 fn detect_pandoc() -> EnvItem {
+    if let Some(bundled) = bundled_pandoc() {
+        let mut cmd = Command::new(&bundled);
+        cmd.arg("--version");
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        match cmd.output() {
+            Ok(out) if out.status.success() => {
+                let first = String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                return EnvItem {
+                    name: "Pandoc".into(),
+                    status: "ok".into(),
+                    version: Some(if first.is_empty() { "内置".into() } else { first }),
+                    path: Some(bundled.to_string_lossy().into_owned()),
+                };
+            }
+            _ => {
+                // 文件在但跑不起来(架构不对/被占用):落到 PATH 探测,
+                // 版本里注明内置副本不可用,方便用户排查
+                if let Ok(out) = Command::new("pandoc").arg("--version").output() {
+                    if out.status.success() {
+                        let first = String::from_utf8_lossy(&out.stdout)
+                            .lines().next().unwrap_or("").trim().to_string();
+                        return EnvItem {
+                            name: "Pandoc".into(),
+                            status: "ok".into(),
+                            version: Some(format!("{first}(内置副本不可用,已回退 PATH)")),
+                            path: None,
+                        };
+                    }
+                }
+                return EnvItem {
+                    name: "Pandoc".into(),
+                    status: "missing".into(),
+                    version: None,
+                    path: Some(bundled.to_string_lossy().into_owned()),
+                };
+            }
+        }
+    }
     let mut cmd = Command::new("pandoc");
     cmd.arg("--version");
     #[cfg(windows)]
@@ -1440,6 +1674,7 @@ pub fn run() {
             cancel_convert,
             set_cli_path,
             check_env,
+            install_pandoc,
             save_apikey,
             library_sync,
             library_set_meta,
@@ -1781,7 +2016,7 @@ mod tests {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/config.yaml");
         let Ok(text) = std::fs::read_to_string(&path) else { return };
         let got = parse_clean_block(&text);
-        assert_eq!(got.len(), 9, "config.yaml 的 clean: 段应恰好九项:{got:?}");
+        assert_eq!(got.len(), 10, "config.yaml 的 clean: 段应恰好十项:{got:?}");
         assert_eq!(got.get("bold"), Some(&false), "bold 默认关");
         assert_eq!(got.get("join_lines"), Some(&true));
         assert_eq!(got.get("page_numbers"), Some(&true));

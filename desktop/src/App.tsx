@@ -249,6 +249,55 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
     invoke<EnvState>("check_env").then(setEnv).catch(() => setEnv(null));
   }, [screen]);
 
+  // ── pandoc 首启下载(用户可选) ──
+  // 确认弹窗的 resolve:null = 取消任务(不入队)
+  const [pandocAsk, setPandocAsk] = useState(false);
+  const pandocAskResolve = useRef<((ok: boolean) => void) | null>(null);
+  // 下载进度 overlay(null = 不显示)
+  const [pandocInstall, setPandocInstall] = useState<{ stage: string; percent: number | null } | null>(null);
+
+  /** 下载并内置 pandoc(不问询,调用方已拿到用户的明确意图)。 */
+  const downloadPandoc = useCallback(async (): Promise<boolean> => {
+    setPandocInstall({ stage: "downloading", percent: 0 });
+    const un = await listen<{ stage: string; percent: number | null }>("pandoc-install", e => {
+      setPandocInstall({ stage: e.payload.stage, percent: e.payload.percent });
+    });
+    try {
+      await invoke<string>("install_pandoc");
+      setEnv(await invoke<EnvState>("check_env"));
+      notify(t.toast.pandocInstalled, "ok");
+      return true;
+    } catch (err) {
+      notify(t.toast.pandocFailed(String(err)), "danger");
+      return false;
+    } finally {
+      un();
+      setPandocInstall(null);
+    }
+  }, [notify, t]);
+
+  /**
+   * 转换前的 pandoc 门槛:missing 时弹「立即下载 / 取消任务」。
+   * - 选下载:装好后返回 true,流程继续;
+   * - 选取消 / 下载失败:返回 false,这一批任务整体撤销(不入队)。
+   */
+  const ensurePandoc = useCallback(async (): Promise<boolean> => {
+    // env state 可能是旧的(刚在终端装完/刚删掉),现查一次再下结论
+    let fresh: EnvState | null = null;
+    try { fresh = await invoke<EnvState>("check_env"); } catch { /* 检测失败不拦路 */ }
+    if (fresh) setEnv(fresh);
+    if (fresh?.pandoc.status === "ok") return true;
+    const ok = await new Promise<boolean>(resolve => {
+      pandocAskResolve.current = resolve;
+      setPandocAsk(true);
+    });
+    if (!ok) {
+      notify(t.toast.pandocCancelled, "info");
+      return false;
+    }
+    return downloadPandoc();
+  }, [downloadPandoc, notify, t]);
+
   // ── 书库:打开时同步 library.json ──
   const loadLibrary = useCallback(async () => {
     setLibraryLoading(true);
@@ -557,6 +606,8 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
   //  常规添加/拖放不加 force —— 已转过的书被跳过是**正确的续跑行为**,
   //  界面会如实显示 SKIPPED(而不是假装成功)。
   const addFiles = useCallback(async (paths: string[], force = false) => {
+    // pandoc 门槛:缺失时问一次「立即下载 / 取消任务」,取消则整批不入队
+    if (!(await ensurePandoc())) return;
     const newFiles: QueueFile[] = paths.map((p, i) => ({
       id: `${Date.now()}-${i}`,
       path: p,
@@ -602,7 +653,7 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
     for (const f of fresh) {
       await convertOne(f, rowBackendValue(chosen.get(f.id)) ?? undefined, force);
     }
-  }, [convertOne, rememberRecent, runPreflight, requestReview, notify, t]);
+  }, [convertOne, rememberRecent, runPreflight, requestReview, notify, t, ensurePandoc]);
 
   // ── 原生拖放(WebView2 下 HTML5 DnD 拿不到路径)──
   useEffect(() => {
@@ -989,6 +1040,7 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
             setCleanOpts={setCleanOpts}
             strictVerify={strictVerify}
             setStrictVerify={handleStrict}
+            onInstallPandoc={() => downloadPandoc()}
             onSave={() => void saveSettings()}
           />
         )}
@@ -1021,6 +1073,56 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
 
       {/* Toast — 操作反馈(与排字记录互补:那里记过程,这里报结果) */}
       <ToastStack notices={notices} lang={lang} />
+
+      {/* pandoc 确认弹窗:缺失时「立即下载 / 取消任务」 */}
+      {pandocAsk && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: "color-mix(in srgb, var(--background) 72%, transparent)" }} role="dialog" aria-modal="true" aria-label={t.settings.pandocAskTitle}>
+          <div className="w-[min(520px,90vw)] border border-[var(--border)] p-6" style={{ background: "var(--card)" }}>
+            <div className="font-mono text-[10px] tracking-[0.12em] uppercase text-[var(--danger)] mb-3">{t.settings.pandocAskTitle}</div>
+            <p className={`text-[14px] leading-relaxed text-[var(--foreground)] mb-4 ${lang === "zh" ? "cjk" : ""}`}>{t.settings.pandocAsk}</p>
+            <p className={`text-[12px] text-[var(--muted-foreground)] mb-6 ${lang === "zh" ? "cjk" : ""}`}>{t.settings.pandocManualHint}</p>
+            <div className="flex items-center justify-end gap-3">
+              <button
+                className={`font-mono text-[11px] tracking-[0.08em] uppercase border border-[var(--border)] px-4 py-2 text-[var(--muted-foreground)] hover:text-[var(--foreground)] ${lang === "zh" ? "cjk font-sans" : ""}`}
+                onClick={() => { setPandocAsk(false); pandocAskResolve.current?.(false); pandocAskResolve.current = null; }}
+              >
+                {t.settings.pandocCancelTask}
+              </button>
+              <button
+                className={`font-mono text-[11px] tracking-[0.08em] uppercase border border-[var(--primary)] text-[var(--primary)] px-4 py-2 hover:bg-[var(--primary)] hover:text-[var(--background)] ${lang === "zh" ? "cjk font-sans" : ""}`}
+                onClick={() => { setPandocAsk(false); pandocAskResolve.current?.(true); pandocAskResolve.current = null; }}
+                autoFocus
+              >
+                {t.settings.pandocDownload}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* pandoc 下载进度(阻断式:下载期间不该再发起转换) */}
+      {pandocInstall && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: "color-mix(in srgb, var(--background) 72%, transparent)" }} role="status" aria-live="polite">
+          <div className="w-[min(440px,90vw)] border border-[var(--border)] p-6" style={{ background: "var(--card)" }}>
+            <div className="font-mono text-[10px] tracking-[0.12em] uppercase text-[var(--muted-foreground)] mb-4">
+              {t.settings.pandocDownloading}
+            </div>
+            {/* 进度条:downloading 有 percent;解压/校验阶段是不确定进度(流动条) */}
+            <div className="h-1.5 border border-[var(--border)] overflow-hidden">
+              {pandocInstall.percent != null ? (
+                <div className="h-full bg-[var(--primary)] transition-[width] duration-200" style={{ width: `${pandocInstall.percent}%` }} />
+              ) : (
+                <div className="h-full w-1/3 bg-[var(--primary)] animate-pulse" />
+              )}
+            </div>
+            <div className={`mt-3 font-mono text-[11px] text-[var(--muted-foreground)] tabular-nums ${lang === "zh" ? "cjk font-sans" : ""}`}>
+              {pandocInstall.stage === "extracting" ? t.settings.pandocExtracting
+                : pandocInstall.stage === "verifying" ? t.settings.pandocVerifying
+                : pandocInstall.percent != null ? `${pandocInstall.percent}%` : "…"}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 终态播报:视觉上的状态变化对读屏器不可见 */}
       <div aria-live="polite" className="sr-only">

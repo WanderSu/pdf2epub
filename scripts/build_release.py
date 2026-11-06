@@ -1,11 +1,17 @@
 """一键出发布包(计划 1.4)。
 
-    uv run python scripts/build_release.py 0.5.0                 # 构建 + 打包 + 自检
-    uv run python scripts/build_release.py 0.5.0 --skip-build    # 复用已有产物,只打包
-    uv run python scripts/build_release.py 0.5.0 --no-check      # 不做发布包自检
+    uv run python scripts/build_release.py 0.6.0                 # 构建 + 打包 + 自检
+    uv run python scripts/build_release.py 0.6.0 --skip-build    # 复用已有产物,只打包
+    uv run python scripts/build_release.py 0.6.0 --no-check      # 不做发布包自检
 
 产物: dist_release/pdf2epub-v<版本>-win-x64.zip
-    内含 pdf2epub.exe(壳) + cli.exe(引擎) + config/ + README.md
+    内含 pdf2epub.exe(壳) + cli/(引擎 onedir) + config/ + README.md
+    (+ 可选 pandoc/,见 `PANDOC_SRC`)
+
+**引擎布局(v0.6+ onedir)**:PyInstaller 产物是 `cli/cli.exe + cli/_internal/…`
+目录,不再用 onefile 单文件 —— 免去每次启动解压 95MB 到 %TEMP%,也显著降低
+杀软误报。引擎目录与壳平级,`config/` 在安装根(引擎按「exe 同级 → exe 上级」
+查找,见 src/paths.py)。
 
 **版本守卫**:四处版本号(pyproject / tauri.conf.json / Cargo.toml / App.tsx)必须与
 传入版本一致,否则拒绝打包 —— 防止「界面写着 v0.5.0、实际是旧版本的产物」。
@@ -35,7 +41,13 @@ TAURI_RELEASE = DESKTOP / "src-tauri" / "target" / "release"
 CONFIG_FILES = ("config.yaml", "book.css")
 
 CLI_EXE_NAME = "cli.exe"
+CLI_DIR_NAME = "cli"
 SHELL_EXE_NAME = "pdf2epub.exe"
+
+#: 可选的随包内置 pandoc 目录:仓库 `resources/pandoc/pandoc.exe` 存在时整个
+#: 目录进发布包(安装根的 pandoc/,引擎按 src/epub/pandoc.py 的查找链识别);
+#: 不存在就静默跳过 —— 发布包不因「没准备 pandoc」而失败,引擎回退 PATH。
+PANDOC_SRC = PROJECT_ROOT / "resources" / "pandoc"
 
 
 def run(cmd: list[str], cwd: Path | None = None) -> None:
@@ -46,13 +58,13 @@ def run(cmd: list[str], cwd: Path | None = None) -> None:
 
 
 def build_cli() -> Path:
-    """PyInstaller 构建引擎 cli.exe(直接读源码,见 cli.spec)。"""
+    """PyInstaller 构建引擎(onedir,见 cli.spec):产物为 dist_cli/cli/cli.exe。"""
     run([sys.executable, "-m", "PyInstaller", "--noconfirm",
          "--distpath", str(DIST_CLI), "--workpath", str(BUILD_CLI),
          str(PROJECT_ROOT / "cli.spec")], cwd=PROJECT_ROOT)
-    exe = DIST_CLI / CLI_EXE_NAME
+    exe = DIST_CLI / CLI_DIR_NAME / CLI_EXE_NAME
     if not exe.exists():
-        raise SystemExit(f"未生成 {exe}")
+        raise SystemExit(f"未生成 {exe}(onedir 产物应在 {CLI_DIR_NAME}/ 子目录下)")
     return exe
 
 
@@ -92,18 +104,29 @@ def build_shell() -> Path:
 
 def stage(version: str, skip_build: bool) -> Path:
     """把产物收集到 dist_release/v<版本>/ 下。"""
-    cli_exe = DIST_CLI / CLI_EXE_NAME if skip_build else build_cli()
+    cli_exe = (DIST_CLI / CLI_DIR_NAME / CLI_EXE_NAME) if skip_build else build_cli()
     shell = shell_exe() if skip_build else build_shell()
     for exe in (cli_exe, shell):
         if not exe.exists():
             raise SystemExit(f"缺少产物: {exe}(先构建,或去掉 --skip-build)")
+    cli_dir = cli_exe.parent
+    if not (cli_dir / "_internal").is_dir():
+        raise SystemExit(
+            f"{cli_dir} 下没有 _internal/ —— 引擎不是 onedir 产物?"
+            "检查 cli.spec 是否被改回 onefile。"
+        )
 
     staging = DIST_RELEASE / f"v{version}"
     if staging.exists():
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
     shutil.copy2(shell, staging / SHELL_EXE_NAME)   # desktop.exe → pdf2epub.exe
-    shutil.copy2(cli_exe, staging / CLI_EXE_NAME)
+    shutil.copytree(cli_dir, staging / CLI_DIR_NAME)  # cli/cli.exe + cli/_internal/…
+
+    # 可选:随包内置 pandoc(准备见 PANDOC_SRC 注释;没准备就跳过)
+    if (PANDOC_SRC / "pandoc.exe").is_file():
+        shutil.copytree(PANDOC_SRC, staging / "pandoc")
+        print(f"内置 pandoc: {PANDOC_SRC} → {staging / 'pandoc'}")
 
     cfg_dir = staging / "config"
     cfg_dir.mkdir()
@@ -154,10 +177,16 @@ def main(argv: list[str] | None = None) -> int:
     zip_path = make_zip(staging, args.version)
     size_mb = zip_path.stat().st_size / 1024 / 1024
     print(f"\n发布包: {zip_path}  ({size_mb:.1f} MB)")
-    for path in sorted(staging.rglob("*")):
+    # onedir 引擎有数百个文件:按顶层目录汇总,再单列入口 exe
+    for path in sorted(staging.iterdir()):
         if path.is_file():
             print(f"  {path.relative_to(staging).as_posix():<24} "
                   f"{path.stat().st_size / 1024 / 1024:7.1f} MB")
+        else:
+            n_files = sum(1 for _ in path.rglob("*") if _.is_file())
+            dir_mb = sum(p.stat().st_size for p in path.rglob("*") if p.is_file()) / 1024 / 1024
+            print(f"  {path.relative_to(staging).as_posix() + '/':<24} "
+                  f"{dir_mb:7.1f} MB  ({n_files} 个文件)")
 
     if args.no_check:
         return 0
