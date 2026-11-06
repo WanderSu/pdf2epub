@@ -4,7 +4,7 @@ import type { StageNode, StageState } from "./events";
 import {
   CLEAN_DEFAULTS, CLEAN_KEYS, LEGACY_KEYS, MAX_RECENT,
   type Backend, type CleanKey, type CleanOpts, type FileType, type RecentEntry,
-  type SettingsFile,
+  type ReviewRow, type RowBackend, type SettingsFile,
 } from "./types";
 
 // ── LOG PARSERS(legacy 兜底:仅在事件流缺失时使用)────────────────────────────
@@ -101,6 +101,30 @@ export function backendFromPlan(b: string): Backend {
   if (/paddle/.test(b)) return "PaddleOCR";
   if (/mineru/.test(b)) return "MinerU";
   return "Auto";
+}
+
+// ── 复核表的逐行后端 ──────────────────────────────────────────────────────────
+//  顺序即界面上的分段顺序。放在最左的 auto 是「不指定」,不是某个后端 ——
+//  它让「我没意见」与「我指定本地」成为两件可区分的事。
+export const ROW_BACKENDS: readonly RowBackend[] = ["auto", "pymupdf", "mineru", "paddleocr"];
+
+/** 行上的选择 → CLI 的 `--backend` 值。`null` = 不传这个参数。 */
+export function rowBackendValue(b: RowBackend | undefined): string | null {
+  return !b || b === "auto" ? null : b;
+}
+
+/** 云端后端需要 Token;本地提取与「不指定」不需要。 */
+export function rowBackendNeedsToken(b: RowBackend): "mineru" | "paddleocr" | null {
+  return b === "mineru" || b === "paddleocr" ? b : null;
+}
+
+/** 这批文件一共要走多少云端页 —— **按行的当前状态求和**。
+ *
+ *  不用 preflight 报告里的 `total_ocr_pages`:用户在表里把某行从本地改成
+ *  MinerU 之后,那个数是进来时的旧值,底部条形码会与表里的行互相打架,
+ *  而它恰好是「这笔要花多少钱」的唯一提示。 */
+export function reviewOcrPages(rows: ReviewRow[]): number {
+  return rows.reduce((n, r) => n + (r.ocrPages ?? 0), 0);
 }
 
 // ── 清理开关的三层取值 ────────────────────────────────────────────────────────

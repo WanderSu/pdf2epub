@@ -5,10 +5,10 @@ import {
   Rule, TypeBadge, StatusChip, ErrorLine, BackendBadge, StageStepper,
   ComposingRoom, WarningStrip, ChapterHead,
 } from "../primitives";
-import { KIND_TO_TYPE, backendFromPlan, fmtMonthDay } from "../format";
+import { KIND_TO_TYPE, ROW_BACKENDS, backendFromPlan, fmtMonthDay, reviewOcrPages } from "../format";
 import type {
-  ConsoleLine, FileStatus, FileType, PreflightFile, PreflightReport, QueueFile, RecentEntry,
-  ReviewSheet,
+  ConsoleLine, EnvState, FileStatus, FileType, PreflightFile, PreflightReport, QueueFile,
+  RecentEntry, ReviewRow, ReviewSheet, RowBackend,
 } from "../types";
 
 /** 进度线颜色:三个终态互不冒充(失败红 / 完成绿 / 跳过蓝),在跑是朱砂 */
@@ -23,6 +23,69 @@ function progressColor(status: FileStatus): string {
 }
 
 /**
+ * BACKEND 列的四段选择:自动 / 本地 / MinerU / PaddleOCR。
+ *
+ * 存在的理由是一个具体的手忙脚乱:检测把扫描书误判成「自带文字层」时,旧流程
+ * 只能取消 → 进设置改全局偏好 → 重新拖放;而这时整批文件已经在队列里了。
+ *
+ * 两条硬规矩:
+ *  - **没配 Token 的云端后端置灰,不隐藏** —— 藏起来用户会以为「压根没这个后端」,
+ *    置灰 + 悬停提示才知道是缺凭据,而且知道该去哪补。
+ *  - 换完要重跑这一行的预检(类型/页数/折帖/云端页数全都依赖后端),
+ *    期间该行 `aria-busy` 并锁住,避免连点出一串过期结果。
+ */
+function BackendPicker({ row, lang, env, onPick }: {
+  row: ReviewRow;
+  lang: Lang;
+  env: EnvState | null;
+  onPick: (b: RowBackend) => void;
+}) {
+  const t = T[lang].review;
+  const busy = Boolean(row.busy);
+  // Markdown 没有后端可换(清理后直接付印),给个不可点的说明而不是假装能选
+  const isMarkdown = row.type === "MD" || /\.(md|markdown)$/i.test(row.path);
+  const current = row.override ?? "auto";
+  return (
+    <div
+      role="radiogroup"
+      aria-label={t.colBackend}
+      aria-busy={busy}
+      title={isMarkdown ? t.backendNa : t.backendHint}
+      className={`flex border border-[var(--border)] w-fit shrink-0 ${busy ? "opacity-40" : ""} ${isMarkdown ? "opacity-40" : ""}`}
+    >
+      {ROW_BACKENDS.map((b, i) => {
+        const active = current === b;
+        const missing = b === "mineru" ? env && !env.mineru_configured
+          : b === "paddleocr" ? env && !env.paddle_configured
+          : false;
+        const locked = Boolean(missing) || busy || isMarkdown;
+        return (
+          <button
+            key={b}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            aria-label={t.backends[i][0]}
+            title={missing ? t.backendLocked : (isMarkdown ? t.backendNa : t.backends[i][1])}
+            disabled={locked}
+            onClick={() => onPick(b)}
+            className={`shrink-0 whitespace-nowrap px-1.5 py-[3px] font-mono text-[9px] leading-none border-r border-[var(--border)] last:border-r-0 ${
+              active
+                ? "bg-[var(--primary)] text-[var(--primary-foreground)]"
+                : locked
+                  ? "text-[var(--muted-foreground)] opacity-40 cursor-not-allowed"
+                  : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+            }`}
+          >
+            {t.backends[i][0]}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
  * 导入复核表 —— 按下「制版」之前的最后一眼。
  *
  * 表里每个数字都来自 preflight 的真实计划:`known=false` 的行(命令行报错、
@@ -32,14 +95,19 @@ function progressColor(status: FileStatus): string {
  * 必须有这么一道闸门,不是形式:本地转换不花钱,云端 OCR 是要按页结算的,
  * 而 drop-and-forget 的界面在几十页扫描件上按回车之前没有任何反悔机会。
  */
-function ReviewTable({ sheet, lang, onCancel, onStart }: {
+function ReviewTable({ sheet, lang, env, onCancel, onStart, onRowBackend }: {
   sheet: ReviewSheet;
   lang: Lang;
+  env: EnvState | null;
   onCancel: () => void;
   onStart: () => void;
+  onRowBackend: (id: string, b: RowBackend) => void;
 }) {
   const t = T[lang].review;
   const unknown = sheet.rows.some(r => !r.known);
+  // 总额按行求和:逐行换过后端之后,「这笔要花多少钱」必须跟着变
+  const totalOcr = reviewOcrPages(sheet.rows);
+  const changed = sheet.rows.some(r => r.override && r.override !== "auto");
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-[var(--foreground)]/20 p-8" role="dialog" aria-modal="true" aria-label={t.title}>
       <div className="w-full max-w-[760px] bg-[var(--card)] border border-[var(--foreground)]">
@@ -53,20 +121,28 @@ function ReviewTable({ sheet, lang, onCancel, onStart }: {
         </div>
 
         <div className="px-8 max-h-[360px] overflow-auto scroll-area">
-          <div className="grid grid-cols-[1fr_52px_64px_88px_88px] gap-4 pb-2 border-b border-[var(--border)]">
+          <div className="grid grid-cols-[1fr_48px_56px_168px_64px] gap-4 pb-2 border-b border-[var(--border)]">
             {[t.colFile, t.colType, t.colPages, t.colBackend, t.colSignature].map(label => (
               <span key={label} className={`text-[10px] text-[var(--muted-foreground)] ${lang === "zh" ? "cjk" : "font-mono tracking-[0.08em] uppercase"}`}>{label}</span>
             ))}
           </div>
           {sheet.rows.map(row => (
-            <div key={row.id} className="grid grid-cols-[1fr_52px_64px_88px_88px] gap-4 items-center py-3 border-b border-[var(--border)]">
+            <div key={row.id} className="grid grid-cols-[1fr_48px_56px_168px_64px] gap-4 items-center py-3 border-b border-[var(--border)]">
               <div className="min-w-0">
                 <div className="font-mono text-[11px] text-[var(--foreground)] truncate">{row.name}</div>
                 <div className="font-mono text-[10px] text-[var(--muted-foreground)] mt-1 truncate selectable" title={row.path}>{row.path}</div>
+                {row.notes && row.notes.length > 0 && (
+                  <div
+                    className={`text-[10px] text-[var(--warn)] mt-1 truncate ${lang === "zh" ? "cjk" : "font-mono"}`}
+                    title={row.notes.join("\n")}
+                  >
+                    {row.notes[0]}
+                  </div>
+                )}
               </div>
               <TypeBadge type={row.type} />
               <span className="font-mono text-[11px] tabular-nums text-[var(--muted-foreground)]">{row.pages ?? t.none}</span>
-              <BackendBadge backend={row.backend} />
+              <BackendPicker row={row} lang={lang} env={env} onPick={b => onRowBackend(row.id, b)} />
               <span className="font-mono text-[10px] text-[var(--primary)]">
                 {row.shards && row.shards > 1 ? t.signature(row.shards) : t.none}
               </span>
@@ -76,9 +152,12 @@ function ReviewTable({ sheet, lang, onCancel, onStart }: {
 
         <div className="mx-8 my-5 border-l-2 border-[var(--primary)] pl-4 py-1">
           <div className={`text-[12px] text-[var(--foreground)] ${lang === "zh" ? "cjk" : "font-mono"}`}>
-            {sheet.totalOcrPages > 0 ? t.estimate(sheet.totalOcrPages) : t.estimateLocal}
+            {totalOcr > 0 ? t.estimate(totalOcr) : t.estimateLocal}
           </div>
           <div className="font-mono text-[10px] text-[var(--muted-foreground)] mt-1">{t.pipeline}</div>
+          {changed && (
+            <div className={`text-[11px] text-[var(--primary)] mt-1 ${lang === "zh" ? "cjk" : "font-mono"}`}>{t.backendChanged}</div>
+          )}
           {unknown && (
             <div className={`text-[11px] text-[var(--warn)] mt-1 ${lang === "zh" ? "cjk" : "font-mono"}`}>{t.hintUnknown}</div>
           )}
@@ -89,7 +168,7 @@ function ReviewTable({ sheet, lang, onCancel, onStart }: {
             {t.cancel}
           </button>
           <button onClick={onStart} className={`px-6 py-2 bg-[var(--primary)] text-[var(--primary-foreground)] font-mono text-[11px] hover:opacity-90 ${lang === "zh" ? "cjk" : "tracking-[0.08em]"}`}>
-            {sheet.totalOcrPages > 0 ? T[lang].convert.startOcr : T[lang].convert.start}
+            {totalOcr > 0 ? T[lang].convert.startOcr : T[lang].convert.start}
           </button>
         </div>
       </div>
@@ -101,10 +180,10 @@ function ReviewTable({ sheet, lang, onCancel, onStart }: {
 
 export function ConvertScreen({
   lang, files, preview, preflightOf, batchNotice, dragging, recent, busyPreflight,
-  composingExpanded, setComposingExpanded, consoleLines, review,
+  composingExpanded, setComposingExpanded, consoleLines, review, env,
   onPick, onCancel, onRetry, onClearDone, onRetryFailed, onCancelAll, onUseOcr,
   onPreflight, onPreflightRecent, onAddRecent, onMoveTop, onStartQueue,
-  onReviewStart, onReviewCancel,
+  onReviewStart, onReviewCancel, onRowBackend,
 }: {
   lang: Lang;
   files: QueueFile[];
@@ -119,6 +198,8 @@ export function ConvertScreen({
   consoleLines: ConsoleLine[];
   /** 待复核的一批新文件(真实 preflight 结果);null = 没有待确认的批次 */
   review: ReviewSheet | null;
+  /** 环境检测结果:云端后端是否配了 Token(没配就在表里置灰) */
+  env: EnvState | null;
   onPick: () => void;
   onCancel: (id: string) => void;
   onRetry: (id: string) => void;
@@ -133,6 +214,8 @@ export function ConvertScreen({
   onStartQueue: () => void;
   onReviewStart: () => void;
   onReviewCancel: () => void;
+  /** 在复核表某一行上换后端(换完 App 会重跑这一行的预检) */
+  onRowBackend: (id: string, b: RowBackend) => void;
 }) {
   const t = T[lang].convert;
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
@@ -508,8 +591,10 @@ export function ConvertScreen({
         <ReviewTable
           sheet={review}
           lang={lang}
+          env={env}
           onCancel={onReviewCancel}
           onStart={onReviewStart}
+          onRowBackend={onRowBackend}
         />
       )}
     </div>

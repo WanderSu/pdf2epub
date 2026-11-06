@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { Switch, ToggleSwitch } from "../primitives";
 import { SettingsScreen } from "./SettingsScreen";
-import { CLEAN_DEFAULTS, type CleanOpts } from "../types";
+import { CLEAN_DEFAULTS, CLEAN_KEYS, type CleanOpts } from "../types";
 
 // ── 规范页开关的几何契约 ──────────────────────────────────────────────────────
 //  这两组断言是**防回退**用的,不是覆盖率:方角开关的滑块曾经用 translate-x
@@ -110,10 +110,10 @@ describe("规范页校勘流水线", () => {
     );
   }
 
-  it("九项各有一个方角开关,几何仍是显式 left(换皮肤不许动的那部分)", () => {
+  it("十项各有一个方角开关,几何仍是显式 left(换皮肤不许动的那部分)", () => {
     const { container } = renderSettings();
     const rows = container.querySelectorAll(".group button[role='switch']");
-    expect(rows.length, "三组九项,每项一个开关").toBe(9);
+    expect(rows.length, "三组十项,每项一个开关").toBe(CLEAN_KEYS.length);
     for (const sw of rows) {
       expect(knobOf(sw as HTMLElement).className).not.toContain("translate-x");
       expect(sw.className).toContain("w-[40px]");
@@ -129,7 +129,7 @@ describe("规范页校勘流水线", () => {
     expect(setCleanOpts).toHaveBeenCalledTimes(1);
   });
 
-  it("「恢复默认」把九个开关拨回基线值 —— 保存后这些键会被删掉,重新交给 config.yaml", () => {
+  it("「恢复默认」把十个开关拨回基线值 —— 保存后这些键会被删掉,重新交给 config.yaml", () => {
     const setCleanOpts = vi.fn();
     const baseline = { bold: true, cjk_spaces: false };
     renderSettings({ ...CLEAN_DEFAULTS, bold: false }, setCleanOpts, baseline);

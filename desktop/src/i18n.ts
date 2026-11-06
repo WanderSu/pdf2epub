@@ -95,6 +95,17 @@ export const T = {
       pipeline: "DETECT 制版 → EXTRACT 检字 → CLEAN 校勘 → BUILD 付印",
       cancel: "CANCEL",
       hintUnknown: "Detection still running — TYPE / PAGES will be filled in from the engine.",
+      // 四段与 format.ts 的 ROW_BACKENDS 一一对应:[标签, 说明]
+      backends: [
+        ["AUTO", "Follow detection and the global backend preference"],
+        ["LOCAL", "Force local text extraction — no OCR at all"],
+        ["MINERU", "Force cloud OCR for every page"],
+        ["PADDLE", "Force cloud OCR — alternative backend"],
+      ] as [string, string][],
+      backendHint: "Wrongly detected as text? Pick MINERU / PADDLE here — no need to leave the sheet.",
+      backendLocked: "Token not configured — add it under SPECIFICATION first",
+      backendNa: "Markdown needs no OCR backend",
+      backendChanged: "Backend changed per-file — the cloud page estimate above has been recalculated.",
     },
     toast: {
       queued: (n: number) => `${n} file${n > 1 ? "s" : ""} sent to the press`,
@@ -263,6 +274,17 @@ export const T = {
       pipeline: "DETECT 制版 → EXTRACT 检字 → CLEAN 校勘 → BUILD 付印",
       cancel: "取消",
       hintUnknown: "检测尚未完成,TYPE / 页数 会在转换时由引擎填出。",
+      // 四段与 format.ts 的 ROW_BACKENDS 一一对应:[标签, 说明]
+      backends: [
+        ["自动", "按检测结果与设置里的全局偏好决定"],
+        ["本地", "强制本地提取文字层,完全不走 OCR"],
+        ["MinerU", "强制整本送云端 OCR"],
+        ["Paddle", "强制整本送云端 OCR(另一个后端)"],
+      ] as [string, string][],
+      backendHint: "被误判成「自带文字层」?直接在这里点 MinerU / Paddle,不用退出去改设置。",
+      backendLocked: "未配置 Token — 先去「规范」里补上",
+      backendNa: "Markdown 直接清理,不需要 OCR 后端",
+      backendChanged: "已按行改过后端,上面那句云端页数已重新算过。",
     },
     toast: {
       queued: (n: number) => `${n} 个文件已送入制版队列`,
@@ -357,7 +379,7 @@ export const T = {
   },
 };
 
-/** 校勘清单:三组九项,与 cleaner 的 CLEAN_KEYS 一一对应(顺序见 CLEAN_KEYS) */
+/** 校勘清单:三组十项,与 cleaner 的 CLEAN_KEYS 一一对应(顺序见 CLEAN_KEYS) */
 export const CLEAN_GROUPS: Record<Lang, CleanGroup[]> = {
   en: [
     {
@@ -365,6 +387,7 @@ export const CLEAN_GROUPS: Record<Lang, CleanGroup[]> = {
       items: [
         { glyph: "¶", key: "page_numbers", label: "Remove page numbers", desc: "Strip standalone page-number lines" },
         { glyph: "⌐", key: "running_heads", label: "Strip running heads", desc: "Drop short lines repeated across pages" },
+        { glyph: "⌃", key: "front_matter", label: "Drop cover page text", desc: "Cover art already becomes cover.jpg — drop its OCR text" },
         { glyph: "¬", key: "join_lines", label: "Join broken lines", desc: "Re-flow paragraphs split across pages" },
       ],
     },
@@ -391,6 +414,7 @@ export const CLEAN_GROUPS: Record<Lang, CleanGroup[]> = {
       items: [
         { glyph: "¶", key: "page_numbers", label: "删除页码", desc: "去除独立页码行" },
         { glyph: "⌐", key: "running_heads", label: "剔除页眉页脚", desc: "删除跨页重复出现的短行(书名/章节名)" },
+        { glyph: "⌃", key: "front_matter", label: "卷首去重", desc: "首页只是书名/作者/出版社时删掉(封面已是 cover.jpg)" },
         { glyph: "¬", key: "join_lines", label: "合并断行", desc: "重排跨页断行段落" },
       ],
     },

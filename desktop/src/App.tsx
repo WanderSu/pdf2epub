@@ -25,6 +25,7 @@ import {
   normPath,
   parseTypeFromLine,
   parseWarningFromLine,
+  rowBackendValue,
   updateStagesFromLine,
 } from "./format";
 import { Rule, ToastStack } from "./primitives";
@@ -50,7 +51,9 @@ import {
   type PreflightReport,
   type QueueFile,
   type RecentEntry,
+  type ReviewRow,
   type ReviewSheet,
+  type RowBackend,
   type Screen,
   type SettingsFile,
 } from "./types";
@@ -266,17 +269,21 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
 
   // ── 印前检查(CLI --dry-run --json) ──
   //  `backend` 必须与真正转换时用的是同一个:否则会出现「预检显示本地、实际跑云端」。
+  const preflightCli = useCallback(async (paths: string[], backend: string | null): Promise<PreflightReport> => {
+    const raw = await invoke<string>("preflight", {
+      filePaths: paths,
+      cliPath: cliPath || null,
+      backend,
+    });
+    return JSON.parse(raw) as PreflightReport;
+  }, [cliPath]);
+
   const runPreflight = useCallback(async (paths: string[], backendOverride?: string): Promise<PreflightReport | null> => {
     if (paths.length === 0) return null;
     setBusyPreflight(true);
     try {
       const backend = backendOverride ?? (backendPref === "auto" ? null : backendPref);
-      const raw = await invoke<string>("preflight", {
-        filePaths: paths,
-        cliPath: cliPath || null,
-        backend,
-      });
-      const report = JSON.parse(raw) as PreflightReport;
+      const report = await preflightCli(paths, backend);
       setPreflights(prev => {
         const next = { ...prev };
         for (const f of report.files) next[normPath(f.path)] = f;
@@ -306,7 +313,26 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
     } finally {
       setBusyPreflight(false);
     }
-  }, [cliPath, backendPref]);
+  }, [preflightCli, backendPref]);
+
+  /** 单行重跑预检(逐行换后端时用)。
+   *
+   *  刻意**不碰** `batchNotice`:那是「整批」的预估,被单行的结果覆盖会让底部
+   *  的总额与表里逐行的数字互相打架。也不动全局 `busyPreflight` —— 表里另有
+   *  一个正在确认的批次,不该因为改了一行就看到整屏在转。
+   */
+  const preflightRow = useCallback(async (path: string, backend: RowBackend): Promise<PreflightFile | null> => {
+    try {
+      const report = await preflightCli([path], rowBackendValue(backend));
+      const plan = report.files.find(p => normPath(p.path) === normPath(path)) ?? report.files[0] ?? null;
+      if (plan) setPreflights(prev => ({ ...prev, [normPath(plan.path)]: plan }));
+      return plan;
+    } catch (e) {
+      const ts = new Date().toTimeString().slice(0, 8);
+      setConsoleLines(prev => [...prev.slice(-300), { ts, level: "ERROR" as const, text: `[PREFLIGHT] ${String(e)}` }]);
+      return null;
+    }
+  }, [preflightCli]);
 
   // 后端偏好改了(设置里保存后) → 重跑预检,保证印前检查与转换用的是同一个后端。
   // 预检只读检测,不产出文件、不消耗额度,重跑是安全的。
@@ -433,21 +459,74 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
   //  云端 OCR 之前有一次反悔机会。
   //  只在**一次导入最多一张表**:复核表已经开着时再来一批,直接放行进队列,
   //  不叠第二张(叠上去只会互相盖住,用户不知道哪张是哪批)。
+  //
+  //  表里每一行还能**当场换后端**(误判成「自带文字层」的扫描书直接点 MinerU)。
+  //  没有这个开关,用户只能取消 → 进设置改全局偏好 → 重新拖放,而整批文件
+  //  已经在队列里了 —— 那不是在复核,那是在重来。
   const [review, setReview] = useState<ReviewSheet | null>(null);
-  const reviewResolve = useRef<((start: boolean) => void) | null>(null);
+  /** 表里行的最新快照:确认时(点击/Esc)要带出去,不能靠闭包里那份旧 state */
+  const reviewRows = useRef<ReviewRow[]>([]);
+  useEffect(() => { reviewRows.current = review?.rows ?? []; }, [review]);
+  /** resolve 的语义:`ReviewRow[]` = 开跑(带上逐行选择),`null` = 取消 */
+  const reviewResolve = useRef<((rows: ReviewRow[] | null) => void) | null>(null);
   const reviewing = useRef(false);
 
   const settleReview = useCallback((start: boolean) => {
     const resolve = reviewResolve.current;
+    const rows = reviewRows.current;
     reviewResolve.current = null;
     reviewing.current = false;
     setReview(null);
-    resolve?.(start);
+    resolve?.(start ? rows : null);
   }, []);
 
-  const requestReview = useCallback(async (report: PreflightReport | null, rows: QueueFile[], force: boolean) => {
+  /** 用户在某一行的 BACKEND 分段控件上换了后端。
+   *
+   *  换完必须重跑**这一行**的预检:类型(TXT/SCN)、页数、折帖、云端页数全部依赖
+   *  后端 —— 强行指定 OCR 之后,一个「自带文字层」的 PDF 会变成整本送云端,
+   *  而底部那句「本批需要云端 N 页」正是用户按下确认前唯一的花费提示。
+   */
+  const chooseRowBackend = useCallback(async (id: string, backend: RowBackend) => {
+    const row = reviewRows.current.find(r => r.id === id);
+    if (!row || (row.override ?? "auto") === backend) return;
+    setReview(prev => prev && {
+      ...prev,
+      rows: prev.rows.map(r => (r.id === id ? { ...r, override: backend, busy: true } : r)),
+    });
+    const plan = await preflightRow(row.path, backend);
+    setReview(prev => prev && {
+      ...prev,
+      rows: prev.rows.map(r => {
+        if (r.id !== id) return r;
+        if (!plan) {
+          // 这一行拿不到计划(CLI 报错):如实退成未知,不保留上一个后端的数字
+          return { ...r, busy: false, known: false, type: undefined, pages: undefined,
+                   backend: undefined, shards: undefined, ocrPages: undefined, notes: undefined };
+        }
+        return {
+          ...r, busy: false, known: true,
+          type: KIND_TO_TYPE[plan.kind],
+          pages: plan.pages,
+          backend: backendFromPlan(plan.backend),
+          shards: plan.shards,
+          ocrPages: plan.ocr_pages,
+          notes: plan.notes,
+        };
+      }),
+    });
+    // 队列行也同步一份:换过后端之后,队列里那一行不该还写着「本地」
+    if (plan) {
+      setFiles(prev => prev.map(x => (x.id === id
+        ? { ...x, type: KIND_TO_TYPE[plan.kind], pages: plan.pages, cloudPages: plan.ocr_pages,
+            backend: backendFromPlan(plan.backend) }
+        : x)));
+    }
+  }, [preflightRow]);
+
+  /** 返回 null = 用户取消;返回行数组 = 开跑(force 或无需复核时为空数组) */
+  const requestReview = useCallback(async (report: PreflightReport | null, rows: QueueFile[], force: boolean): Promise<ReviewRow[] | null> => {
     // force = 用户已经明确要求「重转」(书库 RE-CONVERT),不必再问一遍
-    if (force || rows.length === 0 || reviewing.current) return true;
+    if (force || rows.length === 0 || reviewing.current) return [];
     reviewing.current = true;
     const sheet: ReviewSheet = {
       rows: rows.map(f => {
@@ -461,16 +540,17 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
             backend: backendFromPlan(plan.backend),
             shards: plan.shards,
             ocrPages: plan.ocr_pages,
+            notes: plan.notes,
             known,
           }
           : { id: f.id, name: f.name, path: f.path, known };
       }),
-      totalOcrPages: report?.total_ocr_pages ?? 0,
     };
+    reviewRows.current = sheet.rows;
     setReview(sheet);
-    const start = await new Promise<boolean>(resolve => { reviewResolve.current = resolve; });
-    if (!start) notify(t.toast.held, "info");
-    return start;
+    const decision = await new Promise<ReviewRow[] | null>(resolve => { reviewResolve.current = resolve; });
+    if (decision === null) notify(t.toast.held, "info");
+    return decision;
   }, [notify, t]);
 
   //  addFiles(force=true) 只用于「明确要求重转」的入口(书库 RE-CONVERT):
@@ -515,11 +595,12 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
     setScreen("convert");
     // 先印前检查(真实的类型/页数/后端/折帖),让用户确认后再串行转换
     const report = await runPreflight(fresh.map(f => f.path));
-    const start = await requestReview(report, fresh, force);
-    if (start) {
-      for (const f of fresh) {
-        await convertOne(f, undefined, force);
-      }
+    const decision = await requestReview(report, fresh, force);
+    if (decision === null) return;
+    // 逐行选择只在**这一批**有效:没动过的行不传 backend,继续听设置里的偏好
+    const chosen = new Map(decision.map(r => [r.id, r.override]));
+    for (const f of fresh) {
+      await convertOne(f, rowBackendValue(chosen.get(f.id)) ?? undefined, force);
     }
   }, [convertOne, rememberRecent, runPreflight, requestReview, notify, t]);
 
@@ -860,6 +941,7 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
             setComposingExpanded={setComposingExpanded}
             consoleLines={consoleLines}
             review={review}
+            env={env}
             onPick={() => void pickFiles()}
             onCancel={cancelFile}
             onRetry={retryFile}
@@ -874,6 +956,7 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
             onStartQueue={() => void startQueue()}
             onReviewStart={() => settleReview(true)}
             onReviewCancel={() => settleReview(false)}
+            onRowBackend={(id, b) => void chooseRowBackend(id, b)}
           />
         )}
         {screen === "library" && (

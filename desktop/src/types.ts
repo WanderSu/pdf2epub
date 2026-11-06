@@ -15,6 +15,12 @@ export type FileStatus = "pending" | "converting" | "done" | "skipped" | "failed
 export type Backend = "Local" | "MinerU" | "PaddleOCR" | "Auto";
 export type FileType = "TXT" | "SCN" | "HYB" | "MD";
 export type BackendPref = "auto" | "mineru" | "paddleocr";
+/**
+ * 复核表里**逐行**可以指定的后端。比 `BackendPref` 多一个 `pymupdf`:
+ * 检测把扫描书误判成「自带文字层」时可以强制 OCR,反过来把带乱码文字层的书
+ * 强制走本地也可以。`auto`(或没选)= 不指定,听检测 + 设置里的全局偏好。
+ */
+export type RowBackend = "auto" | "pymupdf" | "mineru" | "paddleocr";
 
 export interface QueueFile {
   id: string;
@@ -137,12 +143,17 @@ export interface ReviewRow {
   shards?: number;
   ocrPages?: number;
   known: boolean;
+  /** 用户在这一行上亲手指定的后端(见 `RowBackend`);缺省 = 听检测与全局偏好 */
+  override?: RowBackend;
+  /** 这一行正在按新后端重跑 preflight(换了后端,类型/页数/折帖都要重算) */
+  busy?: boolean;
+  /** preflight 给出的提醒(疑似文字层损坏、手动指定等),原样展示不做加工 */
+  notes?: string[];
 }
 
 /** 一批新导入文件的复核请求(App 持有,ConvertScreen 渲染)。 */
 export interface ReviewSheet {
   rows: ReviewRow[];
-  totalOcrPages: number;
 }
 
 export interface RecentEntry {
@@ -199,7 +210,7 @@ export const LEGACY_KEYS = {
 
 //: 清理项开关顺序必须与 CLI 的 cleaner.CLEAN_KEYS 一致
 export const CLEAN_KEYS = [
-  "page_numbers", "running_heads", "join_lines", "ocr_spaces", "cjk_spaces",
+  "page_numbers", "running_heads", "front_matter", "join_lines", "ocr_spaces", "cjk_spaces",
   "dup_headings", "headings", "bold", "images",
 ] as const;
 export type CleanKey = (typeof CLEAN_KEYS)[number];
@@ -213,6 +224,7 @@ export type CleanOpts = Record<CleanKey, boolean>;
 export const CLEAN_DEFAULTS: CleanOpts = {
   page_numbers: true,
   running_heads: true,
+  front_matter: true,
   join_lines: true,
   ocr_spaces: true,
   cjk_spaces: true,

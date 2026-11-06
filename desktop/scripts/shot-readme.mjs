@@ -27,7 +27,9 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const CHROME = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
+// 默认找本机 Chrome;没装 Chrome 的机器(只有 Edge / Chromium)用 CHROME_PATH 指过去。
+// 两者都是 CDP 兼容的,脚本其余部分不用改。
+const CHROME = process.env.CHROME_PATH || "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 const URL_TARGET = process.argv[2] || "http://[::1]:4173/";
 const W = Number(process.argv[3] || 1280);
 const H = Number(process.argv[4] || 900);

@@ -58,6 +58,7 @@ function renderQueue() {
       setComposingExpanded={() => {}}
       consoleLines={[]}
       review={null}
+      env={null}
       onPick={() => {}}
       onCancel={() => {}}
       onRetry={() => {}}
@@ -72,6 +73,7 @@ function renderQueue() {
       onStartQueue={() => {}}
       onReviewStart={() => {}}
       onReviewCancel={() => {}}
+      onRowBackend={() => {}}
     />,
   );
 }
