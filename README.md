@@ -222,19 +222,29 @@ pdf2epub.exe
 
 ### 还需要安装 Pandoc
 
-EPUB 生成使用 Pandoc，因此需要安装 Pandoc。
+EPUB 生成使用 Pandoc，因此需要安装 Pandoc。有三种方式：
 
-Windows 可以直接使用：
+**方式一：程序内一键下载（推荐）**
+
+第一次添加文件转换时，如果程序检测到没有安装 Pandoc，会弹窗询问是否立即下载。
+选择「立即下载」，程序会自动下载（约 43 MB）并安装到自己的目录里，无需任何手动操作。
+
+**方式二：手动安装**
 
 ```powershell
 winget install pandoc
 ```
 
-也可以从 Pandoc 官网下载安装：
+或从 Pandoc 官网下载安装：
 
 [https://pandoc.org/installing.html](https://pandoc.org/installing.html)
 
 安装完成后需要重新打开 pdf2epub（或者重新开一个终端窗口），Pandoc 才会被程序找到。
+
+**方式三：便携内置**
+
+把 `pandoc.exe` 放进解压目录的 `pandoc/` 文件夹（没有就新建一个），程序会优先使用它，
+不依赖系统 PATH——适合把 pdf2epub 整个目录拷到 U 盘随身携带的场景。
 
 ### 第一次使用
 
@@ -506,9 +516,12 @@ config/book.css
 
 Pandoc 是生成 EPUB 的必需组件。
 
-先确认已经安装（`winget install pandoc`），然后重新打开 pdf2epub，或者重新开一个终端窗口——刚安装的程序不会自动进入已经在运行的程序的运行环境。
+最省事的做法是让程序自己装：添加文件时检测不到 Pandoc，程序会弹窗提供「立即下载」，
+自动下载约 43 MB 并安装到位，不需要任何手动操作。
 
-桌面端可以在「03 规范 → 环境检查」里确认是否检测到 Pandoc。
+手动安装则先确认已经装好（`winget install pandoc`），然后重新打开 pdf2epub，或者重新开一个终端窗口——刚安装的程序不会自动进入已经在运行的程序的运行环境。也可以把 `pandoc.exe` 直接放进解压目录的 `pandoc/` 文件夹，程序会优先使用这份内置副本。
+
+桌面端可以在「03 规范 → 环境检查」里确认是否检测到 Pandoc（显示「内置」标记时说明用的是便携副本）。
 
 检测不到 Pandoc 时，程序会在提取和 OCR 之前就停下来，不会白白消耗 OCR 额度。
 

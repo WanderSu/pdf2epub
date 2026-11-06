@@ -219,19 +219,27 @@ changed ones back to it.
 
 ### Pandoc is also required
 
-EPUB files are produced by Pandoc, so Pandoc has to be installed.
+EPUB files are produced by Pandoc, so Pandoc has to be installed. There are three ways:
 
-On Windows:
+**Option 1: in-app download (recommended)**
+
+When you add files for the first time and Pandoc is missing, the app offers to download it right away — about 43 MB, installed into the app's own folder automatically, no manual steps.
+
+**Option 2: manual install**
 
 ```powershell
 winget install pandoc
 ```
 
-You can also install it from the Pandoc website:
+Or download it from the Pandoc website:
 
 [https://pandoc.org/installing.html](https://pandoc.org/installing.html)
 
 Pandoc is only picked up by programs started afterwards, so reopen pdf2epub (or open a new terminal window) once the installation is finished.
+
+**Option 3: portable copy**
+
+Drop `pandoc.exe` into the `pandoc/` folder inside the extracted directory (create it if needed). The app prefers this bundled copy and ignores the system PATH — handy when carrying the whole folder on a USB stick.
 
 ### First run
 
@@ -496,9 +504,11 @@ Ordinary digital PDFs are extracted locally and need no token.
 
 Pandoc is required to build the EPUB.
 
-Make sure it is installed (`winget install pandoc`), then reopen pdf2epub or open a new terminal window — a program that is already running does not pick up a newly installed tool.
+The easiest route is to let the app handle it: when Pandoc is missing, adding files brings up a dialog offering an in-app download (about 43 MB, fully automatic).
 
-In the desktop app you can check `03 Settings → Environment check`.
+For a manual install, make sure it is done (`winget install pandoc`), then reopen pdf2epub or open a new terminal window — a program that is already running does not pick up a newly installed tool. You can also drop `pandoc.exe` into the `pandoc/` folder of the extracted directory; the bundled copy takes priority.
+
+In the desktop app you can check `03 Settings → Environment check` (a `Bundled` badge means the portable copy is in use).
 
 When Pandoc is missing, the conversion stops before extraction or OCR, so no OCR quota is spent.
 
