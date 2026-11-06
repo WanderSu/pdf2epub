@@ -38,9 +38,10 @@ from clean.report import (DIFF_FILE, REPORT_FILE, CleanReport, RunInfo,
                           build_stats, normalize_options, write_report)
 from clean.rules import check_image_refs, propose_rules
 from ir.model import UNKNOWN, BookIR, IRError, Producer, text_sha256
-from ir.parse import build_ir
+from ir.parse import build_ir, parse_evidence
 from ir.render import render_ir
 from ir.store import dump_ir, ir_dir
+from ir.structure import restore_headings
 
 
 class CleanEngineError(RuntimeError):
@@ -189,6 +190,18 @@ def clean_text(md: str, *, backend: str = UNKNOWN, source: str = "",
     if notice:
         issues.append(notice)
 
+    # 标题裁决必须在 IR 之前:标题是结构事实,靠证据层改回来后再解析,后面所有规则
+    # (层级归一、按章切分、脚注归属)看到的才是真正的那本书。改的是 md 文本本身,
+    # 所以报告里的 before/after 差异会如实包含这几行插入。
+    md_before = md
+    if evidence:
+        md, head_notes = restore_headings(
+            md, parse_evidence(evidence, backend=backend or UNKNOWN,
+                               part_id=part_id),
+            title_hint=title_hint,
+        )
+        issues.extend(head_notes)
+
     try:
         ir = build_ir(
             md, source=source, backend=backend or UNKNOWN,
@@ -219,7 +232,7 @@ def clean_text(md: str, *, backend: str = UNKNOWN, source: str = "",
     if options.images:
         issues.extend(check_image_refs(md_after, images_dir))
 
-    merged = merge_reports(reports, ir_after=ir_after, md_before=md,
+    merged = merge_reports(reports, ir_after=ir_after, md_before=md_before,
                            md_after=md_after, blocks_before=len(ir.editable_blocks),
                            issues=tuple(dict.fromkeys(issues)),
                            options=options.to_dict(), rule_ids=rule_ids,
