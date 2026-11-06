@@ -111,14 +111,14 @@ def plan_source(
     item.text_pages = detection.text_pages
 
     if backend_override and backend_override != "auto":
+        # 刻意不为「用户手动指定」加 note:那只是把刚点过的动作念回去一遍,
+        # 在界面上会挤掉真正有用的提醒(乱码页、分片数)。
         item.backend = backend_override
         if backend_override == "pymupdf":
             item.kind = "pdf-text"
-            item.notes.append("手动指定本地提取:不做 OCR")
         else:
             item.kind = "pdf-scanned"
             item.ocr_pages = detection.total_pages
-            item.notes.append("手动指定云端 OCR:全篇按 OCR 处理(不看文字层检测结果)")
     elif detection.pdf_type == PDFType.TEXT:
         item.kind = "pdf-text"
         item.backend = "pymupdf"

@@ -94,7 +94,6 @@ export const T = {
       estimateLocal: "This run stays on-device — no cloud pages needed.",
       pipeline: "DETECT 制版 → EXTRACT 检字 → CLEAN 校勘 → BUILD 付印",
       cancel: "CANCEL",
-      hintUnknown: "Detection still running — TYPE / PAGES will be filled in from the engine.",
       // 四段与 format.ts 的 ROW_BACKENDS 一一对应:[标签, 说明]
       backends: [
         ["AUTO", "Follow detection and the global backend preference"],
@@ -105,7 +104,6 @@ export const T = {
       backendHint: "Wrongly detected as text? Pick MINERU / PADDLE here — no need to leave the sheet.",
       backendLocked: "Token not configured — add it under SPECIFICATION first",
       backendNa: "Markdown needs no OCR backend",
-      backendChanged: "Backend changed per-file — the cloud page estimate above has been recalculated.",
     },
     toast: {
       queued: (n: number) => `${n} file${n > 1 ? "s" : ""} sent to the press`,
@@ -285,7 +283,6 @@ export const T = {
       estimateLocal: "本批可在本地完成,不需要云端页面。",
       pipeline: "DETECT 制版 → EXTRACT 检字 → CLEAN 校勘 → BUILD 付印",
       cancel: "取消",
-      hintUnknown: "检测尚未完成,TYPE / 页数 会在转换时由引擎填出。",
       // 四段与 format.ts 的 ROW_BACKENDS 一一对应:[标签, 说明]
       backends: [
         ["自动", "按检测结果与设置里的全局偏好决定"],
@@ -296,7 +293,6 @@ export const T = {
       backendHint: "被误判成「自带文字层」?直接在这里点 MinerU / Paddle,不用退出去改设置。",
       backendLocked: "未配置 Token — 先去「规范」里补上",
       backendNa: "Markdown 直接清理,不需要 OCR 后端",
-      backendChanged: "已按行改过后端,上面那句云端页数已重新算过。",
     },
     toast: {
       queued: (n: number) => `${n} 个文件已送入制版队列`,

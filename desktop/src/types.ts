@@ -147,8 +147,6 @@ export interface ReviewRow {
   override?: RowBackend;
   /** 这一行正在按新后端重跑 preflight(换了后端,类型/页数/折帖都要重算) */
   busy?: boolean;
-  /** preflight 给出的提醒(疑似文字层损坏、手动指定等),原样展示不做加工 */
-  notes?: string[];
 }
 
 /** 一批新导入文件的复核请求(App 持有,ConvertScreen 渲染)。 */

@@ -139,7 +139,6 @@ describe("导入复核表", () => {
     // (后端那列现在是四段选择器,未知行照样能选 —— 认不出类型时正是最需要强制 OCR 的时候)
     expect(sheet.getByText("?")).toBeTruthy();
     expect(sheet.getAllByText("—").length).toBe(2);
-    expect(sheet.getByText(/检测尚未完成/)).toBeTruthy();
   });
 
   it("需要云端页面时按钮说明这笔要花钱", () => {
@@ -245,6 +244,5 @@ describe("导入复核表", () => {
       ],
     });
     expect(screen.getByText(/本批预计需要云端 300 页/)).toBeTruthy();
-    expect(screen.getByText(/已按行改过后端/)).toBeTruthy();
   });
 });

@@ -104,10 +104,8 @@ function ReviewTable({ sheet, lang, env, onCancel, onStart, onRowBackend }: {
   onRowBackend: (id: string, b: RowBackend) => void;
 }) {
   const t = T[lang].review;
-  const unknown = sheet.rows.some(r => !r.known);
   // 总额按行求和:逐行换过后端之后,「这笔要花多少钱」必须跟着变
   const totalOcr = reviewOcrPages(sheet.rows);
-  const changed = sheet.rows.some(r => r.override && r.override !== "auto");
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-[var(--foreground)]/20 p-8" role="dialog" aria-modal="true" aria-label={t.title}>
       <div className="w-full max-w-[760px] bg-[var(--card)] border border-[var(--foreground)]">
@@ -131,14 +129,6 @@ function ReviewTable({ sheet, lang, env, onCancel, onStart, onRowBackend }: {
               <div className="min-w-0">
                 <div className="font-mono text-[11px] text-[var(--foreground)] truncate">{row.name}</div>
                 <div className="font-mono text-[10px] text-[var(--muted-foreground)] mt-1 truncate selectable" title={row.path}>{row.path}</div>
-                {row.notes && row.notes.length > 0 && (
-                  <div
-                    className={`text-[10px] text-[var(--warn)] mt-1 truncate ${lang === "zh" ? "cjk" : "font-mono"}`}
-                    title={row.notes.join("\n")}
-                  >
-                    {row.notes[0]}
-                  </div>
-                )}
               </div>
               <TypeBadge type={row.type} />
               <span className="font-mono text-[11px] tabular-nums text-[var(--muted-foreground)]">{row.pages ?? t.none}</span>
@@ -155,12 +145,6 @@ function ReviewTable({ sheet, lang, env, onCancel, onStart, onRowBackend }: {
             {totalOcr > 0 ? t.estimate(totalOcr) : t.estimateLocal}
           </div>
           <div className="font-mono text-[10px] text-[var(--muted-foreground)] mt-1">{t.pipeline}</div>
-          {changed && (
-            <div className={`text-[11px] text-[var(--primary)] mt-1 ${lang === "zh" ? "cjk" : "font-mono"}`}>{t.backendChanged}</div>
-          )}
-          {unknown && (
-            <div className={`text-[11px] text-[var(--warn)] mt-1 ${lang === "zh" ? "cjk" : "font-mono"}`}>{t.hintUnknown}</div>
-          )}
         </div>
 
         <div className="flex items-center justify-end gap-5 px-8 py-4 border-t border-[var(--border)] bg-[var(--background)]">
@@ -350,16 +334,6 @@ export function ConvertScreen({
                       </div>
                     ))}
                   </div>
-                  {previewPlan.notes.length > 0 && (
-                    <>
-                      <Rule />
-                      <ul className="space-y-1">
-                        {previewPlan.notes.map((n, i) => (
-                          <li key={i} className={`text-[11px] text-[var(--warn)] leading-snug ${lang === "zh" ? "cjk" : "font-mono"}`}>· {n}</li>
-                        ))}
-                      </ul>
-                    </>
-                  )}
                 </div>
               ) : (
                 <span className={`text-[12px] text-[var(--muted-foreground)] ${lang === "zh" ? "cjk" : "font-mono"}`}>{t.detection.empty}</span>

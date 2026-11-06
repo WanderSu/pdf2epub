@@ -550,7 +550,7 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
         if (!plan) {
           // 这一行拿不到计划(CLI 报错):如实退成未知,不保留上一个后端的数字
           return { ...r, busy: false, known: false, type: undefined, pages: undefined,
-                   backend: undefined, shards: undefined, ocrPages: undefined, notes: undefined };
+                   backend: undefined, shards: undefined, ocrPages: undefined };
         }
         return {
           ...r, busy: false, known: true,
@@ -559,7 +559,6 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
           backend: backendFromPlan(plan.backend),
           shards: plan.shards,
           ocrPages: plan.ocr_pages,
-          notes: plan.notes,
         };
       }),
     });
@@ -589,7 +588,6 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
             backend: backendFromPlan(plan.backend),
             shards: plan.shards,
             ocrPages: plan.ocr_pages,
-            notes: plan.notes,
             known,
           }
           : { id: f.id, name: f.name, path: f.path, known };
