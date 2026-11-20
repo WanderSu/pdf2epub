@@ -22,7 +22,6 @@ from pathlib import Path
 
 from epub.verify import VerifyResult, verify_epub
 from page_result import page_marks
-
 #: Markdown 图片引用:![alt](路径) —— 只取文件名去重(不同目录同名视为同一张)
 IMG_RE = re.compile(r"!\[[^\]]*\]\(([^)\s]+)")
 #: 行间公式:$$ … $$ / \[ … \]
@@ -42,6 +41,8 @@ MD_LINK_RE = re.compile(r"(?<!!)\[([^\]]*)\]\(([^)\s]+)\)")
 TRAILING_BREAK_RE = re.compile(r"\S {2,}\n(?=\S)")
 #: 原始 HTML 换行标记(云端 OCR 的图片文字块用 `<br>` 分行)
 RAW_BR_RE = re.compile(r"<br\b[^>]*>", re.I)
+#: 原始 HTML 图片(`<img src=…>`):产物里没有可见文字,统计正文时一并剥掉
+IMG_HTML_RE = re.compile(r"<img\b[^>]*>", re.I)
 #: 表格分隔行(`|---|:--:|`)—— 出现一次就是一张表
 TABLE_SEP_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$", re.M)
 #: 围栏代码块的开合行(成对出现 → 块数 = 行数 // 2)
@@ -77,10 +78,19 @@ def markdown_math_count(md: str) -> int:
 
 
 def markdown_text_chars(md: str) -> int:
-    """Markdown 正文的非空白字符数(剥掉标记与图片引用)。"""
+    """Markdown 正文的非空白字符数(剥掉标记、图片引用与原始 HTML 标签)。
+
+    原始 HTML 必须剥掉:``<br />`` 在 Markdown 侧只是 5 个字符,在产物里被解析成
+    换行、一个字都不贡献。不剥的话,一本靠 ``<br>`` 分行的 OCR 书(md 侧虚增 10%
+    以上)会触发 ``content_text_less`` —— ``--strict`` 下直接判失败,而正文一个字
+    都没少。只剥**空元素**这类确定不产出可见文字的量,``<repetitio …>`` 这种被
+    pandoc 转义成文字的尖括号片段仍然照常计数。
+    """
     text = FENCE_RE.sub("", md)
     text = re.sub(r"<!--.*?-->", "", text, flags=re.S)          # 页码注释
     text = IMG_RE.sub("", text)
+    text = RAW_BR_RE.sub("", text)                              # <br> / <br/> / </br>
+    text = IMG_HTML_RE.sub("", text)                            # <img …>
     text = MD_LINK_RE.sub(r"\1", text)                          # 链接留文字
     text = re.sub(r"^#{1,6}\s*", "", text, flags=re.M)
     text = re.sub(r"[*_`>|#]", "", text)

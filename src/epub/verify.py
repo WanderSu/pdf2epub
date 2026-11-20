@@ -4,7 +4,7 @@
 (除 zip 无法打开外),供两处复用:
 
   - `scripts/verify_epub.py`:人工核验的 CLI(打印 [ OK ]/[WARN]/[FAIL])
-  - `src/batch.py`:转换流程内的自动检查(默认告警,`--strict` 时判失败)
+  - `src/pdf2epub/batch.py`:转换流程内的自动检查(默认告警,`--strict` 时判失败)
 
 检查项:
 1. 包结构:container.xml / mimetype / OPF 可解析
@@ -222,6 +222,7 @@ def verify_epub(
 
     with zf:
         names = zf.namelist()
+        name_set = set(names)      # 条目查找用集合:大书几百个条目时逐条 in list 是 O(n²)
         result.stats["entries"] = len(names)
 
         # ---- 1. 包结构 ----
@@ -256,10 +257,10 @@ def verify_epub(
         opf_dir = Path(opf_path).parent
         opf_dir_parts = [p for p in opf_dir.parts if p not in ("", ".")]
 
-        def in_zip(rel: str, base_dir: list[str] | None = None) -> bool:
-            """EPUB 内逻辑路径是否存在于 zip 包中(纯路径规范化,不碰磁盘)。
+        def _zip_rel(rel: str, base_dir: list[str] | None = None) -> str | None:
+            """把 href 规范化成 zip 根视角的条目名(纯路径运算,不碰磁盘)。
 
-            rel 相对 base_dir,可含 ../;zip 条目是相对 zip 根的完整路径。
+            rel 相对 base_dir,可含 ../;逃逸出 zip 根时返回 None。
             """
             parts: list[str] = list(base_dir if base_dir is not None else opf_dir_parts)
             for seg in Path(rel).parts:
@@ -269,10 +270,38 @@ def verify_epub(
                     if parts:
                         parts.pop()
                     else:
-                        return False   # 逃逸出 zip 根
+                        return None   # 逃逸出 zip 根
                 else:
                     parts.append(seg)
-            return "/".join(parts) in names
+            return "/".join(parts)
+
+        def zip_name(rel: str, base_dir: list[str] | None = None) -> str | None:
+            """href 在包内的真实条目名;不存在返回 None。
+
+            **两种写法都要认**:OCF 要求 href 里的空格/非 ASCII 用百分号编码,而
+            pandoc 之类的生产者也会直接写裸 UTF-8。只比对裸字符串时,一份完全合法的
+            第三方 EPUB 会被判成「manifest 文件不存在」——致命失败(product 侧没法
+            区分「引用编码不同」与「文件真丢了」)。先原文、后解码,命中即止。
+            """
+            for candidate in (rel, unquote(rel)):
+                name = _zip_rel(candidate, base_dir)
+                if name is not None and name in name_set:
+                    return name
+            return None
+
+        def in_zip(rel: str, base_dir: list[str] | None = None) -> bool:
+            """EPUB 内逻辑路径是否存在于 zip 包中(纯路径规范化,不碰磁盘)。"""
+            return zip_name(rel, base_dir) is not None
+
+        def read_entry(rel: str, base_dir: list[str] | None = None) -> bytes | None:
+            """读一个包内条目(自动处理百分号编码差异);不存在返回 None。"""
+            name = zip_name(rel, base_dir)
+            if name is None:
+                return None
+            try:
+                return zf.read(name)
+            except (KeyError, OSError):
+                return None
 
         # ---- 2. 元数据与 manifest ----
         title = opf.find(".//dc:title", NS)
@@ -363,18 +392,19 @@ def verify_epub(
         # 包内 XHTML 只解压一次:第 4 节(内容统计)与第 6 节(内部链接/锚点)都要用
         # 全文,旧实现各读一遍 —— 大扫描书(单章 300KB+)上的 CRC + 解压是纯浪费。
         doc_text: dict[str, str] = {}
+        doc_raw: dict[str, bytes] = {}
         doc_ids: dict[str, set[str]] = {}
 
         def xhtml(hf: str) -> str | None:
             """一份包内 XHTML 的解码文本(只解压一次;读不到返回 None)。"""
             if hf in doc_text:
                 return doc_text[hf]
-            try:
-                raw = zf.read(str((opf_dir / hf).as_posix()))
-            except KeyError:
+            raw = read_entry(hf, opf_dir_parts)
+            if raw is None:
                 return None
             text = raw.decode("utf-8", errors="replace")
             doc_text[hf] = text
+            doc_raw[hf] = raw
             # 顺带索引 id,锚点校验不再整文重扫(旧实现每条锚点链接都重读一次目标文档)
             doc_ids[hf] = set(HTML_ID_RE.findall(text))
             return text
@@ -417,11 +447,10 @@ def verify_epub(
             content = xhtml(hf)
             if content is None:
                 continue   # manifest 缺失已在上面报过
-            hf_posix = str((opf_dir / hf).as_posix())
             # **良构性**:EPUB 的正文是 XHTML(XML)。正则看不出未闭合标签 / 裸 `&` /
             # `<br>` 这类写法,而阅读器会整章拒绝渲染 —— 一个标签就能毁掉整本书。
             try:
-                ET.fromstring(zf.read(hf_posix))
+                ET.fromstring(doc_raw[hf])
             except ET.ParseError as e:
                 # 报错只说「line 92, column 35」等于没说:附带出错处的原文片段,
                 # 才能一眼看出元凶是哪个尖括号/裸 `&`(否则要解包产物去翻那一行)。
@@ -473,7 +502,8 @@ def verify_epub(
                 if not in_zip(src, hf_dir):
                     broken_refs.append(f"{hf} → {src}")
             # 图片也可能来自 <image xlink:href>(SVG 内嵌 / pandoc 的 svg 包装)
-            for src in re.findall(r'<image\b[^>]*href="([^"]+)"', content):
+            svg_images = re.findall(r'<image\b[^>]*href="([^"]+)"', content)
+            for src in svg_images:
                 referenced_images.add(src.split("/")[-1])
             # 封面页 = 引用封面图的那份文档;它必须在 spine 首位,否则阅读器打开
             # 的第一页不是封面(书库缩略图与封面显示是两件事)
@@ -484,9 +514,14 @@ def verify_epub(
             # 只有书名的标题章也不算(它本来就没有正文)
             if book_title and re.sub(r"\s+", "", body_text) == book_title:
                 continue
-            if len(body_text) < EMPTY_CHAPTER_CHARS:
+            # 纯图片 / 纯公式的章节也是正文:图录、漫画、扫描图版、整页公式本来就没有
+            # 文字。只看剥离标签后的文本长度,会把它们判成「疑似空章节」;成规模时
+            # 直接致命失败 —— 一本正常的画册被判成坏书,产物还被改名 .failed。
+            has_media = bool(imgs or svg_images or math_count)
+            if len(body_text) < EMPTY_CHAPTER_CHARS and not has_media:
                 empty_chapters.append(hf)
-            elif len(re.sub(r"\s+", "", body_text)) < SHORT_CHAPTER_CHARS:
+            elif (len(re.sub(r"\s+", "", body_text)) < SHORT_CHAPTER_CHARS
+                  and not has_media):
                 short_chapters.append(hf)
 
         result.stats["math"] = total_math
@@ -542,13 +577,13 @@ def verify_epub(
                         f"{len(orphans)} 张图片在 manifest 里但正文从未引用: {orphans[:3]}")
 
         # ---- 5. TOC ----
-        nav_path = None
+        nav_href = None
         for item in opf.findall(".//opf:manifest/opf:item", NS):
             if "nav" in (item.get("properties") or "").split():
-                nav_path = str((opf_dir / item.get("href", "")).as_posix())
+                nav_href = item.get("href", "")
         toc_links: list[str] = []
-        if nav_path and nav_path in names:
-            nav_raw = zf.read(nav_path)
+        nav_raw = read_entry(nav_href, opf_dir_parts) if nav_href else None
+        if nav_raw is not None:
             nav = nav_raw.decode("utf-8", errors="replace")
             try:
                 ET.fromstring(nav_raw)
@@ -574,15 +609,15 @@ def verify_epub(
                             f"目录里有 {len(broken_toc)} 条链接指向包内不存在的文件: "
                             f"{broken_toc[:5]}")
         else:
-            result.warn("nav_missing", f"未找到 nav 文档 ({nav_path})")
+            result.warn("nav_missing", f"未找到 nav 文档 ({nav_href})")
         if not toc_links and total_headings >= TOC_EMPTY_MIN_HEADINGS:
             result.warn("toc_empty",
                         f"正文有 {total_headings} 个标题,但目录里没有任何条目")
 
         # ---- 5b. toc.ncx:EPUB2 / 旧版 Kindle 的目录来源,坏了同样点不动 ----
         ncx_href = next((h for h in manifest.values() if h.lower().endswith(".ncx")), None)
-        if ncx_href and in_zip(ncx_href, opf_dir_parts):
-            ncx_raw = zf.read(str((opf_dir / ncx_href).as_posix()))
+        ncx_raw = read_entry(ncx_href, opf_dir_parts) if ncx_href else None
+        if ncx_raw is not None:
             try:
                 ncx = ET.fromstring(ncx_raw)
             except ET.ParseError as e:

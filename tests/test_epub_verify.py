@@ -1,4 +1,4 @@
-"""EPUB 结构校验(计划 1.1):先写失败用例,再抽 src/epub/verify.py。
+"""EPUB 结构校验(计划 1.1):先写失败用例,再抽 src/pdf2epub/epub/verify.py。
 
 覆盖:
   - 正常 EPUB 无 error
@@ -15,7 +15,6 @@ from pathlib import Path
 from conftest import build_epub, corrupt_zip_member, rewrite_epub, truncate_file
 
 from epub.verify import archive_issue, verify_epub
-
 
 def test_valid_epub_has_no_errors(sample_epub: Path) -> None:
     r = verify_epub(sample_epub, expect_math=True, expect_images=1)
@@ -389,3 +388,47 @@ def test_stats_expose_structural_counts(tmp_path: Path) -> None:
     # links 只算「内容里的链接」:目录 / 标题页里的导航链接不算(否则永远不为 0)
     assert stats["links"] == 1
     assert stats["links_internal"] >= 1
+
+
+def test_image_only_chapters_are_not_empty(tmp_path: Path) -> None:
+    """只有图片、没有文字的章节是正文(图录/漫画/扫描图版),不是「内容丢失」。
+
+    修复前:空章节只看剥离标签后的文本长度,``<img>`` 完全没参与 —— 三个图版页
+    (标题短于 10 字)就被判成 ``chapters_empty_mass``,默认模式直接失败、产物改名
+    ``.failed``,而正文一个字都没少。
+    """
+    body = ("# 图版 1\n\n![](img1.png)\n\n"
+            "# 图版 2\n\n![](img1.png)\n\n"
+            "# 图版 3\n\n![](img1.png)\n")
+    epub = build_epub(tmp_path / "w", tmp_path / "plates.epub", title="图录",
+                      body=body, with_math=False)
+    r = verify_epub(epub)
+    assert r.stats["empty_chapters"] == 0
+    assert r.errors == [], [i.message for i in r.errors]
+
+
+def test_percent_encoded_href_is_found(sample_epub: Path, tmp_path: Path) -> None:
+    """OCF 允许 href 里用百分号编码(``my%20photo.png``):那是编码差异,不是文件缺失。
+
+    修复前只比对裸字符串:一份完全合法的第三方 EPUB 会被判 ``manifest_missing``
+    (致命),而包内文件其实就在那儿(只是名字带空格)。
+    """
+    dst = tmp_path / "encoded.epub"
+    with zipfile.ZipFile(sample_epub) as zin, \
+            zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == "mimetype":            # 必须第一条且不压缩
+                zout.writestr(zipfile.ZipInfo("mimetype"), data, zipfile.ZIP_STORED)
+                continue
+            name = item.filename
+            if name.endswith("img1.png"):
+                name = name.replace("img1.png", "my photo.png")
+            if item.filename.endswith((".opf", ".xhtml", ".ncx")):
+                data = (data.decode("utf-8")
+                        .replace("img1.png", "my%20photo.png")
+                        .encode("utf-8"))
+            zout.writestr(name, data)
+    r = verify_epub(dst)
+    assert r.errors == [], [i.message for i in r.errors]
+    assert r.stats["images"] >= 1
