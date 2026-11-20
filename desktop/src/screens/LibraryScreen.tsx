@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { T, type Lang } from "../i18n";
-import { Rule, TypeBadge, BackendBadge, SpineBlock, ChapterHead } from "../primitives";
+import {
+  Rule, TypeBadge, BackendBadge, SpineBlock, ChapterHead, DeleteDialog, TrashIcon,
+} from "../primitives";
 import { formatSize } from "../format";
 import type { Backend, LibraryBook } from "../types";
 
@@ -8,7 +10,7 @@ import type { Backend, LibraryBook } from "../types";
 
 type SortKey = "date" | "title" | "size";
 
-export function LibraryScreen({ lang, books, loading, outputDir, onRefresh, onOpenFolder, onOpenEpub, onReconvert }: {
+export function LibraryScreen({ lang, books, loading, outputDir, onRefresh, onOpenFolder, onOpenEpub, onReconvert, onDelete }: {
   lang: Lang;
   books: LibraryBook[];
   loading: boolean;
@@ -17,12 +19,16 @@ export function LibraryScreen({ lang, books, loading, outputDir, onRefresh, onOp
   onOpenFolder: () => void;
   onOpenEpub: (epub: string) => void;
   onReconvert: (path: string) => void;
+  /** 删除一条书目记录(连 EPUB 文件一起删) */
+  onDelete: (book: LibraryBook) => void;
 }) {
   const t = T[lang].library;
   const [sort, setSort] = useState<SortKey>("date");
   const [filter, setFilter] = useState<Backend | "All">("All");
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  /** 正在等确认删除的书 —— 对话框里由用户决定删不删文件 */
+  const [deleteTarget, setDeleteTarget] = useState<LibraryBook | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
   // 页快捷键「/」由 App 广播(Booklist 自己不该关心键盘),这里只认事件
@@ -137,7 +143,7 @@ export function LibraryScreen({ lang, books, loading, outputDir, onRefresh, onOp
 
         {/* 书目 */}
         <div className="flex-1 overflow-auto scroll-area pl-8 pr-[var(--gutter)] py-4">
-          <div className="grid grid-cols-[44px_1fr_80px_64px_88px_140px] gap-4 pb-1.5 border-b border-[var(--border)]">
+          <div className="grid grid-cols-[44px_1fr_80px_64px_88px_168px] gap-4 pb-1.5 border-b border-[var(--border)]">
             {["", t.colTitle, t.colSize, t.colPages, t.colDate, ""].map((h, i) => (
               <span key={i} className={`text-[10px] text-[var(--muted-foreground)] ${lang === "zh" ? "cjk" : "font-mono tracking-[0.1em] uppercase"}`}>{h}</span>
             ))}
@@ -168,7 +174,7 @@ export function LibraryScreen({ lang, books, loading, outputDir, onRefresh, onOp
           {filtered.map((book, i) => (
             <div
               key={book.id}
-              className="grid grid-cols-[44px_1fr_80px_64px_88px_140px] gap-4 py-3 border-b border-[var(--border)] hover:bg-[var(--secondary)] transition-colors row-enter"
+              className="grid grid-cols-[44px_1fr_80px_64px_88px_168px] gap-4 py-3 border-b border-[var(--border)] hover:bg-[var(--secondary)] transition-colors row-enter"
               style={{ animationDelay: `${Math.min(i, 8) * 24}ms` }}
               onMouseEnter={() => setHoveredId(book.id)}
               onMouseLeave={() => setHoveredId(null)}
@@ -197,6 +203,15 @@ export function LibraryScreen({ lang, books, loading, outputDir, onRefresh, onOp
                     <button onClick={() => onReconvert(book.path!)} className={`font-mono text-[10px] tracking-[0.06em] uppercase text-[var(--muted-foreground)] hover:text-[var(--primary)] transition-colors ${lang === "zh" ? "cjk font-mono" : ""}`}>{t.reconvert}</button>
                   </>
                 )}
+                <Rule vertical />
+                <button
+                  onClick={() => setDeleteTarget(book)}
+                  aria-label={lang === "zh" ? "删除" : "Delete"}
+                  title={lang === "zh" ? "删除记录或文件" : "Delete record or file"}
+                  className="p-0.5 text-[var(--muted-foreground)] hover:text-[var(--danger)] transition-colors"
+                >
+                  <TrashIcon />
+                </button>
               </div>
             </div>
           ))}
@@ -211,6 +226,21 @@ export function LibraryScreen({ lang, books, loading, outputDir, onRefresh, onOp
           </div>
         </div>
       </div>
+
+      {deleteTarget && (
+        <DeleteDialog
+          lang={lang}
+          kind="library"
+          subject={deleteTarget.title}
+          file={deleteTarget.epub}
+          onCancel={() => setDeleteTarget(null)}
+          onConfirm={() => {
+            const book = deleteTarget;
+            setDeleteTarget(null);
+            onDelete(book);
+          }}
+        />
+      )}
     </div>
   );
 }

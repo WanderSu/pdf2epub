@@ -854,7 +854,7 @@ fn epub_metadata(path: &str) -> (String, String) {
     let Ok(mut zip) = zip::ZipArchive::new(file) else {
         return (String::new(), String::new());
     };
-    let Ok(mut container) = zip.by_name("META-INF/container.xml") else {
+    let Ok(container) = zip.by_name("META-INF/container.xml") else {
         return (String::new(), String::new());
     };
     let mut buf = String::new();
@@ -863,7 +863,7 @@ fn epub_metadata(path: &str) -> (String, String) {
         return (String::new(), String::new());
     };
     let opf = opf.trim_start_matches('/').to_string();
-    let Ok(mut opf_file) = zip.by_name(&opf) else {
+    let Ok(opf_file) = zip.by_name(&opf) else {
         return (String::new(), String::new());
     };
     let mut obuf = String::new();
@@ -1106,6 +1106,82 @@ fn library_set_meta(
     }
     save_library(&entries);
     Ok(())
+}
+
+/// 从书库删除一条记录,并**连同 EPUB 文件一起删**。
+///
+/// **删除顺序**:先删文件、再动记录。文件被占用/只读时命令返回错误,记录必须
+/// 原样保留 —— 否则书库里会出现「记录没了、文件还在」的孤儿(用户既看不见、
+/// 也没有入口再删它);同时也不留「文件删了、记录还在」的假条目。
+///
+/// 安全边界(这条命令会真的删文件):目标必须是 **library.json 里已有的记录**,
+/// 且扩展名是 ``.epub``。不是「传什么路径就删什么」的通用入口。
+#[tauri::command]
+fn library_delete(path: String) -> Result<Vec<LibraryEntry>, String> {
+    let mut entries = load_library();
+    let removed = take_library_entry(&mut entries, &path)
+        .ok_or_else(|| format!("书库中没有该记录: {path}"))?;
+    remove_epub_file(&removed.path, None)?;
+    entries.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+    save_library(&entries);
+    Ok(entries)
+}
+
+/// 删除转换队列某一行的产物(EPUB),并顺手清掉对应的书库记录。
+///
+/// 队列行不在 library.json 里也能删(还没同步的手工产物),所以不能像
+/// :func:`library_delete` 那样按记录校验;改为**限死在输出目录内**:
+/// canonicalize 之后必须仍位于 ``output_dir`` 之下,避免这条命令在前端被绕过时
+/// 变成「删任意 .epub」的入口。返回删除后的书库(供界面立刻刷新)。
+#[tauri::command]
+fn delete_book_output(epub: String, output_dir: String) -> Result<Vec<LibraryEntry>, String> {
+    let dir = resolve_dir(&output_dir);
+    remove_epub_file(&epub, Some(&dir))?;
+    let mut entries = load_library();
+    take_library_entry(&mut entries, &epub);
+    entries.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+    save_library(&entries);
+    Ok(entries)
+}
+
+/// 按路径取走一条书库记录(比较走 ``same_path``:分隔符/大小写不敏感)。
+fn take_library_entry(entries: &mut Vec<LibraryEntry>, path: &str) -> Option<LibraryEntry> {
+    let idx = entries.iter().position(|e| same_path(&e.path, path))?;
+    Some(entries.remove(idx))
+}
+
+/// 删除一个 EPUB 文件;``restrict_to`` 给出时文件必须位于该目录之下。
+///
+/// - 只接受 ``.epub``:会真删文件的路径不做通配
+/// - 文件本来不存在视为成功(用户可能早手动删了,此时删记录应当照常进行)
+/// - 目录比较用 canonicalize 之后的形式,``..`` 与符号链接都绕不过去
+fn remove_epub_file(path: &str, restrict_to: Option<&Path>) -> Result<(), String> {
+    let p = Path::new(path);
+    let is_epub = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("epub"))
+        .unwrap_or(false);
+    if !is_epub {
+        return Err("只允许删除 .epub 文件".into());
+    }
+    if let Some(dir) = restrict_to {
+        let parent = p.parent().ok_or("路径没有父目录")?;
+        let parent = std::fs::canonicalize(parent)
+            .map_err(|e| format!("无法解析文件所在目录: {e}"))?;
+        let dir = std::fs::canonicalize(dir)
+            .map_err(|e| format!("无法解析输出目录: {e}"))?;
+        if !parent.starts_with(&dir) {
+            return Err(format!(
+                "只允许删除输出目录内的 EPUB({})",
+                dir.display()
+            ));
+        }
+    }
+    if !p.exists() {
+        return Ok(());
+    }
+    std::fs::remove_file(p).map_err(|e| format!("删除失败(文件可能被占用): {e}"))
 }
 
 /// 用系统默认程序打开 EPUB(Rust 侧调用 opener 插件,绕开前端权限链;
@@ -1758,6 +1834,8 @@ pub fn run() {
             save_apikey,
             library_sync,
             library_set_meta,
+            library_delete,
+            delete_book_output,
             load_settings,
             save_settings,
             clean_baseline,
@@ -1797,6 +1875,64 @@ mod tests {
     fn same_path_ignores_separator_and_case() {
         assert!(same_path("E:\\out\\A.epub", "e:/out/a.epub"));
         assert!(!same_path("E:\\out\\a.epub", "E:\\out\\b.epub"));
+    }
+
+    #[test]
+    fn take_library_entry_matches_separator_and_case() {
+        let mk = |path: &str| LibraryEntry {
+            path: path.into(),
+            title: "T".into(),
+            author: "A".into(),
+            size: 1,
+            mtime: 2,
+            added_at: 3,
+            kind: None,
+            backend: None,
+            pages: None,
+            source: None,
+        };
+        let mut entries = vec![mk("E:\\out\\A.epub"), mk("E:\\out\\b.epub")];
+        let removed = take_library_entry(&mut entries, "e:/out/a.epub").expect("应当命中");
+        assert_eq!(removed.path, "E:\\out\\A.epub");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "E:\\out\\b.epub");
+        assert!(take_library_entry(&mut entries, "e:/out/a.epub").is_none());
+    }
+
+    #[test]
+    fn remove_epub_refuses_non_epub() {
+        // 这条命令会真删文件:扩展名是唯一的兜底闸门,不能放过
+        let err = remove_epub_file("C:/books/a.pdf", None).unwrap_err();
+        assert!(err.contains(".epub"), "{err}");
+    }
+
+    #[test]
+    fn remove_epub_tolerates_missing_file() {
+        let missing = std::env::temp_dir().join("p2e-delete-missing-xyz.epub");
+        let _ = std::fs::remove_file(&missing);
+        assert!(remove_epub_file(missing.to_string_lossy().as_ref(), None).is_ok());
+    }
+
+    #[test]
+    fn remove_epub_respects_output_dir_boundary() {
+        let base = std::env::temp_dir().join(format!("p2e-del-{}", std::process::id()));
+        let out = base.join("output");
+        std::fs::create_dir_all(&out).expect("建输出目录");
+        let inside = out.join("book.epub");
+        std::fs::write(&inside, b"x").expect("写内部文件");
+        let outside = base.join("elsewhere.epub");
+        std::fs::write(&outside, b"x").expect("写外部文件");
+
+        // 目录内:真删
+        assert!(remove_epub_file(inside.to_string_lossy().as_ref(), Some(&out)).is_ok());
+        assert!(!inside.exists());
+
+        // 目录外:拒绝,并且文件必须还在
+        let err = remove_epub_file(outside.to_string_lossy().as_ref(), Some(&out)).unwrap_err();
+        assert!(err.contains("输出目录"), "{err}");
+        assert!(outside.exists());
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

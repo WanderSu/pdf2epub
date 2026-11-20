@@ -74,6 +74,7 @@ function renderQueue() {
       onReviewStart={() => {}}
       onReviewCancel={() => {}}
       onRowBackend={() => {}}
+      onDelete={() => {}}
     />,
   );
 }

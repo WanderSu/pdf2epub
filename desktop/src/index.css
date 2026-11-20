@@ -258,13 +258,13 @@ input, textarea, pre { user-select: text; }
   .queue-table .col-backend,
   .queue-table .head-backend { display: none; }
   .queue-table.grid {
-    grid-template-columns: minmax(0,1fr) min-content minmax(56px,72px) minmax(48px,64px) minmax(0,108px) 72px;
+    grid-template-columns: minmax(0,1fr) min-content minmax(56px,72px) minmax(48px,64px) minmax(0,108px) 88px;
   }
 }
 @media (max-width: 720px) {
   .queue-table .col-type,
   .queue-table .head-type { display: none; }
   .queue-table.grid {
-    grid-template-columns: minmax(0,1fr) minmax(56px,72px) minmax(48px,64px) minmax(0,108px) 72px;
+    grid-template-columns: minmax(0,1fr) minmax(56px,72px) minmax(48px,64px) minmax(0,108px) 88px;
   }
 }

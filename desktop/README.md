@@ -6,6 +6,7 @@ Tauri 2 + React 19 + Tailwind v4。界面主壳在 `src/App.tsx`,三屏拆在 `s
 主题与材质在 `src/index.css`(纸 / 墨 / 朱砂三色,变量名与 CSS 变量逐字对应)。
 Rust 侧 `src-tauri/src/lib.rs` 提供 IPC:
 `convert_file` / `preflight` / `cancel_convert` / `library_sync` / `library_set_meta` /
+`library_delete` / `delete_book_output` /
 `check_env` / `save_apikey` / `set_cli_path` / `open_epub`,并通过 `conv://progress` 推送日志。
 
 ## 开发
@@ -14,7 +15,7 @@ Rust 侧 `src-tauri/src/lib.rs` 提供 IPC:
 npm install
 npm run tauri dev                    # 开发模式
 npm run build                        # 仅前端(tsc + vite)
-npm run tauri build -- --no-bundle   # release exe → src-tauri/target/release/desktop.exe
+npx tauri build --no-bundle          # release exe → src-tauri/target/release/desktop.exe
 ```
 
 产品名是 `pdf2epub`,但 Cargo crate 名是 `desktop`,所以产物文件名是 `desktop.exe`——

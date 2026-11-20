@@ -850,7 +850,7 @@ npm run tauri dev
 构建：
 
 ```bash
-npm run tauri build -- --no-bundle
+npx tauri build --no-bundle
 ```
 
 构建桌面端需要：

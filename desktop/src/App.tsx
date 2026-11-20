@@ -874,6 +874,41 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
     }
   }, [outputDir, notify, t]);
 
+  // ── 删除(队列 / 书目)──
+  //  · 队列:「仅移除记录」= 纯前端移除;「连文件删」= 删 output 里的 EPUB
+  //    并顺带清掉对应书库记录。
+  //  · 书目:没有只删记录的选项 —— 记录 + EPUB 一起删。先删文件成功、再删记录,
+  //    删不掉(被占用/只读)就报错并保留记录:不留「记录没了、文件还在」的孤儿。
+  const deleteQueueFile = useCallback(async (id: string, deleteFile: boolean) => {
+    const f = files.find(x => x.id === id);
+    if (!f) return;
+    if (deleteFile && f.epub) {
+      try {
+        // 命令会顺带清掉对应的书库记录,返回刷新后的书库
+        const entries = await invoke<LibEntry[]>("delete_book_output", { epub: f.epub, outputDir });
+        setDiskBooks(entries);
+      } catch (e) {
+        notify(t.toast.deleteFailed(String(e)), "danger");
+        return;
+      }
+    }
+    canceled.current.delete(id);
+    setFiles(prev => prev.filter(x => x.id !== id));
+    notify(deleteFile && f.epub ? t.toast.deleted(f.name) : t.toast.removed(f.name), "ok");
+  }, [files, outputDir, notify, t]);
+
+  const deleteLibraryBook = useCallback(async (book: LibraryBook) => {
+    try {
+      const entries = await invoke<LibEntry[]>("library_delete", { path: book.epub });
+      setDiskBooks(entries);
+      // 文件已经删了,队列里同一条产物不能继续挂着(它会显示成可打开/可重跑)
+      setFiles(prev => prev.filter(f => !f.epub || normPath(f.epub) !== normPath(book.epub)));
+      notify(t.toast.deleted(book.title), "ok");
+    } catch (e) {
+      notify(t.toast.deleteFailed(String(e)), "danger");
+    }
+  }, [notify, t]);
+
   // 书库「重新转换」= 用户明确要求重转 → force(否则已有 EPUB 会让它直接 skip,
   // 界面看起来跑了一遍,其实什么都没发生)
   const reconvert = useCallback((path: string) => {
@@ -1006,6 +1041,7 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
             onReviewStart={() => settleReview(true)}
             onReviewCancel={() => settleReview(false)}
             onRowBackend={(id, b) => void chooseRowBackend(id, b)}
+            onDelete={(id, deleteFile) => void deleteQueueFile(id, deleteFile)}
           />
         )}
         {screen === "library" && (
@@ -1018,6 +1054,7 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
             onOpenFolder={openFolder}
             onOpenEpub={openEpub}
             onReconvert={reconvert}
+            onDelete={book => void deleteLibraryBook(book)}
           />
         )}
         {screen === "settings" && (

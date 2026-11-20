@@ -841,7 +841,7 @@ npm run tauri dev
 Build:
 
 ```bash
-npm run tauri build -- --no-bundle
+npx tauri build --no-bundle
 ```
 
 Building the desktop app needs:

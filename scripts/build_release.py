@@ -91,15 +91,20 @@ def shell_exe() -> Path:
     if not candidates:
         raise SystemExit(
             f"未找到桌面壳产物: {TAURI_RELEASE} 下没有 .exe\n"
-            "先执行: cd desktop && npm run tauri build -- --no-bundle"
+            "先执行: cd desktop && npx tauri build --no-bundle"
         )
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
 def build_shell() -> Path:
-    """Tauri 构建桌面壳(绿色版 exe,不打安装包)。"""
-    npm = shutil.which("npm") or "npm.cmd"
-    run([npm, "run", "tauri", "build", "--", "--no-bundle"], cwd=DESKTOP)
+    """Tauri 构建桌面壳(绿色版 exe,不打安装包)。
+
+    **不要写 `npm run tauri build -- --no-bundle`**:`--no-bundle` 会被 npm 自己
+    当成配置项解析(`Unknown cli flag: --bundle`,EUNKNOWNCONFIG),构建根本不会开始。
+    直接调本地 devDependency 里的 tauri CLI(npx 优先用 node_modules 里那份)。
+    """
+    npx = shutil.which("npx") or "npx.cmd"
+    run([npx, "tauri", "build", "--no-bundle"], cwd=DESKTOP)
     return shell_exe()
 
 

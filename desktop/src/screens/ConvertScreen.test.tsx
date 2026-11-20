@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { ConvertScreen } from "./ConvertScreen";
 import { ROW_BACKENDS } from "../format";
@@ -55,6 +55,7 @@ function baseProps() {
     onReviewStart: noop,
     onReviewCancel: noop,
     onRowBackend: noop,
+    onDelete: noop,
   };
 }
 
@@ -244,5 +245,58 @@ describe("导入复核表", () => {
       ],
     });
     expect(screen.getByText(/本批预计需要云端 300 页/)).toBeTruthy();
+  });
+});
+
+describe("ConvertScreen 删除队列记录", () => {
+  it("终态行的删除按钮打开确认框,「仅移除记录」只删记录", () => {
+    const onDelete = vi.fn();
+    const file = makeFile({ status: "done", progress: 100, epub: "C:/out/a.epub" });
+    render(<ConvertScreen {...baseProps()} files={[file]} onDelete={onDelete} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    const dialog = screen.getByRole("dialog");
+    // 确认框必须点名「删的是哪一个」,并把文件路径摊开
+    expect(within(dialog).getByText("a.pdf")).toBeTruthy();
+    expect(within(dialog).getByText("C:/out/a.epub")).toBeTruthy();
+
+    fireEvent.click(within(dialog).getByText("仅移除记录"));
+    expect(onDelete).toHaveBeenCalledWith("f1", false);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("「同时删掉 EPUB」把 deleteFile=true 传下去", () => {
+    const onDelete = vi.fn();
+    const file = makeFile({ status: "skipped", progress: 100, epub: "C:/out/a.epub" });
+    render(<ConvertScreen {...baseProps()} files={[file]} onDelete={onDelete} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    fireEvent.click(within(screen.getByRole("dialog")).getByText("同时删掉 EPUB"));
+    expect(onDelete).toHaveBeenCalledWith("f1", true);
+  });
+
+  it("还没有 EPUB 时只给「仅移除记录」,不给一个点了必然报错的按钮", () => {
+    render(<ConvertScreen {...baseProps()} files={[makeFile({ status: "failed" })]} />);
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByText("仅移除记录")).toBeTruthy();
+    expect(within(dialog).queryByText("同时删掉 EPUB")).toBeNull();
+    expect(within(dialog).getByText(/还没有产出 EPUB/)).toBeTruthy();
+  });
+
+  it("转换中的行没有删除入口:先取消,避免删了记录进程还在写盘", () => {
+    renderConvert([makeFile({ status: "converting", progress: 40 })]);
+    expect(screen.queryByRole("button", { name: "删除" })).toBeNull();
+  });
+
+  it("Esc 关闭确认框且不触发删除", () => {
+    const onDelete = vi.fn();
+    render(
+      <ConvertScreen {...baseProps()} files={[makeFile({ status: "done", progress: 100, epub: "C:/out/a.epub" })]} onDelete={onDelete} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(onDelete).not.toHaveBeenCalled();
   });
 });

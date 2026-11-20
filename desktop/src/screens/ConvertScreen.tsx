@@ -3,7 +3,7 @@ import { errorKind } from "../events";
 import { T, type Lang } from "../i18n";
 import {
   Rule, TypeBadge, StatusChip, ErrorLine, BackendBadge, StageStepper,
-  ComposingRoom, WarningStrip, ChapterHead,
+  ComposingRoom, WarningStrip, ChapterHead, DeleteDialog, TrashIcon,
 } from "../primitives";
 import { KIND_TO_TYPE, ROW_BACKENDS, backendFromPlan, fmtMonthDay, reviewOcrPages } from "../format";
 import type {
@@ -167,7 +167,7 @@ export function ConvertScreen({
   composingExpanded, setComposingExpanded, consoleLines, review, env,
   onPick, onCancel, onRetry, onClearDone, onRetryFailed, onCancelAll, onUseOcr,
   onPreflight, onPreflightRecent, onAddRecent, onMoveTop, onStartQueue,
-  onReviewStart, onReviewCancel, onRowBackend,
+  onReviewStart, onReviewCancel, onRowBackend, onDelete,
 }: {
   lang: Lang;
   files: QueueFile[];
@@ -200,10 +200,14 @@ export function ConvertScreen({
   onReviewCancel: () => void;
   /** 在复核表某一行上换后端(换完 App 会重跑这一行的预检) */
   onRowBackend: (id: string, b: RowBackend) => void;
+  /** 删除一条队列记录;deleteFile 为真时连生成的 EPUB 一起删 */
+  onDelete: (id: string, deleteFile: boolean) => void;
 }) {
   const t = T[lang].convert;
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  /** 正在等确认删除的行 —— 打开对话框,由用户选择「只删记录」还是「连文件删」 */
+  const [deleteTarget, setDeleteTarget] = useState<QueueFile | null>(null);
 
   const hasFiles = files.length > 0;
   const done = files.filter(f => f.status === "done").length;
@@ -457,7 +461,7 @@ export function ConvertScreen({
               </div>
             )}
 
-            <div className="queue-table grid grid-cols-[minmax(0,1fr)_min-content_minmax(56px,72px)_minmax(48px,64px)_minmax(0,96px)_minmax(0,108px)_72px] gap-3 py-1.5 border-b border-[var(--border)]">
+            <div className="queue-table grid grid-cols-[minmax(0,1fr)_min-content_minmax(56px,72px)_minmax(48px,64px)_minmax(0,96px)_minmax(0,108px)_88px] gap-3 py-1.5 border-b border-[var(--border)]">
               {["", t.colFile, t.colSize, t.colPages, t.colBackend, t.colStatus, t.colAction].map((h, i) => (
                 <span key={i} className={`text-[10px] text-[var(--muted-foreground)] ${lang === "zh" ? "cjk" : "font-mono tracking-[0.1em] uppercase"} ${i >= 2 && i <= 3 ? "text-right" : ""} ${i === 1 ? "head-type whitespace-nowrap" : ""} ${i === 4 ? "head-backend" : ""} ${i === 5 ? "whitespace-nowrap" : ""}`}>{h}</span>
               ))}
@@ -471,7 +475,7 @@ export function ConvertScreen({
               return (
                 <div key={file.id} className={`row-enter relative ${isSelected ? "bg-[var(--primary)]/4" : ""}`} style={{ animationDelay: `${Math.min(fi, 8) * 24}ms` }}>
                   <div
-                    className="queue-table grid grid-cols-[minmax(0,1fr)_min-content_minmax(56px,72px)_minmax(48px,64px)_minmax(0,96px)_minmax(0,108px)_72px] gap-3 py-2 items-center hover:bg-[var(--secondary)] transition-colors cursor-pointer"
+                    className="queue-table grid grid-cols-[minmax(0,1fr)_min-content_minmax(56px,72px)_minmax(48px,64px)_minmax(0,96px)_minmax(0,108px)_88px] gap-3 py-2 items-center hover:bg-[var(--secondary)] transition-colors cursor-pointer"
                     onClick={() => toggleRow(file.id)}
                   >
                     <div className="flex items-center gap-2 min-w-0">
@@ -499,7 +503,7 @@ export function ConvertScreen({
                     <span className="font-mono text-[10px] text-[var(--muted-foreground)] tabular-nums text-right">{file.pages || "—"}</span>
                     <span className="col-backend inline-flex"><BackendBadge backend={file.backend} /></span>
                     <span className="whitespace-nowrap"><StatusChip status={file.status} retrying={!!file.retrying} /></span>
-                    <div className="flex justify-end">
+                    <div className="flex justify-end items-center gap-2">
                       {(file.status === "pending" || file.status === "converting") && (
                         <button onClick={e => { e.stopPropagation(); onCancel(file.id); }} className="font-mono text-[10px] text-[var(--muted-foreground)] hover:text-[var(--danger)] transition-colors" aria-label={lang === "zh" ? "取消" : "Cancel"}>✕</button>
                       )}
@@ -508,6 +512,18 @@ export function ConvertScreen({
                       )}
                       {(file.status === "done" || file.status === "skipped") && (
                         <button onClick={e => { e.stopPropagation(); onRetry(file.id); }} className={`font-mono text-[10px] tracking-[0.06em] text-[var(--muted-foreground)] uppercase hover:text-[var(--foreground)] transition-colors ${lang === "zh" ? "cjk font-sans" : ""}`}>{t.requeue}</button>
+                      )}
+                      {/* 删除:正在转换的行不给入口(要么先取消,要么等它跑完),
+                          避免「删了记录、进程还在写盘」这种两头不落地的状态 */}
+                      {file.status !== "converting" && (
+                        <button
+                          onClick={e => { e.stopPropagation(); setDeleteTarget(file); }}
+                          aria-label={lang === "zh" ? "删除" : "Delete"}
+                          title={lang === "zh" ? "删除记录或文件" : "Delete record or file"}
+                          className="p-0.5 text-[var(--muted-foreground)] hover:text-[var(--danger)] transition-colors"
+                        >
+                          <TrashIcon />
+                        </button>
                       )}
                     </div>
                   </div>
@@ -569,6 +585,21 @@ export function ConvertScreen({
           onCancel={onReviewCancel}
           onStart={onReviewStart}
           onRowBackend={onRowBackend}
+        />
+      )}
+
+      {deleteTarget && (
+        <DeleteDialog
+          lang={lang}
+          kind="queue"
+          subject={deleteTarget.name}
+          file={deleteTarget.epub}
+          onCancel={() => setDeleteTarget(null)}
+          onConfirm={deleteFile => {
+            const target = deleteTarget;
+            setDeleteTarget(null);
+            onDelete(target.id, deleteFile);
+          }}
         />
       )}
     </div>

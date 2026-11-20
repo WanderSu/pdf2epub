@@ -1,6 +1,6 @@
 // 排版组件:所有屏共用的「铅字」——分隔线、徽标、工序、开关、控制台。
 // 只负责长什么样,不含任何业务判断(状态→颜色除外)。
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ERROR_KIND_LABEL, type ErrorKind, type Signatures, type StageNode } from "./events";
 import { T, type Lang } from "./i18n";
 import type { Backend, ConsoleLine, FileStatus, FileType, Notice, QueueFile } from "./types";
@@ -401,6 +401,104 @@ export function ChapterHead({ label, description, state, lang }: {
       <div className="flex items-center">
         <span className="h-px w-24 bg-[var(--primary)]" />
         <span className="h-px flex-1 bg-[var(--border)]" />
+      </div>
+    </div>
+  );
+}
+
+/* 垃圾桶图标:两个列表的行内删除按钮共用(文字按钮会把操作列挤爆)。 */
+export function TrashIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden className={className}>
+      <path d="M2 3.5h8M4.5 3.5V2h3v1.5M3 3.5l.5 7h5l.5-7M5 5.5v3M7 5.5v3"
+        stroke="currentColor" strokeWidth="0.9" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+/* 删除确认 —— 队列与书目两个列表共用。
+   不用 window.confirm,是因为两个列表的后果不一样,要写清楚:
+
+   - 队列:可以「仅移除记录」(还没产物,或想保留 EPUB),也可以连文件一起删;
+   - 书目:删除就是「记录 + EPUB」一起删,没有只删记录的选项 —— 只删记录会被
+     library_sync 扫目录加回来,给了等于骗人。
+
+   键盘:Esc 取消。队列默认焦点在「仅移除记录」(不删文件更保守);书目默认焦点
+   在「取消」—— 破坏性按钮不该拿到回车。 */
+export function DeleteDialog({ lang, kind, subject, file, onCancel, onConfirm }: {
+  lang: Lang;
+  kind: "queue" | "library";
+  subject: string;
+  /** 可删除的 EPUB 路径;空 = 磁盘上还没有产物,只能删记录 */
+  file?: string;
+  onCancel: () => void;
+  onConfirm: (deleteFile: boolean) => void;
+}) {
+  const t = T[lang].delete;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onCancel(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel]);
+
+  const isLibrary = kind === "library";
+  const title = isLibrary ? t.libraryTitle : t.queueTitle;
+  const hint = isLibrary
+    ? t.libraryHint
+    : (file ? t.queueHint : t.noFile);
+  const cjk = lang === "zh" ? "cjk" : "font-mono";
+  const dangerBtn = `px-4 py-2 bg-[var(--danger)] text-[var(--primary-foreground)] text-[11px] hover:opacity-90 transition-opacity ${lang === "zh" ? "cjk" : "font-mono tracking-[0.08em]"}`;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--foreground)]/20 p-8"
+      role="dialog" aria-modal="true" aria-label={title}
+      onClick={onCancel}
+    >
+      <div
+        className="w-full max-w-[520px] bg-[var(--card)] border border-[var(--danger)]"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="px-8 pt-7 pb-5">
+          <div className="flex items-baseline gap-4">
+            <span className="font-mono text-[11px] tracking-[0.1em] text-[var(--danger)]">{t.title}</span>
+            <span className={`font-serif text-[22px] leading-tight text-[var(--foreground)] ${lang === "zh" ? "cjk-serif" : ""}`}>{title}</span>
+          </div>
+          <div className={`mt-4 text-[13px] text-[var(--foreground)] break-all ${cjk}`}>{subject}</div>
+          {file && (
+            <div className={`mt-1 text-[10px] text-[var(--muted-foreground)] break-all selectable ${cjk}`}>{file}</div>
+          )}
+          <div className={`mt-4 text-[12px] leading-relaxed text-[var(--muted-foreground)] ${cjk}`}>{hint}</div>
+          {!isLibrary && file && (
+            <div className={`mt-2 text-[12px] leading-relaxed text-[var(--muted-foreground)] ${cjk}`}>{t.fileHint}</div>
+          )}
+        </div>
+        <div className="flex items-center justify-end gap-4 px-8 py-4 border-t border-[var(--border)] bg-[var(--background)]">
+          <button
+            autoFocus={isLibrary}
+            onClick={onCancel}
+            className={`text-[11px] text-[var(--muted-foreground)] hover:text-[var(--foreground)] ${lang === "zh" ? "cjk" : "font-mono tracking-[0.08em]"}`}
+          >
+            {t.cancel}
+          </button>
+          {!isLibrary && (
+            <>
+              <button
+                autoFocus
+                onClick={() => onConfirm(false)}
+                className={`px-4 py-2 border border-[var(--border)] text-[11px] text-[var(--foreground)] hover:border-[var(--foreground)] transition-colors ${lang === "zh" ? "cjk" : "font-mono tracking-[0.08em]"}`}
+              >
+                {t.onlyRecord}
+              </button>
+              {file && (
+                <button onClick={() => onConfirm(true)} className={dangerBtn}>{t.withFile}</button>
+              )}
+            </>
+          )}
+          {isLibrary && (
+            <button onClick={() => onConfirm(true)} className={dangerBtn}>{t.deleteBoth}</button>
+          )}
+        </div>
       </div>
     </div>
   );
