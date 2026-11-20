@@ -224,6 +224,7 @@ EPUB files are produced by Pandoc, so Pandoc has to be installed. There are thre
 **Option 1: in-app download (recommended)**
 
 When you add files for the first time and Pandoc is missing, the app offers to download it right away — about 43 MB, installed into the app's own folder automatically, no manual steps.
+The download is verified against the official SHA256 before extraction and execution; a mismatch is discarded with an error instead of running an unverified exe.
 
 **Option 2: manual install**
 

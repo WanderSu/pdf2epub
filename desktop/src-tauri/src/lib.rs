@@ -1351,11 +1351,56 @@ fn bundled_pandoc() -> Option<PathBuf> {
 /// 下载源:官方 GitHub Release(版本钉死,升级只改这一处)。
 const PANDOC_VERSION: &str = "3.13";
 
+/// ``pandoc-3.13-windows-x86_64.zip`` 的 SHA256(GitHub 发布资产自带的 digest)。
+///
+/// **为什么必须钉**:下载下来的是要**直接执行**的 exe —— 只靠 HTTPS + 体积判断,
+/// 中间人/镜像/缓存投毒都能把它换成任意程序。升级 ``PANDOC_VERSION`` 时,这条
+/// 必须一起换成新资产的 digest(来源:`api.github.com/repos/jgm/pandoc/releases
+/// /tags/<版本>` 的 assets[].digest),否则下载会被判失败 —— 这是刻意的。
+const PANDOC_SHA256: &str = "23e1f2e978a3df80db8bf65c9c59534f41a23140480cfb4f783a882ab7dc6a4e";
+
 fn pandoc_url() -> String {
     format!(
         "https://github.com/jgm/pandoc/releases/download/{v}/pandoc-{v}-windows-x86_64.zip",
         v = PANDOC_VERSION
     )
+}
+
+/// 从校验工具的输出里取 64 位十六进制摘要。
+///
+/// 覆盖两种输出格式:Windows ``certutil -hashfile``(第二行是裸摘要,首行带本地化
+/// 文案)与 Unix ``sha256sum``(``<摘要>  <文件名>``)。
+fn find_sha256(output: &str) -> Option<String> {
+    output
+        .split_whitespace()
+        .find(|tok| tok.len() == 64 && tok.chars().all(|c| c.is_ascii_hexdigit()))
+        .map(|tok| tok.to_ascii_lowercase())
+}
+
+/// 计算文件 SHA256(Windows 用系统自带 certutil,其余平台用 sha256sum,不引依赖)。
+fn file_sha256(path: &std::path::Path) -> Result<String, String> {
+    let path_str = path.to_string_lossy().into_owned();
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = Command::new("certutil");
+        c.args(["-hashfile", &path_str, "SHA256"]);
+        c.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        c
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut c = Command::new("sha256sum");
+        c.arg(&path_str);
+        c
+    };
+    let out = cmd
+        .output()
+        .map_err(|e| format!("无法校验下载文件(启动校验工具失败): {e}"))?;
+    if !out.status.success() {
+        return Err("无法校验下载文件(校验工具返回失败)".into());
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    find_sha256(&text).ok_or_else(|| "无法从校验工具输出里解析 SHA256".to_string())
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -1452,6 +1497,18 @@ async fn install_pandoc(app: AppHandle) -> Result<String, String> {
         return Err("下载内容异常(小于 10MB,疑似错误页),已放弃".into());
     }
 
+    // ---- 1b. 校验官方 SHA256:下一步就要解压**并执行**里面的 exe ----
+    // 不单独发 stage 事件:校验是瞬时的,插一个 verifying 会让进度条出现
+    // downloading → verifying → extracting 的怪异顺序。
+    let actual = file_sha256(&tmp_zip)?;
+    if actual != PANDOC_SHA256 {
+        let _ = std::fs::remove_file(&tmp_zip);
+        return Err(format!(
+            "下载包校验失败(SHA256 不匹配):期望 {PANDOC_SHA256},实际 {actual};\
+             已删除,不会解压或执行"
+        ));
+    }
+
     // ---- 2. 解压:zip 内路径形如 pandoc-3.13/pandoc.exe,按文件名匹配 ----
     emit_pandoc_progress(&app, "extracting", None);
     std::fs::create_dir_all(&pandoc_dir)
@@ -1501,7 +1558,7 @@ async fn install_pandoc(app: AppHandle) -> Result<String, String> {
 
 #[cfg(test)]
 mod pandoc_tests {
-    use super::parse_curl_percent;
+    use super::{find_sha256, parse_curl_percent};
 
     #[test]
     fn curl_percent_frames() {
@@ -1509,6 +1566,29 @@ mod pandoc_tests {
         assert_eq!(parse_curl_percent("######## 100.0%"), Some(100));
         assert_eq!(parse_curl_percent("  0  41.2M    0     0"), None);
         assert_eq!(parse_curl_percent(""), None);
+    }
+
+    #[test]
+    fn sha256_from_unix_output() {
+        let out = "23e1f2e978a3df80db8bf65c9c59534f41a23140480cfb4f783a882ab7dc6a4e  pandoc.zip\n";
+        assert_eq!(find_sha256(out).as_deref(), Some(
+            "23e1f2e978a3df80db8bf65c9c59534f41a23140480cfb4f783a882ab7dc6a4e"));
+    }
+
+    #[test]
+    fn sha256_from_certutil_output() {
+        // certutil 的中文输出:首行是「SHA256 哈希(文件 …):」,第二行是裸摘要
+        let out = "SHA256 哈希(文件 C:\\tmp\\pandoc.zip 的):\r\n\
+                   23E1F2E978A3DF80DB8BF65C9C59534F41A23140480CFB4F783A882AB7DC6A4E\r\n\
+                   CertUtil: -hashfile 命令成功完成。\r\n";
+        assert_eq!(find_sha256(out).as_deref(), Some(
+            "23e1f2e978a3df80db8bf65c9c59534f41a23140480cfb4f783a882ab7dc6a4e"));
+    }
+
+    #[test]
+    fn sha256_absent_when_output_has_no_digest() {
+        assert_eq!(find_sha256("下载失败:网络不可用"), None);
+        assert_eq!(find_sha256(""), None);
     }
 }
 
