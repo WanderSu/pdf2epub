@@ -21,7 +21,6 @@ from detector.pdf_detector import PDFDetector
 from paths import config_file
 import events
 
-
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="ebook-converter",
@@ -114,7 +113,6 @@ def main(argv: list[str] | None = None) -> int:
     # 预检(--dry-run):只检测与规划,不建目录、不调后端、不产出文件
     if args.dry_run:
         from dryrun import plan, render, to_json
-
         items = plan(paths, config, backend_override)
         print(to_json(items, config, backend_override) if args.json
               else render(items, config, backend_override))
@@ -181,17 +179,17 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _dump_ir(paths: list[Path], work_root: Path) -> int:
-    """为 Markdown 输入生成 IR 并落盘(P1 的验收入口,不参与 EPUB 输出)。
+    """为 Markdown 输入生成 IR 并落盘(预览入口,不参与 EPUB 输出)。
 
-    PDF 输入要等 IR 接进转换链路(P2)才支持 —— 现在只接受 Markdown,
-    免得给出「看起来能用」的假路径。
+    PDF 输入不在这里预览:正式转换时 IR 已经直接落到 ``work/<书名>/ir/``,
+    再给一条"看起来能用"的第二条路径只会让两边行为分叉。
     """
     from ir import Producer, build_ir, dump_ir, render_ir
-
     failed = 0
     for path in paths:
         if path.suffix.lower() not in {".md", ".markdown"}:
-            print(f"跳过 {path}:--dump-ir 目前只接受 Markdown(接入转换链路在 P2)",
+            print(f"跳过 {path}:--dump-ir 只接受 Markdown"
+                  f"(PDF 的 IR 在正式转换时落到 work/<书名>/ir/)",
                   file=sys.stderr)
             failed += 1
             continue

@@ -11,10 +11,11 @@
 **引擎布局(v0.6+ onedir)**:PyInstaller 产物是 `cli/cli.exe + cli/_internal/…`
 目录,不再用 onefile 单文件 —— 免去每次启动解压 95MB 到 %TEMP%,也显著降低
 杀软误报。引擎目录与壳平级,`config/` 在安装根(引擎按「exe 同级 → exe 上级」
-查找,见 src/paths.py)。
+查找,见 src/pdf2epub/paths.py)。
 
-**版本守卫**:四处版本号(pyproject / tauri.conf.json / Cargo.toml / App.tsx)必须与
-传入版本一致,否则拒绝打包 —— 防止「界面写着 v0.5.0、实际是旧版本的产物」。
+**版本守卫**:各处版本号(pyproject / uv.lock / tauri.conf.json / Cargo.toml /
+types.ts / README.md / README.en.md,见 bump_version.TARGETS)必须与传入版本一致,
+否则拒绝打包 —— 防止「界面写着 v0.5.0、实际是旧版本的产物」。
 """
 from __future__ import annotations
 
@@ -45,7 +46,7 @@ CLI_DIR_NAME = "cli"
 SHELL_EXE_NAME = "pdf2epub.exe"
 
 #: 可选的随包内置 pandoc 目录:仓库 `resources/pandoc/pandoc.exe` 存在时整个
-#: 目录进发布包(安装根的 pandoc/,引擎按 src/epub/pandoc.py 的查找链识别);
+#: 目录进发布包(安装根的 pandoc/,引擎按 src/pdf2epub/epub/pandoc.py 的查找链识别);
 #: 不存在就静默跳过 —— 发布包不因「没准备 pandoc」而失败,引擎回退 PATH。
 PANDOC_SRC = PROJECT_ROOT / "resources" / "pandoc"
 
@@ -161,7 +162,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     # ---- 版本守卫 ----
-    ok, versions = check_versions()
+    _ok, versions = check_versions()
     mismatched = {rel: v for rel, v in versions.items() if v != args.version}
     if mismatched:
         print("版本守卫未通过:代码里的版本与要发布的版本不一致", file=sys.stderr)
@@ -170,8 +171,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {flag}{v:<12} {rel}", file=sys.stderr)
         print(f"\n先运行: uv run python scripts/bump_version.py {args.version}", file=sys.stderr)
         return 2
-    if not ok:
-        print("警告: 四处版本一致但与目标版本相同 —— 继续", file=sys.stderr)
+    # 走到这里说明每一处都等于目标版本(否则 mismatched 一定非空),一致性自明
 
     staging = stage(args.version, args.skip_build)
     zip_path = make_zip(staging, args.version)

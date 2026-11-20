@@ -13,6 +13,12 @@ logs/
 # 临时工作产物(一次性评估脚本、转换测试输出等)
 work/
 
+# 转换完成的 EPUB(output/ 与 work/、logs/ 同为产物目录)
+output/
+
+# 本地凭证(值绝不入库;README 的承诺不能只靠"记得别 add")
+apikey.json
+
 # 测试产物(测试代码入库,tests/ 下的中间产物不入库)
 tests/_artifacts/
 
