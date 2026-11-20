@@ -29,24 +29,20 @@ from datetime import datetime
 from pathlib import Path
 
 from backends import get_backend
-from backends.base import (VARIANT_ORIGINAL, BackendError, collect_evidence,
-                           file_fingerprint, is_retryable)
+from backends.base import (VARIANT_ORIGINAL, BackendError, collect_evidence,                           file_fingerprint, is_retryable)
 from clean import CleanEngineError, CleanOutcome, clean_book_md
 from clean.options import CleanOptions, resolve_options
 from convert import convert_auto, load_config
 from cover import COVER_QUALITY, COVER_WIDTH, CoverInfo, detect_cover
 from cover import render_cover as render_cover_page
 from epub.content import verify_content
-from epub.pandoc import (MISSING_PANDOC_HINT, PandocError, PandocMissingError,
-                        build_epub, pandoc_available)
+from epub.pandoc import (MISSING_PANDOC_HINT, PandocError, PandocMissingError,                        build_epub, pandoc_available)
 from epub.verify import (VerifyResult, archive_issue, fatal_issue, verify_epub)
 from ir import Producer
 from lang_detect import resolve_language
-from detector.pdf_detector import PDFType
 from metadata import first_heading, front_fields, pdf_document_meta, resolve_book_meta
 from paths import config_file
 import events
-
 #: 语言检测读取的正文前多少字符(整本读没必要,前几万字足够定脚本)
 LANG_SAMPLE_CHARS = 20000
 #: 失败产物的改名后缀:失败产物要移出「完成判定」的视野,但保留现场供排查
@@ -345,11 +341,12 @@ def discard_failed_output(epub: Path, before: tuple[int, float] | None) -> Path 
 def preserve_previous_output(epub: Path) -> Path | None:
     """在**覆盖之前**把上一轮的有效成品另存一份;无需保全时返回 None。
 
-    为什么需要它:pandoc 是**就地**写 ``output/<名>.epub`` 的。``--force`` 重转时
-    只要新一轮「构建成功但校验失败」,上一轮那个能打开的书就已经被新字节盖掉了;
-    而失败产物又要改名移出 output/(见 :func:`discard_failed_output`)—— 于是用户
-    重转一次,output/ 里只剩一个 ``.failed``,**原本能读的那本书没了**。「重转失
-    败」正确的结果是回到「还有上一本」,而不是连上一本一起赔进去。
+    为什么仍然需要:构建已经改成「先写 ``.part`` → 校验 → 原子 replace」
+    (见 ``epub.pandoc.build_epub``),所以构建过程被打断不会再毁掉旧书;但
+    **replace 之后的校验**仍可能判失败(断链/内容缩水),此时 output/ 里已经是新
+    产物,而失败产物又要改名移出 output/(见 :func:`discard_failed_output`)——
+    没有备份的话,用户重转一次,原本能读的那本书就没了。「重转失败」正确的结果是
+    回到「还有上一本」,而不是连上一本一起赔进去。
 
     只保全**上一轮产物本身是完整 EPUB 包**的情况:残缺产物(``archive_issue``
     非空)本来就该被重转覆盖,不值得留,留着还会被 ``is_done()`` 判成已完成。

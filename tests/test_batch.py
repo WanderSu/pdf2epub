@@ -12,8 +12,7 @@ import pytest
 
 import batch
 import events
-from batch import (
-    PandocMissingError,
+from batch import (    PandocMissingError,
     VerifyError,
     epub_path,
     existing_epub,
@@ -28,10 +27,8 @@ from conftest import (corrupt_zip_member, make_pdf, rewrite_epub, truncate_file,
                       write_png)
 from ir.model import text_sha256
 from ir.model import text_sha256
-
 from epub import pandoc
 from epub.verify import VerifyResult, verify_epub
-
 CFG = {"pymupdf": {"write_images": True, "bold_fonts": []}}
 
 
@@ -196,7 +193,6 @@ def test_clean_failure_fails_the_file_without_falling_back(
     侧的反应。
     """
     from clean import CleanEngineError
-
     md = tmp_path / "src" / "清理失败.md"
     md.parent.mkdir(parents=True, exist_ok=True)
     md.write_text("# 手记\n\n正文,句号结尾。\n", encoding="utf-8")
@@ -266,7 +262,6 @@ def test_clean_failure_fails_the_file_without_falling_back(
     侧的反应。
     """
     from clean import CleanEngineError
-
     md = tmp_path / "src" / "清理失败.md"
     md.parent.mkdir(parents=True, exist_ok=True)
     md.write_text("# 手记\n\n正文,句号结尾。\n", encoding="utf-8")
@@ -443,7 +438,6 @@ def test_unretryable_backend_error_is_not_retried(tmp_path: Path,
     这类错误重试改变不了结果,而扫描书每重试一次就可能重新上传、重新 OCR 一次。
     """
     from backends.mineru_backend import MinerUError
-
     pdf = make_pdf(tmp_path / "src" / "认证失败.pdf", pages=1)
     calls = {"n": 0}
 
@@ -820,7 +814,6 @@ def test_iter_sources_skips_artifact_and_env_dirs(tmp_path: Path) -> None:
     目录也照收(目录跳过只作用于「父目录扫子目录」)。
     """
     from batch import iter_sources
-
     keep = tmp_path / "books" / "真正要转的书.md"
     keep.parent.mkdir(parents=True)
     keep.write_text("# 书\n\n正文。\n", encoding="utf-8")
@@ -841,3 +834,29 @@ def test_iter_sources_skips_artifact_and_env_dirs(tmp_path: Path) -> None:
         tmp_path / "books" / "docs" / "guide.md",
         tmp_path / "books" / "docs" / "stages" / "notes.pdf",
     ]
+
+
+def test_failed_postprocess_keeps_previous_epub(tmp_path, monkeypatch) -> None:
+    """构建后半段的失败不得毁掉上一轮成品:先写 .part,成功才原子替换。
+
+    修复前 pandoc 就地写最终路径 —— ``--force`` 重转时进程在写盘之后被杀(或产物侧
+    加工抛错),上一轮能读的书已经被半截字节盖掉,备份又在 finally 里被删掉。
+    """
+    from epub import pandoc as pandoc_mod
+    md = tmp_path / "book.md"
+    md.write_text("# 标题\n\n正文段落,足够长以避免空章节判定,再加一句话。\n",
+                  encoding="utf-8")
+    out = tmp_path / "out"
+    epub = pandoc_mod.build_epub(md, tmp_path / "work", out,
+                                 title="标题", out_name="标题")
+    original = epub.read_bytes()
+
+    def boom(_path) -> None:
+        raise RuntimeError("产物侧加工失败")
+
+    monkeypatch.setattr(pandoc_mod, "add_footnote_marks", boom)
+    with pytest.raises(RuntimeError):
+        pandoc_mod.build_epub(md, tmp_path / "work", out, title="标题", out_name="标题")
+
+    assert epub.read_bytes() == original                       # 旧书原封不动
+    assert sorted(p.name for p in out.iterdir()) == ["标题.epub"]   # 没有 .part 残留

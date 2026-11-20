@@ -28,7 +28,6 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 from paths import book_css
-
 DEFAULT_CSS = book_css()
 
 logger = logging.getLogger("pdf2epub.pandoc")
@@ -589,7 +588,7 @@ def build_epub(
     date: dc:date(ISO 日期)。
     cover_image: 封面 JPEG(pandoc --epub-cover-image)。
     title_page: 是否让 pandoc 生成「书名 + 作者 + 日期」标题页。**有封面时必须关**:
-        封面本身就写着书名与作者,再生成一张就是两遍(见 src/cover.py)。
+        封面本身就写着书名与作者,再生成一张就是两遍(见 src/pdf2epub/cover.py)。
     toc_depth: 目录深度,默认按正文实际最深标题级别算(clamp 2..4)。
     publisher: dc:publisher(出版社)。只有卷首有「出版社:」时才有值。
     translator: 译者 —— pandoc 不认 `--metadata translator`,由
@@ -610,6 +609,13 @@ def build_epub(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     epub = output_dir / f"{out_name or book_md.parent.name}.epub"
+    # **先写临时文件,最后才 os.replace**:pandoc 是就地写最终路径的,进程被杀
+    # (关窗口 / Ctrl-C / 任务管理器)时上一轮能读的书已经被半截字节盖掉,而
+    # --force 重转失败最不该赔掉的就是上一轮成品。临时文件与目标同目录(同卷),
+    # replace 是原子的。
+    # 文件名必须以 `.epub` 结尾:pandoc 按扩展名推断输出格式,`.part` 会被当成
+    # 未知扩展名而写出 HTML(实测产物是 103 字节的 `<h1 …>`)。
+    part = epub.with_name(f"{epub.stem}.part.epub")
     title = title or infer_title(book_md)
 
     # MathML 不认识 \tag:公式编号会静默消失 → 先归一化成可见的 \qquad(n)。
@@ -633,7 +639,7 @@ def build_epub(
 
     depth = toc_depth or min(4, max(2, heading_depth(md_text)))
     cmd = [
-        _resolve_pandoc(), str(source_md), "-o", str(epub),
+        _resolve_pandoc(), str(source_md), "-o", str(part),
         "--toc", f"--toc-depth={depth}",
         # 显式写死分卷级别:一章一个 XHTML 是「脚注落在本章末尾」的前提,
         # 而 pandoc 只把每条注释写进它所在的文件。默认值恰好也是 1,但默认值
@@ -662,25 +668,36 @@ def build_epub(
         # 识别后去掉重试,而不是让整本书因为一个显示选项失败。
         cmd += ["--epub-title-page=false"]
     try:
-        proc = _run_pandoc(cmd, allow_drop_title_page=not title_page)
-    except FileNotFoundError as e:
-        # 极少数情况下 which() 能解析、真正执行时却找不到(Windows: [WinError 2])。
-        # 这同样是环境缺失,不是「临时故障」—— 归成可重试错误会让整条链路白跑。
-        raise PandocMissingError(f"{MISSING_PANDOC_HINT}(执行 pandoc 失败: {e})") from e
-    if proc.returncode != 0:
-        raise PandocError(f"Pandoc 失败(exit={proc.returncode}): {proc.stderr[:500]}")
-    # 退出码 0 不等于「写出了产物」:产物缺失或 0 字节都是硬失败,不能把空文件
-    # 当成功结果交给上层(is_done 只认容器完整性,空文件会在这里就暴露)。
-    if not epub.exists() or epub.stat().st_size == 0:
-        raise PandocError(f"Pandoc 返回成功但没有写出 EPUB(产物缺失或为空): {epub}")
-    if title and not emit_title:
-        # 目录页标题:中文书用「目录」,其它语言用 Table of Contents(与阅读器惯例一致)
-        add_title(epub, title,
-                  toc_label="目录" if str(lang or "zh-CN").lower().startswith("zh")
-                  else "Table of Contents")
-    # 脚注回链:pandoc 的 epub3 writer 不写 doc-backlink,产物侧补上(没有脚注就不动文件)
-    add_footnote_marks(epub)
-    # 译者:pandoc 没有 translator → dc:contributor 的映射,产物侧补(见 add_contributor)
-    if translator:
-        add_contributor(epub, translator)
+        try:
+            proc = _run_pandoc(cmd, allow_drop_title_page=not title_page)
+        except FileNotFoundError as e:
+            # 极少数情况下 which() 能解析、真正执行时却找不到(Windows: [WinError 2])。
+            # 这同样是环境缺失,不是「临时故障」—— 归成可重试错误会让整条链路白跑。
+            raise PandocMissingError(f"{MISSING_PANDOC_HINT}(执行 pandoc 失败: {e})") from e
+        if proc.returncode != 0:
+            raise PandocError(f"Pandoc 失败(exit={proc.returncode}): {proc.stderr[:500]}")
+        # 退出码 0 不等于「写出了产物」:产物缺失或 0 字节都是硬失败,不能把空文件
+        # 当成功结果交给上层(is_done 只认容器完整性,空文件会在这里就暴露)。
+        if not part.exists() or part.stat().st_size == 0:
+            raise PandocError(f"Pandoc 返回成功但没有写出 EPUB(产物缺失或为空): {part}")
+        if title and not emit_title:
+            # 目录页标题:中文书用「目录」,其它语言用 Table of Contents(与阅读器惯例一致)
+            add_title(part, title,
+                      toc_label="目录" if str(lang or "zh-CN").lower().startswith("zh")
+                      else "Table of Contents")
+        # 脚注回链:pandoc 的 epub3 writer 不写 doc-backlink,产物侧补上(没有脚注就不动文件)
+        add_footnote_marks(part)
+        # 译者:pandoc 没有 translator → dc:contributor 的映射,产物侧补(见 add_contributor)
+        if translator:
+            add_contributor(part, translator)
+        try:
+            os.replace(part, epub)
+        except OSError as e:
+            # 目标被阅读器 / 同步盘 / 杀软占着:确定性失败(重跑整条链路含云端 OCR 不值),
+            # 但要把原因说清楚,别让人以为是 pandoc 的锅。
+            raise PandocError(f"无法写入 {epub.name}(文件可能正被阅读器或同步盘占用): {e}") from e
+    except BaseException:
+        # 任何失败(含 Ctrl-C)都不留半截 .part:上一轮的成品仍在原位。
+        part.unlink(missing_ok=True)
+        raise
     return epub
