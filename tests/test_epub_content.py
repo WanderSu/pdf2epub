@@ -13,9 +13,9 @@ from pathlib import Path
 
 import pytest
 
-import batch
+import pdf2epub.batch as batch
 from conftest import build_epub, rewrite_epub, write_png
-from epub.content import (    markdown_code_block_count,
+from pdf2epub.epub.content import (    markdown_code_block_count,
     markdown_footnote_defs,
     markdown_hard_breaks,
     markdown_heading_count,
@@ -26,7 +26,7 @@ from epub.content import (    markdown_code_block_count,
     markdown_text_chars,
     verify_content,
 )
-from epub.verify import verify_epub
+from pdf2epub.epub.verify import verify_epub
 
 # ---------------------------------------------------------------- 正常产物 = 无提示
 
@@ -241,9 +241,9 @@ def test_cleaned_footnotes_survive_into_the_epub(tmp_path: Path) -> None:
     import re
     import zipfile
 
-    from clean import clean_text
-    from clean.options import CleanOptions
-    from epub.pandoc import build_epub as pandoc_build_epub
+    from pdf2epub.clean import clean_text
+    from pdf2epub.clean.options import CleanOptions
+    from pdf2epub.epub.pandoc import build_epub as pandoc_build_epub
     src = tmp_path / "src"
     src.mkdir(parents=True, exist_ok=True)
     raw = ("# 脚注样本\n\n"
@@ -413,7 +413,7 @@ def _epub_xhtml(path: Path) -> str:
 
 def test_footnote_backlinks_are_added_without_breaking_the_epub(tmp_path: Path) -> None:
     """产物侧补 doc-backlink(引用侧 pandoc 只写 noteref);补完容器仍合法。"""
-    from epub.pandoc import add_footnote_marks
+    from pdf2epub.epub.pandoc import add_footnote_marks
     src = tmp_path / "src"
     epub = build_epub(src, tmp_path / "fn.epub", title="样本书", with_image=False,
                       with_math=False, body="正文末尾有注释[^1]。\n\n[^1]: 脚注内容,足够长。\n")
@@ -434,7 +434,7 @@ def test_footnote_backlinks_are_added_without_breaking_the_epub(tmp_path: Path) 
 
 def test_epub_without_footnotes_is_left_alone(tmp_path: Path) -> None:
     """没有脚注的书 → 连 zip 都不重写(字节不变,零风险)。"""
-    from epub.pandoc import add_footnote_marks
+    from pdf2epub.epub.pandoc import add_footnote_marks
     src = tmp_path / "src"
     epub = build_epub(src, tmp_path / "plain.epub", title="样本书")
     before = epub.read_bytes()
@@ -453,7 +453,7 @@ def test_footnote_numbers_match_the_in_text_markers(tmp_path: Path) -> None:
     import re
     import zipfile
 
-    from epub.pandoc import build_epub
+    from pdf2epub.epub.pandoc import build_epub
     md = tmp_path / "两章.md"
     md.write_text(
         "# 第一章\n\n第一章正文[^a],还有[^b]。\n\n[^a]: 甲注\n[^b]: 乙注\n\n"
@@ -478,7 +478,7 @@ def test_backlink_injection_is_idempotent_and_keeps_mimetype_first(tmp_path: Pat
     """补两次不能补出两条回链;重写 zip 时 mimetype 仍必须是第一个且不压缩。"""
     import zipfile
 
-    from epub.pandoc import add_footnote_marks
+    from pdf2epub.epub.pandoc import add_footnote_marks
     src = tmp_path / "src"
     epub = build_epub(src, tmp_path / "fn.epub", title="样本书", with_image=False,
                       with_math=False, body="注释[^1]。\n\n[^1]: 脚注。\n")
@@ -497,8 +497,8 @@ def test_verify_content_reuses_caller_structure(tmp_path: Path, monkeypatch) -> 
     回归:verify_output 先 verify_epub,verify_content 内部又调一次 —— 300 章的
     书上这一遍约占校验耗时的 20%,结论却一字不差。
     """
-    import epub.content as content_mod
-    from epub.verify import VerifyResult
+    import pdf2epub.epub.content as content_mod
+    from pdf2epub.epub.verify import VerifyResult
     src = tmp_path / "w"
     epub = build_epub(src, tmp_path / "ok.epub", with_image=False, with_math=False)
     md = src / "book.md"
@@ -523,8 +523,8 @@ def test_verify_content_reuses_caller_structure(tmp_path: Path, monkeypatch) -> 
     回归:verify_output 先 verify_epub,verify_content 内部又调一次 —— 300 章的
     书上这一遍约占校验耗时的 20%,结论却一字不差。
     """
-    import epub.content as content_mod
-    from epub.verify import VerifyResult
+    import pdf2epub.epub.content as content_mod
+    from pdf2epub.epub.verify import VerifyResult
     src = tmp_path / "w"
     epub = build_epub(src, tmp_path / "ok.epub", with_image=False, with_math=False)
     md = src / "book.md"
@@ -550,7 +550,7 @@ def test_markdown_text_chars_ignores_void_html() -> None:
     分行的 OCR 书源侧虚增 10% 以上,触发 ``content_text_less``(``--strict`` 下直接
     判失败),而正文一个字都没少。
     """
-    from epub.content import markdown_text_chars
+    from pdf2epub.epub.content import markdown_text_chars
     assert markdown_text_chars("一二<br>三四<br />五六") == 6
     assert markdown_text_chars('一二<img src="a.png">三四') == 4
     # 被 pandoc 转义成**文字**的尖括号片段仍然是正文,不能被当成标签剥掉

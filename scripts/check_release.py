@@ -25,8 +25,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPTS_DIR.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from epub.verify import verify_epub   # noqa: E402
-
+from pdf2epub.epub.verify import verify_epub   # noqa: E402
 REQUIRED = ("pdf2epub.exe", "cli/cli.exe", "config/config.yaml", "config/book.css")
 CSS_MARKER = "\n/* release-check: config 定位标记 */\n"
 

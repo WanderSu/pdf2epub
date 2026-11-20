@@ -33,11 +33,10 @@ from pathlib import Path
 
 import pytest
 
-from clean import clean_text
-from clean.options import CLEAN_KEYS, CleanOptions
-from clean.policy import NON_PATCH_RULES, PIPELINE_ORDER
-from ir import Producer
-
+from pdf2epub.clean import clean_text
+from pdf2epub.clean.options import CLEAN_KEYS, CleanOptions
+from pdf2epub.clean.policy import NON_PATCH_RULES, PIPELINE_ORDER
+from pdf2epub.ir import Producer
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "cleaner"
 
 #: 规则 → 覆盖它的样本(至少一个正向样本;含反例的样本会同时列在这里)

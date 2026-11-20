@@ -20,8 +20,7 @@ from types import SimpleNamespace
 import pytest
 
 from conftest import BOOK_CSS, PROJECT_ROOT, _pandoc, make_pdf
-from metadata import (first_heading, front_fields, pdf_document_meta,
-                      resolve_book_meta)
+from pdf2epub.metadata import (first_heading, front_fields, pdf_document_meta,                      resolve_book_meta)
 
 # ---------------------------------------------------------------- 分级
 
@@ -166,8 +165,7 @@ def test_pdf_document_meta_reads_and_filters(tmp_path: Path) -> None:
 
 def _capture_cmd(monkeypatch, tmp_path: Path) -> list[list[str]]:
     """把 pandoc 换成记录参数的桩:不依赖本机 pandoc,也不产出真 EPUB。"""
-    from epub import pandoc as pandoc_mod
-
+    from pdf2epub.epub import pandoc as pandoc_mod
     calls: list[list[str]] = []
 
     def fake_run(cmd, **kwargs):
@@ -181,8 +179,7 @@ def _capture_cmd(monkeypatch, tmp_path: Path) -> list[list[str]]:
 
 
 def test_split_level_is_passed_explicitly(monkeypatch, tmp_path: Path) -> None:
-    from epub.pandoc import build_epub
-
+    from pdf2epub.epub.pandoc import build_epub
     calls = _capture_cmd(monkeypatch, tmp_path)
     md = tmp_path / "book.md"
     md.write_text("# 第一章\n\n正文\n", encoding="utf-8")
@@ -193,8 +190,7 @@ def test_split_level_is_passed_explicitly(monkeypatch, tmp_path: Path) -> None:
 
 
 def test_publisher_goes_through_pandoc_metadata(monkeypatch, tmp_path: Path) -> None:
-    from epub.pandoc import build_epub
-
+    from pdf2epub.epub.pandoc import build_epub
     calls = _capture_cmd(monkeypatch, tmp_path)
     md = tmp_path / "book.md"
     md.write_text("# 第一章\n\n正文\n", encoding="utf-8")
@@ -212,8 +208,7 @@ def test_publisher_goes_through_pandoc_metadata(monkeypatch, tmp_path: Path) -> 
 def test_translator_lands_in_contributor_not_creator(tmp_path: Path) -> None:
     """端到端:卷首写着译者 → dc:contributor(trl),dc:creator 里只有作者本人。"""
     _pandoc()
-    import batch
-
+    import pdf2epub.batch as batch
     src = tmp_path / "扫描0001.md"
     src.write_text(FRONT, encoding="utf-8")
 
@@ -253,8 +248,7 @@ def test_book_css_styles_the_footnote_aside_the_way_pandoc_writes_it() -> None:
 
 def test_add_contributor_is_idempotent(tmp_path: Path) -> None:
     """重复调用不会插出第二个译者(重转/后处理顺序变化都要安全)。"""
-    from epub.pandoc import add_contributor
-
+    from pdf2epub.epub.pandoc import add_contributor
     epub = _stub_epub(tmp_path / "a.epub")
     assert add_contributor(epub, "金钥") is True
     assert add_contributor(epub, "金钥") is False
@@ -288,8 +282,7 @@ def _stub_epub(path: Path) -> Path:
 @pytest.mark.parametrize("name", ["金钥", "A & B", "<译者>"])
 def test_add_contributor_escapes_xml(tmp_path: Path, name: str) -> None:
     """译者名字里有 & < > 时不能写出不合法的 XML(一个 & 就能毁掉整份 OPF)。"""
-    from epub.pandoc import add_contributor
-
+    from pdf2epub.epub.pandoc import add_contributor
     epub = _stub_epub(tmp_path / "b.epub")
     assert add_contributor(epub, name) is True
     with zipfile.ZipFile(epub) as z:

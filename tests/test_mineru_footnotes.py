@@ -14,8 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from markdown.footnotes import (HIGH, MEDIUM, PAGE_BREAK_TYPE, block_page_spans,
-                                load_content_list, match_footnotes,
+from pdf2epub.markdown.footnotes import (HIGH, MEDIUM, PAGE_BREAK_TYPE, block_page_spans,                                load_content_list, match_footnotes,
                                 reconstruct_footnotes, scan_refs, structured_footnotes)
 
 BODY = "这一行正文足够长,用来让内容块与 Markdown 对齐成功。"
@@ -277,9 +276,8 @@ def test_structured_footnotes_reach_the_epub_as_native_footnotes(tmp_path: Path)
     """
     import zipfile
 
-    from clean import clean_text
-    from epub.pandoc import build_epub as pandoc_build_epub
-
+    from pdf2epub.clean import clean_text
+    from pdf2epub.epub.pandoc import build_epub as pandoc_build_epub
     md, blocks = build({
         0: (f"{BODY}甲处引用①,乙处引用②。", ["① 甲的注释:内容足够长,用来生成真脚注。",
                                               "② 乙的注释:同样足够长,避免被判成空段。"]),

@@ -19,8 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from paths import load_api_key
-
+from pdf2epub.paths import load_api_key
 
 def _live_enabled() -> bool:
     return os.environ.get("PDF2EPUB_LIVE_OCR") == "1"
@@ -71,8 +70,7 @@ def test_paddleocr_keeps_page_footnote(tmp_path: Path) -> None:
     if not _has_token("PaddleOCR-VL"):
         pytest.skip("未配置 PaddleOCR-VL Token")
 
-    from backends.paddleocr_backend import PaddleOCRAdapter
-
+    from pdf2epub.backends.paddleocr_backend import PaddleOCRAdapter
     pdf = make_footnote_pdf(tmp_path / "脚注样本.pdf")
     result = PaddleOCRAdapter(timeout=900).convert(pdf, tmp_path / "work")
 
@@ -85,8 +83,7 @@ def test_mineru_recovers_page_footnote(tmp_path: Path) -> None:
     if not _has_token("MinerU"):
         pytest.skip("未配置 MinerU Token")
 
-    from backends.mineru_backend import MinerUAdapter, CONTENT_LIST_FILE
-
+    from pdf2epub.backends.mineru_backend import MinerUAdapter, CONTENT_LIST_FILE
     pdf = make_footnote_pdf(tmp_path / "脚注样本.pdf")
     work = tmp_path / "work"
     result = MinerUAdapter(timeout=900).convert(pdf, work)

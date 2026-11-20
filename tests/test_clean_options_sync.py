@@ -15,8 +15,8 @@ from pathlib import Path
 
 import yaml
 
-from clean.options import CLEAN_KEYS, CleanOptions
-from cli import main as cli_main
+from pdf2epub.clean.options import CLEAN_KEYS, CleanOptions
+from pdf2epub.cli import main as cli_main
 from conftest import make_pdf
 
 ROOT = Path(__file__).resolve().parent.parent

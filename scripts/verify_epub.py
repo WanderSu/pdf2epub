@@ -1,6 +1,6 @@
 """EPUB 结构验证 CLI(项目自维护,每个 Phase 复用)。
 
-检查逻辑在 `src/epub/verify.py`(转换流程内也会调用),本脚本只负责
+检查逻辑在 `src/pdf2epub/epub/verify.py`(转换流程内也会调用),本脚本只负责
 命令行入口与人类可读的报告输出。
 
 验证项(对应 docs/design.md §7 质量校验):
@@ -23,8 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from epub.verify import VerifyResult, verify_epub   # noqa: E402
-
+from pdf2epub.epub.verify import VerifyResult, verify_epub   # noqa: E402
 # 各段落归口的 issue 代码,用于「有则打印,无则打 OK」
 SECTIONS = (
     ("[1] 包结构", ("container_missing", "container_invalid", "mimetype_wrong",
@@ -152,8 +151,7 @@ def main() -> int:
 
     content_result = None
     if args.content is not None:
-        from epub.content import verify_content
-
+        from pdf2epub.epub.content import verify_content
         content_result = verify_content(args.content, args.epub,
                                         expected_pages=args.expect_pages or None)
         result.issues.extend(content_result.issues)

@@ -24,14 +24,12 @@ from pathlib import Path
 import pytest
 import requests
 
-import convert
-from backends import mineru_backend
-from backends.base import (ConversionResult, PartStore, TaskCache, file_fingerprint,
-                           is_retryable)
-from backends.mineru_backend import MinerUAdapter, MinerUError
+import pdf2epub.convert as convert
+from pdf2epub.backends import mineru_backend
+from pdf2epub.backends.base import (ConversionResult, PartStore, TaskCache, file_fingerprint,                           is_retryable)
+from pdf2epub.backends.mineru_backend import MinerUAdapter, MinerUError
 from conftest import make_mixed_pdf, make_paged_pdf, write_png
-from page_result import page_marks
-
+from pdf2epub.page_result import page_marks
 
 # ---------------------------------------------------------------- 假云端
 

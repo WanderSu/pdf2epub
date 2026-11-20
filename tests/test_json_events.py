@@ -21,9 +21,9 @@ from pathlib import Path
 
 import pytest
 
-import events
-from epub.pandoc import PandocError
-from cli import main as cli_main
+import pdf2epub.events as events
+from pdf2epub.epub.pandoc import PandocError
+from pdf2epub.cli import main as cli_main
 from conftest import make_paged_pdf, make_pdf
 
 pytestmark = pytest.mark.usefixtures("_reset_events")
@@ -91,12 +91,12 @@ def test_progress_with_zero_total_is_skipped() -> None:
 
 def test_error_code_maps_real_exception_types() -> None:
     """错误码由**真实异常类**决定:类名一改这里就红,前端不会静默退化成「未知错误」。"""
-    from backends.base import BackendError
-    from backends.mineru_backend import MinerUError
-    from backends.paddleocr_backend import PaddleOCRError
-    from batch import VerifyError
-    from clean import CleanEngineError
-    from epub.pandoc import PandocMissingError
+    from pdf2epub.backends.base import BackendError
+    from pdf2epub.backends.mineru_backend import MinerUError
+    from pdf2epub.backends.paddleocr_backend import PaddleOCRError
+    from pdf2epub.batch import VerifyError
+    from pdf2epub.clean import CleanEngineError
+    from pdf2epub.epub.pandoc import PandocMissingError
     import pymupdf
 
     cases: list[tuple[BaseException, str]] = [
@@ -126,8 +126,8 @@ def test_error_code_maps_real_exception_types() -> None:
 def test_failed_conversion_reports_specific_code(tmp_path: Path, monkeypatch,
                                                  capsys) -> None:
     """后端认证失败 → 事件里的 code 必须是 ocr_failed(而不是笼统的 convert_failed)。"""
-    from backends.mineru_backend import MinerUError
-    import batch as batch_mod
+    from pdf2epub.backends.mineru_backend import MinerUError
+    import pdf2epub.batch as batch_mod
     from conftest import make_pdf
 
     pdf = make_pdf(tmp_path / "扫描书.pdf")
@@ -145,7 +145,7 @@ def test_failed_conversion_reports_specific_code(tmp_path: Path, monkeypatch,
 
 def test_retry_is_reported_as_an_event(tmp_path: Path, monkeypatch) -> None:
     """重试要发 `retry` 事件:界面才能把「卡住」与「正在重试」区分开。"""
-    import batch as batch_mod
+    import pdf2epub.batch as batch_mod
     from conftest import make_pdf
 
     pdf = make_pdf(tmp_path / "会重试.pdf")
@@ -185,8 +185,7 @@ def test_pandoc_failure_is_not_retried_and_reports_pandoc_error(tmp_path: Path,
     而旧的「类名是 RuntimeError 且文案含 pandoc」兜底在换成专属类后**静默失效** ——
     错误码退化成 `convert_failed`,前端于是从 PANDOC 变成 UNKNOWN。
     """
-    import batch as batch_mod
-
+    import pdf2epub.batch as batch_mod
     pdf = make_pdf(tmp_path / "生成失败.pdf")
     monkeypatch.setattr(
         batch_mod, "build_epub",
@@ -211,7 +210,7 @@ def test_pandoc_failure_is_not_retried_and_reports_pandoc_error(tmp_path: Path,
 
 def test_skip_is_its_own_terminal_event(tmp_path: Path) -> None:
     """已有产物 → `skip`(不是 `complete`):GUI 必须能把它显示成「已跳过」。"""
-    from batch import process_one
+    from pdf2epub.batch import process_one
     from conftest import make_pdf
 
     pdf = make_pdf(tmp_path / "重复.pdf")
@@ -308,7 +307,7 @@ def test_cli_reports_missing_input_as_error_event(tmp_path: Path, capsys) -> Non
 
 def _preflight_plan(capsys, *extra: str) -> dict:
     """跑一次预检(不产出文件)并取第一条计划。"""
-    from cli import main as cli_main_local
+    from pdf2epub.cli import main as cli_main_local
     assert cli_main_local(["--dry-run", "--json", *extra]) == 0
     return json.loads(capsys.readouterr().out.strip().splitlines()[-1])["files"][0]
 
@@ -381,7 +380,7 @@ def test_dry_run_ignores_json_events(tmp_path: Path, capsys) -> None:
 
 def test_hybrid_reports_real_ocr_runs(tmp_path: Path, monkeypatch, capsys) -> None:
     """hybrid 的区段数必须来自真实规划(旧桌面端只能从文案里猜)。"""
-    import convert as convert_mod
+    import pdf2epub.convert as convert_mod
     from conftest import make_mixed_pdf
     from test_hybrid import CFG, FakeOCR
 
@@ -417,7 +416,7 @@ def test_hybrid_reports_real_ocr_runs(tmp_path: Path, monkeypatch, capsys) -> No
 
 def test_mineru_reports_shards_and_progress(tmp_path: Path, monkeypatch, capsys) -> None:
     """分片数与分片进度来自后端真实提交(复用时序用的假云端服务)。"""
-    from backends import mineru_backend
+    from pdf2epub.backends import mineru_backend
     from test_ocr_sharding_resume import install_fake_cloud
 
     install_fake_cloud(monkeypatch)     # 假 MinerU:替换 requests/sleep,不发网络请求
@@ -442,7 +441,7 @@ def test_progress_window_rescales_inner_reports(capsys) -> None:
     前端取峰值 → extract 直接 100%,然后长时间不动。窗口内必须折算成
     (i-1+c/t)/N;窗口外的事件不受影响。
     """
-    import events
+    import pdf2epub.events as events
     buf = io.StringIO()
     events.configure(stream=buf)
     try:

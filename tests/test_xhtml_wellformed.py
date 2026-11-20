@@ -18,9 +18,8 @@ from pathlib import Path
 import pytest
 
 from conftest import build_epub as pandoc_epub
-from epub.pandoc import build_epub, escape_pseudo_html, normalize_xhtml_voids
-from epub.verify import verify_epub
-
+from pdf2epub.epub.pandoc import build_epub, escape_pseudo_html, normalize_xhtml_voids
+from pdf2epub.epub.verify import verify_epub
 #: 实测形态:云端 OCR 的「图片文字」块,出版社名后跟着换行标记与注释
 OCR_PICTURE_TEXT = (
     "# 样本书\n\n"
@@ -141,7 +140,7 @@ def test_missing_output_is_a_hard_failure(tmp_path: Path, monkeypatch: pytest.Mo
         stdout = ""
         stderr = ""
 
-    monkeypatch.setattr("epub.pandoc.subprocess.run", lambda *a, **k: FakeProc())
+    monkeypatch.setattr("pdf2epub.epub.pandoc.subprocess.run", lambda *a, **k: FakeProc())
 
     with pytest.raises(RuntimeError, match="没有写出 EPUB"):
         build_epub(md, work, tmp_path / "out", title="样本书")
@@ -164,7 +163,7 @@ def test_empty_output_file_is_a_hard_failure(tmp_path: Path, monkeypatch: pytest
         Path(cmd[cmd.index("-o") + 1]).write_bytes(b"")     # pandoc 写出 0 字节产物
         return FakeProc()
 
-    monkeypatch.setattr("epub.pandoc.subprocess.run", fake_run)
+    monkeypatch.setattr("pdf2epub.epub.pandoc.subprocess.run", fake_run)
 
     with pytest.raises(RuntimeError, match="产物缺失或为空"):
         build_epub(md, work, out, title="样本书")
@@ -181,7 +180,7 @@ def test_pandoc_failure_is_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         stdout = ""
         stderr = "pandoc: 出错了"
 
-    monkeypatch.setattr("epub.pandoc.subprocess.run", lambda *a, **k: FakeProc())
+    monkeypatch.setattr("pdf2epub.epub.pandoc.subprocess.run", lambda *a, **k: FakeProc())
 
     with pytest.raises(RuntimeError, match="Pandoc 失败"):
         build_epub(md, work, tmp_path / "out", title="样本书")
@@ -190,8 +189,7 @@ def test_pandoc_failure_is_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 def test_subprocess_file_not_found_is_environment_error(tmp_path: Path,
                                                         monkeypatch: pytest.MonkeyPatch) -> None:
     """which() 能解析、真正执行却找不到(Windows [WinError 2])→ 环境缺失,不该重试。"""
-    from epub.pandoc import PandocMissingError
-
+    from pdf2epub.epub.pandoc import PandocMissingError
     work = tmp_path / "work"
     work.mkdir()
     md = work / "book.md"
@@ -200,7 +198,7 @@ def test_subprocess_file_not_found_is_environment_error(tmp_path: Path,
     def boom(*a, **k):
         raise FileNotFoundError(2, "系统找不到指定的文件。")
 
-    monkeypatch.setattr("epub.pandoc.subprocess.run", boom)
+    monkeypatch.setattr("pdf2epub.epub.pandoc.subprocess.run", boom)
 
     with pytest.raises(PandocMissingError):
         build_epub(md, work, tmp_path / "out", title="样本书")

@@ -19,13 +19,12 @@ from pathlib import Path
 
 import pytest
 
-import batch
-import cli
-from batch import _parse_pdf_date, process_batch, render_cover, source_date, stable_identifier
+import pdf2epub.batch as batch
+import pdf2epub.cli as cli
+from pdf2epub.batch import _parse_pdf_date, process_batch, render_cover, source_date, stable_identifier
 from conftest import make_pdf, make_pdf_with_cover
-from epub.verify import verify_epub
-from lang_detect import detect_language, resolve_language
-
+from pdf2epub.epub.verify import verify_epub
+from pdf2epub.lang_detect import detect_language, resolve_language
 CFG = {"pymupdf": {"write_images": True, "bold_fonts": []}}
 
 

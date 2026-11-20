@@ -26,10 +26,9 @@ from pathlib import Path
 
 import pytest
 
-import batch
-from epub.content import verify_content
-from epub.verify import verify_epub
-
+import pdf2epub.batch as batch
+from pdf2epub.epub.content import verify_content
+from pdf2epub.epub.verify import verify_epub
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SAMPLES = PROJECT_ROOT / "samples" / "pdfs"
 #: 真实样本:纯文字 PDF(仓库自带,1.2MB)

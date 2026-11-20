@@ -16,8 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from convert import convert_auto  # noqa: E402
-
+from pdf2epub.convert import convert_auto  # noqa: E402
 CONFIG = ROOT / "config" / "config.yaml"
 
 

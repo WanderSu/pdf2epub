@@ -24,9 +24,8 @@ import difflib
 
 import pytest
 
-from clean import apply_patches, propose_join_lines, revert_patches
-from ir import build_ir, render_ir
-
+from pdf2epub.clean import apply_patches, propose_join_lines, revert_patches
+from pdf2epub.ir import build_ir, render_ir
 # 断行句:两行都 ≥20 字(排满一行)、前一行无句末标点 → legacy 判拼接
 LINE_A = "一九七三年十月战争后,埃及士兵站在已被摧毁的巴列夫防线"
 LINE_B = "前沿,向记者讲述着这场战争从开始到结束的全部经过"
@@ -183,7 +182,7 @@ def test_failed_replace_blocks_the_delete_via_dependency() -> None:
     proposal = propose_join_lines(ir)
     # 篡改 replace 的 before,让它在应用期失败
     tampered = [p for p in proposal.patches if p.operation == "replace_text"]
-    from clean.patch import BlockState
+    from pdf2epub.clean.patch import BlockState
     tampered = [p.with_outcome(p.status, before=BlockState(text="不是当前内容"))
                 for p in tampered]
     others = [p for p in proposal.patches if p.operation != "replace_text"]

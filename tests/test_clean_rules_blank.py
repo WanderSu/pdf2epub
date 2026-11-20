@@ -23,11 +23,9 @@ import re
 
 import pytest
 
-from clean import (apply_patches, compress_blank_runs, propose_blank_lines,
-                   propose_rules, revert_patches)
-from clean.rules import PIPELINE_ORDER
-from ir import build_ir, render_ir
-
+from pdf2epub.clean import (apply_patches, compress_blank_runs, propose_blank_lines,                   propose_rules, revert_patches)
+from pdf2epub.clean.rules import PIPELINE_ORDER
+from pdf2epub.ir import build_ir, render_ir
 MD = "第一段正文内容以句号结尾。\n\n\n\n第二段正文内容同样以句号结尾。\n"
 
 

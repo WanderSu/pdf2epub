@@ -26,12 +26,11 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
-from clean import apply_patches, clean_book_md, clean_text, revert_patches
-from clean.patch import SourceFingerprint
-from clean.report import CleanReport, RunInfo, read_report
-from clean.rules import propose_dup_headings
-from ir import build_ir
-
+from pdf2epub.clean import apply_patches, clean_book_md, clean_text, revert_patches
+from pdf2epub.clean.patch import SourceFingerprint
+from pdf2epub.clean.report import CleanReport, RunInfo, read_report
+from pdf2epub.clean.rules import propose_dup_headings
+from pdf2epub.ir import build_ir
 #: 一条规则都不会命中的纯文本(零命中分支:此前时间恒为 0)
 CLEAN_MD = "# 书名\n\n一段很普通的中文正文,没有任何需要清理的东西。\n"
 #: 会命中 dup_headings 的文本(有 Patch 的分支)

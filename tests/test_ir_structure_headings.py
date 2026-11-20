@@ -12,8 +12,8 @@
 """
 from __future__ import annotations
 
-from ir.parse import parse_evidence
-from ir.structure import restore_headings
+from pdf2epub.ir.parse import parse_evidence
+from pdf2epub.ir.structure import restore_headings
 TOC = """\
 目录
 
@@ -137,7 +137,7 @@ def test_no_evidence_leaves_md_untouched() -> None:
 
 def test_restored_md_still_parses_and_keeps_roundtrip() -> None:
     """插入/降级只动标题行,不该破坏 IR 的往返一致性。"""
-    from ir import build_ir, render_ir
+    from pdf2epub.ir import build_ir, render_ir
     md, _ = _run()
     ir = build_ir(md, source="synthetic.md", backend="mineru", total_pages=5)
     assert render_ir(ir) == md
@@ -201,7 +201,7 @@ def test_heading_restore_shares_one_before_after_snapshot(tmp_path) -> None:
     Patch 的一轮里 ``changed`` 为 False,补回的标题**从来没写进 book.md**;报告又
     显示字数凭空增加,撤销时也算不回来。
     """
-    from clean.pipeline import clean_book_md
+    from pdf2epub.clean.pipeline import clean_book_md
     path = tmp_path / "book.md"
     path.write_text(MD, encoding="utf-8")
     outcome = clean_book_md(path, backend="mineru", evidence=_evidence(

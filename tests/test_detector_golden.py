@@ -16,8 +16,7 @@ from pathlib import Path
 import pytest
 
 from conftest import make_fake_text_layer_pdf, make_mixed_pdf, make_pdf
-from detector.pdf_detector import PDFDetector, PDFType
-
+from pdf2epub.detector.pdf_detector import PDFDetector, PDFType
 GOLDEN: list[dict] = [
     {
         "name": "纯文字版",

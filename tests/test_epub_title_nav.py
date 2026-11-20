@@ -11,8 +11,7 @@ from __future__ import annotations
 import zipfile
 from pathlib import Path
 
-from epub.pandoc import add_title
-
+from pdf2epub.epub.pandoc import add_title
 OPF = """<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">

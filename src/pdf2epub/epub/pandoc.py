@@ -1,0 +1,704 @@
+"""Pandoc EPUB 生成封装(见 docs/design.md §6 EPUB 产物)。
+
+统一命令:
+    pandoc book.md -o out.epub --toc --toc-depth=3 --css=config/book.css
+           --resource-path=<work> --mathml --metadata title/author/lang
+
+生成前会把 Markdown **副本**里两类「Markdown 合法、EPUB 非法」的写法归一化
+(`\\tag{n}` 公式编号、原始 HTML 空元素),不就地改 `book.md`(它是内容对照的源):
+
+  - `\\tag{n}`:MathML 没有这个概念,编号会在阅读器里整个消失。
+  - `<br>` / `<img>` 等空元素:HTML 允许省略斜杠,XHTML(EPUB 的正文格式)不允许 ——
+    pandoc 原样透传原始 HTML,一个 `<br>` 就足以让整章 XHTML 不再是良构 XML,
+    严格阅读器会拒绝渲染(云端 OCR 的图片文字块就带 `<br>`)。
+  - `<repetitio est mater studiorum>` 这类**正文里的尖括号文字**:pandoc 把它当成
+    「带裸属性的原始 HTML 标签」原样透传,既没转义也没闭合,同样毁掉整章;见
+    `escape_pseudo_html`。
+"""
+from __future__ import annotations
+
+import logging
+import os
+import re
+import shutil
+import subprocess
+import sys
+import zipfile
+from pathlib import Path
+from xml.sax.saxutils import escape
+
+from pdf2epub.paths import book_css
+DEFAULT_CSS = book_css()
+
+logger = logging.getLogger("pdf2epub.pandoc")
+
+#: pandoc 可执行文件名(Windows 上同样是 `pandoc`,PATHEXT 由 shutil.which 处理)
+PANDOC = "pandoc"
+
+#: 环境缺失时的提示(装完 pandoc 需要重开终端/桌面端才会进 PATH)
+MISSING_PANDOC_HINT = (
+    "未找到 pandoc(生成 EPUB 的必需组件):请安装 pandoc 并确保它在 PATH 中"
+    "(Windows 上装完需要重开终端或桌面端),或把 pandoc.exe 放进安装目录的 "
+    "pandoc/ 子目录,然后重跑"
+)
+
+
+class PandocMissingError(RuntimeError):
+    """pandoc 不存在(环境缺失)。
+
+    **确定性失败,不该重试**:重试只会把同一堵墙再撞一遍,而每次重试都要重跑
+    整条链路(提取 + 云端 OCR),白烧云端额度。
+    """
+
+
+class PandocError(RuntimeError):
+    """pandoc 执行失败(进程非零退出 / 声称成功却没写出产物)。
+
+    与 :class:`PandocMissingError` 同样是**确定性失败**:同一份输入再跑一遍
+    只会得到同一个非零退出码。旧实现抛裸 ``RuntimeError``,批处理按「未知异常
+    宁可重试」重跑 3 次整条链路(含云端 OCR 额度)。
+    """
+
+    retryable = False
+
+
+def _pandoc_candidates() -> list[str]:
+    """随包内置 pandoc 的候选位置(返回可执行文件绝对路径)。
+
+    查找顺序(命中即止,`pandoc_available` 与真正执行共用同一条链,
+    避免「探测到了、执行时却找不到」):
+      1. 环境变量 PDF2EPUB_PANDOC(显式覆盖,测试/高级用户用)
+      2. exe 同级 pandoc/(旧绿色版:cli.exe 与 pandoc/ 平级)
+      3. exe 上级 pandoc/(v0.6+ onedir 布局:引擎在 cli/ 里,pandoc/ 在安装根)
+      4. 源码根 pandoc/(开发模式:仓库里放了就能用)
+      5. PATH(shutil.which)
+    """
+    candidates: list[str] = []
+    env = os.environ.get("PDF2EPUB_PANDOC")
+    if env:
+        candidates.append(env)
+    exe = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else None
+    if exe is not None:
+        candidates.append(str(exe / "pandoc" / PANDOC_EXE))
+        candidates.append(str(exe.parent / "pandoc" / PANDOC_EXE))
+    # 源码根 = src/pdf2epub/epub/pandoc.py 的上三级(包结构变动后这里也要跟着改)
+    candidates.append(str(Path(__file__).resolve().parents[3] / "pandoc" / PANDOC_EXE))
+    return candidates
+
+
+#: pandoc 实际的可执行文件名:Windows 上是 pandoc.exe,其余平台不带后缀
+PANDOC_EXE = "pandoc.exe" if sys.platform == "win32" else "pandoc"
+
+
+def _resolve_pandoc() -> str:
+    """解析 pandoc 可执行路径:内置位置优先,最后回退 PATH 里的裸命令名。
+
+    返回值直接用作子进程 argv[0] —— 内置命中时是绝对路径,PATH 命中时是
+    "pandoc"(交给系统解析,行为与旧版完全一致)。
+    """
+    for cand in _pandoc_candidates():
+        if cand and Path(cand).is_file():
+            return cand
+    if shutil.which(PANDOC):
+        return PANDOC
+    return PANDOC  # 找不到也返回裸名:让调用方在执行时拿到真实的 FileNotFoundError
+
+
+def pandoc_available() -> bool:
+    """pandoc 是否可用(内置目录或 PATH,只探测,不执行)。"""
+    if any(Path(c).is_file() for c in _pandoc_candidates() if c):
+        return True
+    return shutil.which(PANDOC) is not None
+
+
+def require_pandoc() -> None:
+    """pandoc 缺失时抛 PandocMissingError(调用方可据此提前失败,不进入昂贵阶段)。"""
+    if not pandoc_available():
+        raise PandocMissingError(MISSING_PANDOC_HINT)
+
+#: 数学片段:$$…$$ / $…$ / \[…\] / \(…\)(本地路径的公式是图片,只有云端 LaTeX 会命中)
+MATH_SPAN_RE = re.compile(r"\$\$.+?\$\$|\$[^$\n]+\$|\\\[.+?\\\]|\\\(.+?\\\)", re.S)
+#: LaTeX 公式编号:\tag{1} / \tag*{1}
+MATH_TAG_RE = re.compile(r"\\tag(\*?)\s*\{([^{}]*)\}")
+#: 围栏代码块(整段原样保留,里面的 $ 与 \tag 不动)。
+#: 必须带捕获组:否则 ``re.split`` 会把分隔符(整个代码块)**丢掉**。
+FENCE_RE = re.compile(r"(^```.*?^```)", re.S | re.M)
+
+#: XHTML 空元素:HTML 允许写 `<br>`,XML 必须自闭合,否则整份文档不再是良构 XML。
+VOID_TAGS = ("area", "base", "br", "col", "embed", "hr", "img", "input", "link",
+             "meta", "param", "source", "track", "wbr")
+VOID_TAG_RE = re.compile(
+    r"<(?P<name>" + "|".join(VOID_TAGS) + r")\b(?P<attrs>[^<>]*?)(?:/)?\s*>",
+    re.I,
+)
+
+
+#: 允许**原样透传**给 pandoc 的原始 HTML 标签(内联 + 结构)。白名单之外的 `<…>`
+#: 一律按正文文字转义,理由见 :func:`escape_pseudo_html`。
+RAW_HTML_TAGS = frozenset("""
+a abbr b big blockquote br center cite code dd del details div dl dt em figcaption
+figure font h1 h2 h3 h4 h5 h6 hr i img ins kbd li mark ol p pre q rp rt ruby s samp
+small span strike strong sub summary sup table tbody td tfoot th thead tr tt u ul var
+""".split())
+
+#: 形如标签的尖括号片段:`<name …>` / `</name>`(名字之后到下一个尖括号之前的任意内容)
+TAG_LIKE_RE = re.compile(r"<(?P<close>/?)(?P<name>[A-Za-z][A-Za-z0-9:_.-]*)(?P<rest>[^<>]*)>")
+#: 良构的属性串(XHTML 不接受裸属性名):`class="x" id='y'` 以及结尾可选的 ` /`
+ATTRS_RE = re.compile(r"""(?:\s+[A-Za-z_:][A-Za-z0-9_:.-]*\s*=\s*(?:"[^"]*"|'[^']*'))*\s*/?""")
+#: 自动链接(`<https://…>` / `<a@b.c>`):pandoc 会把它渲染成 `<a>`,不是文字
+AUTOLINK_RE = re.compile(r"<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^<>]*>|<[^<>@\s]+@[^<>\s]+>")
+#: 受保护片段:行内代码与数学。那里的尖括号是示例文本或比较运算符,加反斜杠会改动内容。
+#: 第一个捕获组是行内代码的反引号,`\1` 回指同一串。
+PROTECTED_RE = re.compile(
+    r"(`+)(?:.+?)\1|\$\$.+?\$\$|\$[^$\n]+\$|\\\[.+?\\\]|\\\(.+?\\\)", re.S)
+
+
+def _escaped(match: re.Match) -> str:
+    """`<foo bar>` → `\\<foo bar\\>`,pandoc 据此写出 `&lt;foo bar&gt;` 的文字。"""
+    return "\\<" + match.group(0)[1:-1] + "\\>"
+
+
+def escape_pseudo_html(text: str) -> str:
+    r"""把「长得像标签、其实不是 HTML」的尖括号片段转义成正文文字。
+
+    **被钉住的缺陷**:正文里的书名/拉丁引语用尖括号括起来(实测真实书籍里的
+    `<repetitio est mater studiorum>`、`<Value, price and profit>`),pandoc 的
+    Markdown reader 把它当成「带裸属性的原始 HTML 标签」原样写进 XHTML —— 尖括号
+    没被转义、标签也没有闭合,整份 XHTML 不再是良构 XML,一本 70 页的书就此判失败。
+    反向地,`<b>加粗` 这种**没闭合的真标签**有同样的后果。
+
+    判据(保守,宁多转义一句、不让整本打不开):名字在 :data:`RAW_HTML_TAGS` 里、
+    属性串良构、且开/闭标签在全文里找得到配对,才原样透传;其余加反斜杠转义。
+    围栏代码块、行内代码、数学片段与自动链接整体跳过。
+    """
+    lowered = text.lower()
+
+    def fix(match: re.Match) -> str:
+        name = match.group("name").lower()
+        rest = match.group("rest")
+        if AUTOLINK_RE.fullmatch(match.group(0)):
+            return match.group(0)
+        if name not in RAW_HTML_TAGS or not ATTRS_RE.fullmatch(rest):
+            return _escaped(match)
+        if match.group("close"):
+            # `</div>` 没有对应的开标签同样不是良构 XML
+            return match.group(0) if f"<{name}" in lowered else _escaped(match)
+        if name not in VOID_TAGS and f"</{name}" not in lowered:
+            return _escaped(match)
+        return match.group(0)
+
+    parts = FENCE_RE.split(text)
+    # 奇数下标是围栏代码块;每段再按行内代码/数学切开,只改「光裸的正文」
+    for i in range(0, len(parts), 2):
+        piece, out, pos = parts[i], [], 0
+        for m in PROTECTED_RE.finditer(piece):
+            out.append(TAG_LIKE_RE.sub(fix, piece[pos:m.start()]))
+            out.append(m.group(0))
+            pos = m.end()
+        out.append(TAG_LIKE_RE.sub(fix, piece[pos:]))
+        parts[i] = "".join(out)
+    return "".join(parts)
+
+
+def normalize_math_tags(text: str) -> str:
+    r"""把 ``\tag{n}`` / ``\tag*{n}`` 换成**可见**的编号。
+
+    MathML 没有 ``\tag`` 这个概念:pandoc 只会把它留在 ``<annotation
+    encoding="application/x-tex">`` 里,公式正文里一个字符都不出现 —— 阅读器里
+    **公式编号直接消失**(实测:云端路径的 ``$$\int x \tag{1}$$`` 转出来只有公式,
+    连同编号一起丢了)。换成 ``\qquad{(1)}`` 后编号跟着公式一起渲染,且仍属于同一
+    个 MathML 块。``\tag*{n}`` 本义是没有括号,这里同样不加。
+
+    只改数学片段;围栏代码块里的同名字样原样保留。
+    """
+    def fix_span(match: re.Match) -> str:
+        span = match.group(0)
+        if "\\tag" not in span:
+            return span
+
+        def fix_tag(tag: re.Match) -> str:
+            star, label = tag.group(1), tag.group(2).strip()
+            return f"\\qquad{{{label}}}" if star else f"\\qquad{{({label})}}"
+
+        return MATH_TAG_RE.sub(fix_tag, span)
+
+    parts = FENCE_RE.split(text)
+    # ``split`` 的分隔符本身会留在结果里(奇数下标即围栏块),它们不参与替换
+    for i in range(0, len(parts), 2):
+        parts[i] = MATH_SPAN_RE.sub(fix_span, parts[i])
+    return "".join(parts)
+
+
+def normalize_xhtml_voids(text: str) -> str:
+    r"""把原始 HTML 的空元素写成自闭合形式(`<br>` → `<br />`)。
+
+    XHTML 是 XML:`<br>` 是**未闭合标签**,一个就够让整章不再是良构 XML ——
+    Readium / KOReader / epubcheck 会直接拒绝或错乱渲染,而 pandoc 对 Markdown 里的
+    原始 HTML 是**原样透传**的(云端 OCR 的图片文字块常带 `<br>`;实测一本 300KB 的
+    章节就因为这一个标签整份失效)。归一化保留标签语义(换行仍然换行),只是把它
+    写对。
+
+    只改正文里的原始 HTML;围栏代码块里的同名字样是示例文本,原样保留。
+    """
+    def fix(match: re.Match) -> str:
+        tag = match.group("name")
+        attrs = match.group("attrs").strip()
+        return f"<{tag} {attrs} />" if attrs else f"<{tag} />"
+
+    parts = FENCE_RE.split(text)
+    for i in range(0, len(parts), 2):        # 奇数下标是围栏代码块
+        parts[i] = VOID_TAG_RE.sub(fix, parts[i])
+    return "".join(parts)
+
+
+def prepare_pandoc_markdown(text: str) -> str:
+    """把 Markdown 归一化成「Pandoc 能写出合法 EPUB3」的形式(见模块 docstring)。"""
+    return normalize_xhtml_voids(escape_pseudo_html(normalize_math_tags(text)))
+
+
+def infer_title(book_md: Path, fallback: str | None = None) -> str:
+    """从 Markdown 标题推断书名:跳过过短/无意义的候选(如版权页'说明')。"""
+    try:
+        text = book_md.read_text(encoding="utf-8", errors="replace")
+        for m in re.finditer(r"^#\s+(.+)$", text, re.MULTILINE):
+            candidate = m.group(1).strip()
+            condensed = re.sub(r"\s+", "", candidate)
+            if len(condensed) >= 3:
+                return candidate
+    except OSError:
+        pass
+    return fallback or book_md.parent.name
+
+
+#: 标题行(`#{1,6} 文字`),用于算目录深度
+HEADING_RE = re.compile(r"^(#{1,6})\s+\S", re.MULTILINE)
+
+
+def heading_depth(text: str) -> int:
+    """Markdown 里最深到第几级标题(没有标题时为 1)。
+
+    ``--toc-depth`` 跟着它走,而不是写死 3:章在 1 级、节在 2 级的书,目录写到 3 级
+    只会把三级小标题也塞进去,目录变得又长又碎;反过来只到 1 级的书写 3 也没用。
+    """
+    levels = [len(m.group(1)) for m in HEADING_RE.finditer(FENCE_RE.sub("", text))]
+    return max(levels) if levels else 1
+
+
+#: 脚注块(pandoc 生成:`<aside epub:type="footnote" … id="fn1">…</aside>`)
+FOOTNOTE_ASIDE_RE = re.compile(
+    r'(<aside\b[^>]*epub:type="footnote"[^>]*>)(.*?)</aside>', re.S)
+#: 脚注块上的 id(回链要指回 `fnref<后缀>`)
+FOOTNOTE_ID_RE = re.compile(r'\bid="([^"]+)"')
+#: 已经补过的序号(幂等标记)
+FOOTNOTE_NUM_RE = re.compile(r'<span class="footnote-num">')
+#: 脚注块里的第一个段落:序号插在它里面,否则会单独占一行
+FOOTNOTE_FIRST_P_RE = re.compile(r"<p\b[^>]*>")
+
+
+def _rewrite_footnotes(text: str) -> tuple[str, int]:
+    """给一份 XHTML 里的脚注块补序号 + 回链,返回 (新文本, 改动条数)。
+
+    序号按**文档内出现顺序**编号(1、2、3…):pandoc 的正文标注也是按出现顺序
+    编号、并且每份 XHTML 从 1 重新开始,所以两边天然对齐。编号取位置而不是
+    ``id="fnX"`` 的数字 —— 自定义脚注标签(`[^注1]`)时 id 不一定等于显示序号。
+    """
+    changed = 0
+
+    def fix(match: re.Match) -> str:
+        nonlocal changed
+        tag, body = match.group(1), match.group(2)
+        before = body
+
+        if not FOOTNOTE_NUM_RE.search(body):
+            # 编号:放进第一个 <p> 内部,避免和段落各占一行
+            head = FOOTNOTE_FIRST_P_RE.search(body)
+            num = f'<span class="footnote-num">{_seq[0]}.</span> '
+            _seq[0] += 1
+            body = (body[: head.end()] + num + body[head.end():]
+                    if head is not None else num + body)
+
+        found = FOOTNOTE_ID_RE.search(tag)
+        if found is not None:
+            anchor = found.group(1)
+            ref_id = (f"fnref{anchor[len('fn'):]}" if anchor.startswith("fn")
+                      else f"fnref-{anchor}")
+            if f'href="#{ref_id}"' not in body:          # 已经有回链:不重复补
+                back = (f' <a href="#{ref_id}" class="footnote-back" '
+                        f'role="doc-backlink">\u21a9</a>')
+                if "</p>" in body:
+                    head_p, _, tail = body.rpartition("</p>")
+                    body = f"{head_p}{back}</p>{tail}"
+                else:
+                    body = f"{body}{back}"
+
+        if body != before:
+            changed += 1
+        return f"{tag}{body}</aside>"
+
+    # 序号计数器按文档重置(每个 XHTML 的脚注都从 1 开始,与正文标注一致)
+    _seq = [1]
+    return FOOTNOTE_ASIDE_RE.sub(fix, text), changed
+
+
+def _rewrite_zip(path: Path, transform) -> int:
+    """就地重写 EPUB 里的条目,返回改动条数(0 = 没写文件)。
+
+    ``transform(name, data) -> (new_data, changed)``。抽出这一层是因为「产物侧补东西」
+    不止一处(脚注回链、译者 contributor),而**重写 zip 的规矩只有一套**:
+
+    - `mimetype` 必须仍是第一个条目且**不压缩**(EPUB 规范要求,否则严格阅读器报废);
+    - 一条都没改就根本不动文件(零风险);
+    - 先写临时文件再 ``os.replace``,中途失败不会留下半个 EPUB。
+    """
+    try:
+        with zipfile.ZipFile(path) as zf:
+            items = [(i, zf.read(i.filename)) for i in zf.infolist()]
+    except (zipfile.BadZipFile, OSError):
+        return 0
+
+    changed = 0
+    new_items: list[tuple[zipfile.ZipInfo, bytes]] = []
+    for info, data in items:
+        data, n = transform(info.filename, data)
+        changed += n
+        new_items.append((info, data))
+
+    if not changed:
+        return 0
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as out:
+        for info, data in new_items:
+            if info.filename == "mimetype":                  # 必须第一且不压缩
+                out.writestr(zipfile.ZipInfo("mimetype"), data, zipfile.ZIP_STORED)
+            else:
+                out.writestr(info.filename, data, zipfile.ZIP_DEFLATED)
+    os.replace(tmp, path)
+    return changed
+
+
+def add_footnote_marks(epub_path: str | Path) -> int:
+    """给脚注块补序号(`1.`)与「回到正文引用处」的回链(↩),返回改动的脚注条数。
+
+    **为什么要补这两样**:
+
+    - pandoc 3.x 的 epub3 writer 只写正文侧的引用
+      (`<a href="#fn1" class="footnote-ref" id="fnref1" epub:type="noteref">`),
+      **不写**脚注侧的 `doc-backlink`;没有回链时「返回正文」只能靠阅读器自己的
+      返回键,规范推荐的形式是脚注里带 `<a role="doc-backlink">`。
+    - 脚注块(`<aside>`)里**没有序号**:正文标着 1、2、3,书末的注释却是几段没有
+      编号的文字,读者对不上。产物侧补成 `1.`、`2.`……,与正文标注一一对应。
+
+    **只在产物里确实有脚注时才动文件**:没有脚注的书连 zip 都不重写(零风险)。
+    两处改动都幂等:重复调用不会补出第二条回链或第二个序号。
+    """
+
+    def transform(name: str, data: bytes) -> tuple[bytes, int]:
+        if not name.endswith((".xhtml", ".html", ".htm")) or b"footnote" not in data:
+            return data, 0
+        text, n = _rewrite_footnotes(data.decode("utf-8", errors="replace"))
+        return text.encode("utf-8"), n
+
+    return _rewrite_zip(Path(epub_path), transform)
+
+
+#: pandoc 在「有 title 元数据但不出标题页」时留下的空标题(见 add_title)
+EMPTY_TITLE_H1 = '<h1 class="unnumbered"></h1>'
+
+#: 没有标题可写的那个 unnumbered 段落在导航里留下的**空目录项**(见 add_title)
+_EMPTY_NAV_ITEM = re.compile(r'<li id="toc-li-\d+"><a href="[^"]*"\s*/>\s*</li>')
+#: 目录文档自己的 ``<title>``(pandoc 在没有书名时写成 md 文件名或 UNTITLED)
+_NAV_TITLE = re.compile(r'<title>[^<]*</title>')
+#: ncx 的文档标题
+_NCX_DOCTITLE = re.compile(r'(<docTitle>\s*<text>)[^<]*(</text>)')
+_EMPTY_NCX_ITEM = re.compile(
+    r'<navPoint id="navPoint-\d+">\s*<navLabel>\s*<text>\s*</text>\s*</navLabel>'
+    r'\s*<content src="[^"]*"\s*/>\s*</navPoint>')
+
+
+def add_title(epub_path: str | Path, title: str, *, toc_label: str = "目录") -> bool:
+    """把书名写进 OPF 的 ``dc:title``(pandoc 没拿到书名时用),返回是否改动。
+
+    **为什么不让 pandoc 自己写**:pandoc 只要拿到 ``--metadata title``,即使关了标题页
+    (``--epub-title-page=false``),也会在**正文第一个文件**顶上插一个
+    ``<h1 class="unnumbered">书名</h1>``。当正文里有同名章节时(同名短篇集很常见),
+    两个 section 得到**同一个 id**,EPUB 导航里两条目录项都指向那个 h1 —— 实测结果
+    是章节条目整个丢失、点进去停在书名页。所以「不要标题页」时干脆不把书名交给
+    pandoc,产物侧再补 ``dc:title``:标题只留在元数据里,不再进正文。
+
+    幂等:已有 ``dc:title`` 就不再插;OPF 没有 ``xmlns:dc`` 时直接放弃。
+
+    ``toc_label``:目录页自己的标题。**不是书名** —— pandoc 有书名时会拿书名当目录页
+    标题(读者点开目录看到"烧纸"而不是"目录"),没书名时则写 ``UNTITLED``;两种都不对,
+    这里统一写成"目录"(``nav.xhtml`` 的 ``<title>`` 与 ``<h1 id="toc-title">``、
+    ``toc.ncx`` 的 ``<docTitle>``、OPF2 ``guide`` 里那份目录标题)。
+    """
+    title = (title or "").strip()
+    if not title:
+        return False
+    block = f"    <dc:title>{escape(title)}</dc:title>\n"
+
+    def transform(file_name: str, data: bytes) -> tuple[bytes, int]:
+        changed = 0
+        if file_name.endswith((".xhtml", ".html")):
+            # 没有书名可插时 pandoc 留下一个**空**的 ``<h1 class="unnumbered">``,
+            # 顺手删掉:它在阅读器里只是一行空白。
+            text = data.decode("utf-8", errors="replace")
+            if EMPTY_TITLE_H1 in text:
+                text = text.replace(EMPTY_TITLE_H1, "")
+                changed += 1
+            cleaned = _EMPTY_NAV_ITEM.sub("", text)
+            if cleaned != text:
+                text = cleaned
+                changed += 1
+            # 目录页(以及各文件 head)的书名:pandoc 没拿到书名时写的是 UNTITLED
+            title_xml = escape(title)
+            toc_xml = escape(toc_label)
+            # 章节文件 head 里的书名(封面页常是 UNTITLED)
+            cleaned = text.replace("<title>UNTITLED</title>",
+                                   f"<title>{title_xml}</title>")
+            # 目录页自己的标题:目录就是"目录",不是书名
+            cleaned = cleaned.replace('<h1 id="toc-title">UNTITLED</h1>',
+                                      f'<h1 id="toc-title">{toc_xml}</h1>')
+            cleaned = cleaned.replace('<h1 id="toc-title">' + title_xml + "</h1>",
+                                      f'<h1 id="toc-title">{toc_xml}</h1>')
+            if file_name.endswith("nav.xhtml"):
+                cleaned = _NAV_TITLE.sub(f"<title>{toc_xml}</title>", cleaned, count=1)
+            if cleaned != text:
+                text = cleaned
+                changed += 1
+            data = text.encode("utf-8")
+        if file_name.endswith(".ncx"):
+            text = data.decode("utf-8", errors="replace")
+            cleaned = _EMPTY_NCX_ITEM.sub("", text)
+            cleaned = _NCX_DOCTITLE.sub(
+                lambda m: m.group(1) + escape(toc_label) + m.group(2), cleaned)
+            if cleaned != text:
+                data = cleaned.encode("utf-8")
+                changed += 1
+        if file_name.endswith(".opf") and b"</metadata>" in data:
+            text = data.decode("utf-8", errors="replace")
+            if "xmlns:dc" in text and "<dc:title" not in text:
+                cut = text.rindex("</metadata>")
+                text = text[:cut] + block + text[cut:]
+                changed += 1
+            # OPF2 的 guide 里也有一份目录标题(老阅读器用它),同样是 UNTITLED
+            fixed = text.replace('type="toc" title="UNTITLED"',
+                                 f'type="toc" title="{escape(toc_label)}"')
+            if fixed != text:
+                text = fixed
+                changed += 1
+            data = text.encode("utf-8")
+        return data, changed
+
+    return _rewrite_zip(Path(epub_path), transform) > 0
+
+
+def add_contributor(epub_path: str | Path, name: str, *, role: str = "trl") -> bool:
+    """把译者写进 OPF 的 `dc:contributor`(角色 `trl` = translator),返回是否改动。
+
+    pandoc 认 `--metadata author`,**不认** `translator`:传了也悄无声息地丢掉。
+    而译者既不能塞进 author(阅读器会把译本显示成「柏拉图、郭斌和 著」两个作者),
+    也不该只留在文件名里 —— 规范做法就是 dc:contributor + marc:relators 的 trl。
+
+    幂等:同一名字(或同一 role 的 id)已存在就不再插第二条;OPF 里没有
+    `xmlns:dc`(非标准产物)时也直接放弃,绝不写出半个不合法的 metadata 块。
+    """
+    name = (name or "").strip()
+    if not name:
+        return False
+    element_id = f"epub-contributor-{role}"
+    block = (
+        f'    <dc:contributor id="{element_id}">{escape(name)}</dc:contributor>\n'
+        f'    <meta refines="#{element_id}" property="role" '
+        f'scheme="marc:relators">{role}</meta>\n'
+    )
+
+    def transform(file_name: str, data: bytes) -> tuple[bytes, int]:
+        if not file_name.endswith(".opf") or b"</metadata>" not in data:
+            return data, 0
+        text = data.decode("utf-8", errors="replace")
+        if 'xmlns:dc' not in text or element_id in text or name in text:
+            return data, 0
+        cut = text.rindex("</metadata>")
+        return (text[:cut] + block + text[cut:]).encode("utf-8"), 1
+
+    return _rewrite_zip(Path(epub_path), transform) > 0
+
+
+#: 老 pandoc 不认识某个选项时的 stderr 特征(pandoc 3.x: `Unknown option ...`)
+_UNKNOWN_OPTION_RE = re.compile(r"unknown option|unrecognized option|invalid option",
+                                re.I)
+
+
+def _run_pandoc(cmd: list[str], *, allow_drop_title_page: bool = False):
+    """执行 pandoc;``--epub-title-page`` 不被支持时去掉它重跑一次。
+
+    这个开关是 pandoc 2.11 才加的。老版本遇到未知参数会直接以「未知选项」退出,
+    于是「不要标题页」这个纯显示要求会把整本书变成一次转换失败 —— 为一行 flag
+    赔掉整条链路(含云端 OCR 额度)不值得。所以退化为「照旧生成标题页」并告警,
+    书照出,只是多一页。
+    """
+    proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                          errors="replace")
+    flag = "--epub-title-page=false"
+    if proc.returncode == 0 or not allow_drop_title_page or flag not in cmd:
+        return proc
+    if not _UNKNOWN_OPTION_RE.search(proc.stderr or ""):
+        return proc
+    logger.warning("当前 pandoc 不支持 %s,将保留生成的标题页(建议升级到 2.11+)", flag)
+    return subprocess.run([a for a in cmd if a != flag], capture_output=True,
+                          text=True, encoding="utf-8", errors="replace")
+
+
+def _has_h1(md_text: str, title: str) -> bool:
+    """正文里是否已有一级标题的文字与书名相同(归一化后比较)。"""
+    want = re.sub(r"\s+", "", title)
+    if not want:
+        return False
+    for line in md_text.splitlines():
+        m = re.match(r"^#[ 	]+(.*\S)[ 	]*$", line)
+        if m and re.sub(r"\s+", "", m.group(1)) == want:
+            return True
+    return False
+
+
+def build_epub(
+    book_md: str | Path,
+    work_dir: str | Path,
+    output_dir: str | Path,
+    title: str | None = None,
+    author: str | None = None,
+    css: str | Path = DEFAULT_CSS,
+    out_name: str | None = None,
+    lang: str | None = None,
+    identifier: str | None = None,
+    date: str | None = None,
+    cover_image: str | Path | None = None,
+    title_page: bool = True,
+    toc_depth: int | None = None,
+    publisher: str | None = None,
+    translator: str | None = None,
+    split_level: int = 1,
+) -> Path:
+    """用 Pandoc 将 work/book.md 转为 EPUB,返回 epub 路径。
+
+    out_name: 输出文件名(不含 .epub)。默认取 work 目录名(被 sanitize 过),
+    调用方应传原始「标题 - 作者」名,避免空格被写成下划线。
+    lang: dc:language(默认 zh-CN;由调用方做检测/覆盖)。
+    identifier: dc:identifier(稳定 UUID,见 batch.stable_identifier)。
+    date: dc:date(ISO 日期)。
+    cover_image: 封面 JPEG(pandoc --epub-cover-image)。
+    title_page: 是否让 pandoc 生成「书名 + 作者 + 日期」标题页。**有封面时必须关**:
+        封面本身就写着书名与作者,再生成一张就是两遍(见 src/pdf2epub/cover.py)。
+    toc_depth: 目录深度,默认按正文实际最深标题级别算(clamp 2..4)。
+    publisher: dc:publisher(出版社)。只有卷首有「出版社:」时才有值。
+    translator: 译者 —— pandoc 不认 `--metadata translator`,由
+        :func:`add_contributor` 在产物 OPF 里补 `dc:contributor role="trl"`。
+        译者**不进** author:那会让阅读器把译者当成第二个作者。
+    split_level: 分卷级别,默认 1(一章一个 XHTML)。显式传给 pandoc,不靠默认值。
+
+    Raises:
+        PandocMissingError: pandoc 不在 PATH(环境缺失,不该重试)
+        RuntimeError: Pandoc 执行失败
+    """
+    book_md = Path(book_md)
+    work_dir = Path(work_dir)
+    output_dir = Path(output_dir)
+    # 先确认 pandoc 存在,再产生任何副作用(建目录、写 pandoc 用的副本):
+    # 环境缺失必须立刻暴露,而不是等到链路末尾
+    require_pandoc()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    epub = output_dir / f"{out_name or book_md.parent.name}.epub"
+    # **先写临时文件,最后才 os.replace**:pandoc 是就地写最终路径的,进程被杀
+    # (关窗口 / Ctrl-C / 任务管理器)时上一轮能读的书已经被半截字节盖掉,而
+    # --force 重转失败最不该赔掉的就是上一轮成品。临时文件与目标同目录(同卷),
+    # replace 是原子的。
+    # 文件名必须以 `.epub` 结尾:pandoc 按扩展名推断输出格式,`.part` 会被当成
+    # 未知扩展名而写出 HTML(实测产物是 103 字节的 `<h1 …>`)。
+    part = epub.with_name(f"{epub.stem}.part.epub")
+    title = title or infer_title(book_md)
+
+    # MathML 不认识 \tag:公式编号会静默消失 → 先归一化成可见的 \qquad(n)。
+    # XHTML 不接受原始 HTML 的空元素 → `<br>` 顺手写成 `<br />`。
+    # 不就地改 book.md(它是内容对照的源),只在确有改动时写一份给 pandoc 用的副本。
+    source_md = book_md
+    md_text = book_md.read_text(encoding="utf-8", errors="replace")
+    prepared = prepare_pandoc_markdown(md_text)
+    if prepared != md_text:
+        source_md = book_md.parent / f"{book_md.stem}.pandoc.md"
+        source_md.write_text(prepared, encoding="utf-8")
+
+    if title_page and title and _has_h1(md_text, title):
+        # 正文里已经有一个与书名同名的**一级标题**:再让 pandoc 生成标题页,两者会得到
+        # 同一个 section id,EPUB 导航里两条目录项指向同一处(实测:同名短篇集的第二个
+        # 「烧纸」跳回书名页,nav 里章节条目整个丢失)。
+        title_page = False
+    # 书名只在「要 pandoc 生成标题页」时才交给它:否则它会在正文首个文件顶上插一个
+    # 同名 h1(见 add_title),和同名章节撞 id。
+    emit_title = bool(title_page and title)
+
+    depth = toc_depth or min(4, max(2, heading_depth(md_text)))
+    cmd = [
+        _resolve_pandoc(), str(source_md), "-o", str(part),
+        "--toc", f"--toc-depth={depth}",
+        # 显式写死分卷级别:一章一个 XHTML 是「脚注落在本章末尾」的前提,
+        # 而 pandoc 只把每条注释写进它所在的文件。默认值恰好也是 1,但默认值
+        # 会随版本变化、也可能被用户的 PANDOC_* 配置改掉 —— 这本书的目录层级与
+        # 注释位置都建立在这个 1 上,不能靠别人的默认值担保。
+        f"--split-level={split_level}",
+        "--css", str(css),
+        "--resource-path", str(work_dir),
+        "--mathml",
+        "--metadata", f"lang={lang or 'zh-CN'}",
+    ]
+    if emit_title:
+        cmd += ["--metadata", f"title={title}"]
+    if author:
+        cmd += ["--metadata", f"author={author}"]
+    if identifier:
+        cmd += ["--metadata", f"identifier={identifier}"]
+    if date:
+        cmd += ["--metadata", f"date={date}"]
+    if publisher:
+        cmd += ["--metadata", f"publisher={publisher}"]
+    if cover_image:
+        cmd += ["--epub-cover-image", str(cover_image)]
+    if not title_page:
+        # pandoc ≥2.11 才有这个开关;老版本会以「未知参数」退出 —— 由 _run_pandoc
+        # 识别后去掉重试,而不是让整本书因为一个显示选项失败。
+        cmd += ["--epub-title-page=false"]
+    try:
+        try:
+            proc = _run_pandoc(cmd, allow_drop_title_page=not title_page)
+        except FileNotFoundError as e:
+            # 极少数情况下 which() 能解析、真正执行时却找不到(Windows: [WinError 2])。
+            # 这同样是环境缺失,不是「临时故障」—— 归成可重试错误会让整条链路白跑。
+            raise PandocMissingError(f"{MISSING_PANDOC_HINT}(执行 pandoc 失败: {e})") from e
+        if proc.returncode != 0:
+            raise PandocError(f"Pandoc 失败(exit={proc.returncode}): {proc.stderr[:500]}")
+        # 退出码 0 不等于「写出了产物」:产物缺失或 0 字节都是硬失败,不能把空文件
+        # 当成功结果交给上层(is_done 只认容器完整性,空文件会在这里就暴露)。
+        if not part.exists() or part.stat().st_size == 0:
+            raise PandocError(f"Pandoc 返回成功但没有写出 EPUB(产物缺失或为空): {part}")
+        if title and not emit_title:
+            # 目录页标题:中文书用「目录」,其它语言用 Table of Contents(与阅读器惯例一致)
+            add_title(part, title,
+                      toc_label="目录" if str(lang or "zh-CN").lower().startswith("zh")
+                      else "Table of Contents")
+        # 脚注回链:pandoc 的 epub3 writer 不写 doc-backlink,产物侧补上(没有脚注就不动文件)
+        add_footnote_marks(part)
+        # 译者:pandoc 没有 translator → dc:contributor 的映射,产物侧补(见 add_contributor)
+        if translator:
+            add_contributor(part, translator)
+        try:
+            os.replace(part, epub)
+        except OSError as e:
+            # 目标被阅读器 / 同步盘 / 杀软占着:确定性失败(重跑整条链路含云端 OCR 不值),
+            # 但要把原因说清楚,别让人以为是 pandoc 的锅。
+            raise PandocError(f"无法写入 {epub.name}(文件可能正被阅读器或同步盘占用): {e}") from e
+    except BaseException:
+        # 任何失败(含 Ctrl-C)都不留半截 .part:上一轮的成品仍在原位。
+        part.unlink(missing_ok=True)
+        raise
+    return epub

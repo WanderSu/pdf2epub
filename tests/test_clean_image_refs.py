@@ -17,9 +17,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from clean.pipeline import clean_text
-from clean.rules import check_image_refs
-
+from pdf2epub.clean.pipeline import clean_text
+from pdf2epub.clean.rules import check_image_refs
 #: 引用了图,但图片目录不存在(验收里复现的形态)
 MD_WITH_IMAGES = (
     "# 图册\n"

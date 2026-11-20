@@ -16,12 +16,10 @@ from __future__ import annotations
 
 import pytest
 
-from clean import (Patch, PatchError, SourceFingerprint, apply_patches,
-                   default_options, read_report, render_unified_diff,
+from pdf2epub.clean import (Patch, PatchError, SourceFingerprint, apply_patches,                   default_options, read_report, render_unified_diff,
                    revert_patches, write_report)
-from clean.patch import AfterState, BlockState, Evidence
-from ir import build_ir, render_ir, text_sha256
-
+from pdf2epub.clean.patch import AfterState, BlockState, Evidence
+from pdf2epub.ir import build_ir, render_ir, text_sha256
 MD = """\
 # 第一章 起头
 
@@ -485,8 +483,7 @@ def test_set_prefix_patch_survives_serialization() -> None:
     assert Patch.from_dict(data) == patch
 
     md = "\n\n\n" + "正文一段以句号结尾。\n"
-    from clean import revert_patches as _revert
-
+    from pdf2epub.clean import revert_patches as _revert
     ir = build_ir(md, backend="synthetic")
     result = apply_patches(ir, [Patch.from_dict(data)], started_at=0, finished_at=0)
     assert result.report.patches[0].status == "applied"

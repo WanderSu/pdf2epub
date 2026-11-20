@@ -14,13 +14,12 @@ from pathlib import Path
 
 import pytest
 
-import convert
-from backends.base import ConversionResult
+import pdf2epub.convert as convert
+from pdf2epub.backends.base import ConversionResult
 from conftest import make_mixed_pdf, write_png
-from detector.pdf_detector import PDFDetector, PDFType
-from clean import clean_text
-from page_result import (
-    PageResult,
+from pdf2epub.detector.pdf_detector import PDFDetector, PDFType
+from pdf2epub.clean import clean_text
+from pdf2epub.page_result import (    PageResult,
     contiguous_runs,
     format_pages,
     merge_page_results,
@@ -258,8 +257,7 @@ def test_plan_ocr_runs_respects_limit_and_config_coercion() -> None:
 
 def test_dry_run_reports_hybrid_ocr_runs(tmp_path: Path) -> None:
     """预检报的云端任务数必须与实际提交的区段数一致。"""
-    from dryrun import plan_source
-
+    from pdf2epub.dryrun import plan_source
     pdf = make_mixed_pdf(tmp_path / "混合书.pdf", "TTSTTSTT")
     detection = PDFDetector().detect(pdf)
     assert detection.pdf_type == PDFType.HYBRID

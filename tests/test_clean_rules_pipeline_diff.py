@@ -13,11 +13,10 @@ from __future__ import annotations
 
 import difflib
 
-from clean import apply_patches, propose_join_lines, propose_rules, revert_patches
-from clean.patch import BlockState
-from clean.rules import PIPELINE_ORDER
-from ir import build_ir, render_ir
-
+from pdf2epub.clean import apply_patches, propose_join_lines, propose_rules, revert_patches
+from pdf2epub.clean.patch import BlockState
+from pdf2epub.clean.rules import PIPELINE_ORDER
+from pdf2epub.ir import build_ir, render_ir
 MD = """\
 # 第一章 巴勒斯坦问题的由来
 
@@ -107,8 +106,7 @@ def test_trailer_only_change_applies_and_reverts() -> None:
 
 def propose_trailer_patch(ir, block_id: str, trailer: str):
     """测试辅助:构造一条只改块间空行的 replace_text。"""
-    from clean.patch import AfterState, Evidence
-
+    from pdf2epub.clean.patch import AfterState, Evidence
     block = ir.block(block_id)
     patch = propose_replace_same_text(ir, block_id)
     from dataclasses import replace as _replace
@@ -118,8 +116,7 @@ def propose_trailer_patch(ir, block_id: str, trailer: str):
 
 
 def propose_replace_same_text(ir, block_id: str):
-    from clean.patch import Patch
-
+    from pdf2epub.clean.patch import Patch
     block = ir.block(block_id)
     return Patch.propose(patch_id="p0001", rule_id="cjk_spaces", block=block,
                          operation="replace_text", after_text=block.text)
@@ -154,8 +151,7 @@ def test_revert_refuses_when_trailer_was_hand_edited() -> None:
 
 def test_join_group_survives_dependency_chain_on_real_ir() -> None:
     """端到端:替换成功 → 删除随之成功;再撤销 → 逐字节回到原文。"""
-    from clean.patch import Evidence
-
+    from pdf2epub.clean.patch import Evidence
     line_a = "一九七三年十月战争后,埃及士兵站在已被摧毁的巴列夫防线"
     line_b = "前沿,向记者讲述着这场战争从开始到结束的全部经过"
     md = f"{line_a}\n\n{line_b}。\n"
@@ -286,9 +282,8 @@ def test_p4_source_fingerprint_mismatch_refuses_every_rule() -> None:
 
 def test_p4_dependency_failure_blocks_the_delete() -> None:
     """拼接组:前置替换失败 → 删除按 prerequisite_missing 跳过,不留半修复。"""
-    from clean import propose_join_lines
-    from clean.patch import BlockState
-
+    from pdf2epub.clean import propose_join_lines
+    from pdf2epub.clean.patch import BlockState
     line_a = "一九七三年十月战争后,埃及士兵站在已被摧毁的巴列夫防线"
     line_b = "前沿,向记者讲述着这场战争从开始到结束的全部经过"
     md = f"{line_a}\n\n{line_b}。\n"
@@ -338,8 +333,7 @@ def test_p4_default_run_only_suggests_except_the_deterministic_blank_rule() -> N
 
 def test_before_mismatch_reports_block_state_snapshot() -> None:
     """BlockState 快照语义不因 trailer 扩展而变:不符就拒绝。"""
-    from clean.patch import AfterState, Evidence, Patch
-
+    from pdf2epub.clean.patch import AfterState, Evidence, Patch
     md = "甲块正文。\n"
     ir = build_ir(md, backend="synthetic")
     block = ir.editable_blocks[0]

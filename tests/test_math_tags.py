@@ -14,8 +14,7 @@ import re
 import zipfile
 from pathlib import Path
 
-from epub.pandoc import build_epub, normalize_math_tags
-
+from pdf2epub.epub.pandoc import build_epub, normalize_math_tags
 
 # ---------------------------------------------------------------- 归一化
 

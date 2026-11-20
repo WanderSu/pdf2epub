@@ -10,9 +10,9 @@ from pathlib import Path
 
 import pytest
 
-import batch
-import events
-from batch import (    PandocMissingError,
+import pdf2epub.batch as batch
+import pdf2epub.events as events
+from pdf2epub.batch import (    PandocMissingError,
     VerifyError,
     epub_path,
     existing_epub,
@@ -25,10 +25,10 @@ from batch import (    PandocMissingError,
 )
 from conftest import (corrupt_zip_member, make_pdf, rewrite_epub, truncate_file,
                       write_png)
-from ir.model import text_sha256
-from ir.model import text_sha256
-from epub import pandoc
-from epub.verify import VerifyResult, verify_epub
+from pdf2epub.ir.model import text_sha256
+from pdf2epub.ir.model import text_sha256
+from pdf2epub.epub import pandoc
+from pdf2epub.epub.verify import VerifyResult, verify_epub
 CFG = {"pymupdf": {"write_images": True, "bold_fonts": []}}
 
 
@@ -192,7 +192,7 @@ def test_clean_failure_fails_the_file_without_falling_back(
     书比失败更糟(用户会把噪声当成产物缺陷)。这里把引擎打桩成必然失败,验证批处理
     侧的反应。
     """
-    from clean import CleanEngineError
+    from pdf2epub.clean import CleanEngineError
     md = tmp_path / "src" / "清理失败.md"
     md.parent.mkdir(parents=True, exist_ok=True)
     md.write_text("# 手记\n\n正文,句号结尾。\n", encoding="utf-8")
@@ -261,7 +261,7 @@ def test_clean_failure_fails_the_file_without_falling_back(
     书比失败更糟(用户会把噪声当成产物缺陷)。这里把引擎打桩成必然失败,验证批处理
     侧的反应。
     """
-    from clean import CleanEngineError
+    from pdf2epub.clean import CleanEngineError
     md = tmp_path / "src" / "清理失败.md"
     md.parent.mkdir(parents=True, exist_ok=True)
     md.write_text("# 手记\n\n正文,句号结尾。\n", encoding="utf-8")
@@ -437,7 +437,7 @@ def test_unretryable_backend_error_is_not_retried(tmp_path: Path,
 
     这类错误重试改变不了结果,而扫描书每重试一次就可能重新上传、重新 OCR 一次。
     """
-    from backends.mineru_backend import MinerUError
+    from pdf2epub.backends.mineru_backend import MinerUError
     pdf = make_pdf(tmp_path / "src" / "认证失败.pdf", pages=1)
     calls = {"n": 0}
 
@@ -813,7 +813,7 @@ def test_iter_sources_skips_artifact_and_env_dirs(tmp_path: Path) -> None:
     显式传入的单个文件不受限制 —— 用户指名要它,哪怕是 README;显式把 docs/ 当输入
     目录也照收(目录跳过只作用于「父目录扫子目录」)。
     """
-    from batch import iter_sources
+    from pdf2epub.batch import iter_sources
     keep = tmp_path / "books" / "真正要转的书.md"
     keep.parent.mkdir(parents=True)
     keep.write_text("# 书\n\n正文。\n", encoding="utf-8")
@@ -842,7 +842,7 @@ def test_failed_postprocess_keeps_previous_epub(tmp_path, monkeypatch) -> None:
     修复前 pandoc 就地写最终路径 —— ``--force`` 重转时进程在写盘之后被杀(或产物侧
     加工抛错),上一轮能读的书已经被半截字节盖掉,备份又在 finally 里被删掉。
     """
-    from epub import pandoc as pandoc_mod
+    from pdf2epub.epub import pandoc as pandoc_mod
     md = tmp_path / "book.md"
     md.write_text("# 标题\n\n正文段落,足够长以避免空章节判定,再加一句话。\n",
                   encoding="utf-8")

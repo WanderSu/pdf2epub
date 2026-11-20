@@ -40,8 +40,7 @@ def _image_cover_pdf(path: Path, *, margin: int = 80) -> Path:
 
 
 def test_detect_cover_image_dominant(tmp_path: Path) -> None:
-    from cover import detect_cover
-
+    from pdf2epub.cover import detect_cover
     info = detect_cover(_image_cover_pdf(tmp_path / "扫描封面.pdf"))
     assert info.is_cover is True
     assert info.image_ratio > 0.5
@@ -50,8 +49,7 @@ def test_detect_cover_image_dominant(tmp_path: Path) -> None:
 
 
 def test_detect_cover_text_page_is_not_cover(tmp_path: Path) -> None:
-    from cover import detect_cover
-
+    from pdf2epub.cover import detect_cover
     info = detect_cover(make_pdf(tmp_path / "文字书.pdf", pages=2, with_image=False))
     assert info.is_cover is False
     assert info.text_chars > 80
@@ -60,8 +58,7 @@ def test_detect_cover_text_page_is_not_cover(tmp_path: Path) -> None:
 def test_detect_cover_blank_page_is_not_cover(tmp_path: Path) -> None:
     import pymupdf
 
-    from cover import detect_cover
-
+    from pdf2epub.cover import detect_cover
     path = tmp_path / "空白.pdf"
     doc = pymupdf.open()
     doc.new_page(width=595, height=842)
@@ -75,8 +72,7 @@ def test_detect_cover_blank_page_is_not_cover(tmp_path: Path) -> None:
 
 
 def test_detect_cover_missing_file_is_not_fatal(tmp_path: Path) -> None:
-    from cover import detect_cover
-
+    from pdf2epub.cover import detect_cover
     info = detect_cover(tmp_path / "不存在.pdf")
     assert info.is_cover is False, "封面判定失败不能阻断转换"
 
@@ -85,8 +81,7 @@ def test_render_cover_crops_to_the_image_rect(tmp_path: Path) -> None:
     """裁切矩形生效:封面比整页窄(留白被切掉),而不是整页宽度。"""
     import pymupdf
 
-    from cover import detect_cover, render_cover
-
+    from pdf2epub.cover import detect_cover, render_cover
     pdf = _image_cover_pdf(tmp_path / "扫描封面.pdf", margin=80)
     info = detect_cover(pdf)
     out = render_cover(pdf, tmp_path / "cover.jpg", info=info)
@@ -98,8 +93,7 @@ def test_render_cover_crops_to_the_image_rect(tmp_path: Path) -> None:
 
 def test_build_epub_title_page_switch(tmp_path: Path) -> None:
     """``title_page=False`` 时产物里不能有 title_page.xhtml。"""
-    from epub.pandoc import build_epub
-
+    from pdf2epub.epub.pandoc import build_epub
     work = tmp_path / "work"
     work.mkdir()
     md = work / "book.md"
@@ -118,8 +112,7 @@ def test_build_epub_title_page_switch(tmp_path: Path) -> None:
 
 
 def test_toc_depth_follows_heading_depth() -> None:
-    from epub.pandoc import heading_depth
-
+    from pdf2epub.epub.pandoc import heading_depth
     assert heading_depth("# 一\n\n## 二\n") == 2
     assert heading_depth("没有标题\n") == 1
     # 代码块里的 # 不是标题
@@ -137,15 +130,13 @@ def test_toc_depth_follows_heading_depth() -> None:
     ("一 历史的回顾", False),
 ])
 def test_chapter_anchor(text: str, expected: bool) -> None:
-    from clean.rules import is_chapter_anchor
-
+    from pdf2epub.clean.rules import is_chapter_anchor
     assert is_chapter_anchor(text) is expected
 
 
 def test_structure_base_level_keeps_part_and_chapter() -> None:
     """部在外层、章在内层:基准取部级(不能把三十章全变成三十个文件)。"""
-    from clean.rules import structure_base_level
-
+    from pdf2epub.clean.rules import structure_base_level
     units = [(1, "第一部 上部"), (2, "第一章 一"), (2, "第二章 二"),
              (1, "第二部 下部"), (2, "第三章 三")]
     assert structure_base_level(units) == (1, "按部/卷判定基准 1")
@@ -153,8 +144,7 @@ def test_structure_base_level_keeps_part_and_chapter() -> None:
 
 def test_structure_base_level_refuses_when_a_title_is_above() -> None:
     """书名还在第 1 级时不做归一:平移会让书名与章同级,反而制造重复标题页。"""
-    from clean.rules import structure_base_level
-
+    from pdf2epub.clean.rules import structure_base_level
     units = [(1, "某书名"), (2, "第一章 一"), (2, "第二章 二")]
     base, why = structure_base_level(units)
     assert base is None and "书名" in why

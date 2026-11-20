@@ -18,9 +18,8 @@ from pathlib import Path
 
 import pytest
 
-from backends import paddleocr_backend
-from backends.paddleocr_backend import (CONTENT_LIST_FILE, PaddleOCRAdapter,
-                                        structured_blocks)
+from pdf2epub.backends import paddleocr_backend
+from pdf2epub.backends.paddleocr_backend import (CONTENT_LIST_FILE, PaddleOCRAdapter,                                        structured_blocks)
 from conftest import make_pdf
 from test_paddleocr_resume import FakePaddle
 
@@ -250,9 +249,8 @@ def test_old_cache_without_structured_result_still_merges(tmp_path, fake) -> Non
 
 def test_paddleocr_footnotes_reach_the_epub_as_native_footnotes(tmp_path, fake) -> None:
     """PaddleOCR → 统一脚注层 → Cleaner → Pandoc → EPUB:产物里是原生脚注。"""
-    from clean import clean_text
-    from epub.pandoc import build_epub
-
+    from pdf2epub.clean import clean_text
+    from pdf2epub.epub.pandoc import build_epub
     markdown, blocks = body_page("甲处引用①,乙处引用②,内容足够长以便成段。",
                                  ["① 甲的注释:内容足够长,用来生成真脚注。",
                                   "② 乙的注释:同样足够长,避免被判成空段。"])

@@ -73,7 +73,7 @@ Windows 下的 PDF → EPUB 转换工具：把电子版 PDF、扫描版 PDF 与�
 
 ## 5. Markdown 清理
 
-单一引擎：**Markdown → IR → 规则提案 → Patch → 渲染回 Markdown**（`src/clean/`），原则是**修复结构，而不是改写正文**。只有一条实现路径，出错就报错，没有「旧引擎兜底」。
+单一引擎：**Markdown → IR → 规则提案 → Patch → 渲染回 Markdown**（`src/pdf2epub/clean/`），原则是**修复结构，而不是改写正文**。只有一条实现路径，出错就报错，没有「旧引擎兜底」。
 
 - **IR 三层**：可编辑块（md 切片，逐字节可还原）+ 只读证据块（后端 `content_list`）+ 两者的对齐链接。`render(parse(md)) == md` 是硬约束。
 - **一切改动都是 Patch**：`before`/`after` 各带哈希、证据、依赖、来源指纹。报告 `work/<书名>/ir/clean-report.json` + `clean.diff` 记下每条提案的判定与理由，可复核、可按逆序撤销（撤销前校验 `after` 哈希）。
@@ -98,7 +98,7 @@ Windows 下的 PDF → EPUB 转换工具：把电子版 PDF、扫描版 PDF 与�
 
 CSS 只提供排版（字号、行高、缩进、间距、分页），**不指定文字颜色与背景色**：两者都由阅读器主题（含夜间模式）决定，项目锁定颜色就会出现「深色文字压深色底」；细线 / 底纹用中性半透明灰，在浅色与深色下都成立。字号一律相对单位，字体是带通用回退的字体栈（不嵌入字体），阅读器随时可以覆盖。
 
-元数据（`src/metadata.py`）：
+元数据（`src/pdf2epub/metadata.py`）：
 
 - **`dc:identifier` 必须是内容指纹派生的稳定 id** —— 同一本书重转要得到同一个 id，否则阅读器当作新书（书架重复、阅读进度丢失）；内容变了才换。
 - `dc:title` / `dc:creator` 按**可信度分级**取，逐级回落，并记录每个字段的来源（`metadata` 事件里的 `source_*`）：**文件名 > PDF 文档元数据 > 卷首字段 > 正文第一个 H1**。
@@ -180,20 +180,21 @@ ebook-converter <文件|目录>... -o output
 
 ```text
 src/
-  detector/       # PDF 类型检测（含伪文字层识别）
-  backends/       # base（抽象）/ pymupdf / mineru / paddleocr
-  clean/          # IR 清理引擎（options / rules / engine / patch / report / pipeline）
-  ir/             # IR 模型、解析、对齐、存储与渲染
-  markdown/       # textrules（判定与阈值）/ bold（强调字体 → 粗体）
-  epub/           # pandoc（封装）/ verify（结构）/ content（内容对照）
-  page_result.py  # 页单元：页码、排序、页码注释、扫描区段规划
-  events.py       # 阶段事件流（--json-events）
-  convert.py      # 自动路由（text / scanned / hybrid）
-  batch.py        # 批处理（重试 / 跳过 / 断点续跑）
-  dryrun.py       # 印前检查
-  lang_detect.py  # dc:language 检测
-  cli.py          # ebook-converter 入口
-  paths.py        # 路径与凭证
+  pdf2epub/       # 引擎包(独立命名空间:平铺安装会与 PyPI 的 markdown 等同名包互相覆盖)
+    detector/       # PDF 类型检测（含伪文字层识别）
+    backends/       # base（抽象）/ pymupdf / mineru / paddleocr
+    clean/          # IR 清理引擎（options / rules / engine / patch / report / pipeline）
+    ir/             # IR 模型、解析、对齐、存储与渲染
+    markdown/       # textrules（判定与阈值）/ bold（强调字体 → 粗体）
+    epub/           # pandoc（封装）/ verify（结构）/ content（内容对照）
+    page_result.py  # 页单元：页码、排序、页码注释、扫描区段规划
+    events.py       # 阶段事件流（--json-events）
+    convert.py      # 自动路由（text / scanned / hybrid）
+    batch.py        # 批处理（重试 / 跳过 / 断点续跑）
+    dryrun.py       # 印前检查
+    lang_detect.py  # dc:language 检测
+    cli.py          # ebook-converter 入口
+    paths.py        # 路径与凭证
 config/           # config.yaml + book.css
 desktop/          # Tauri 2 壳（React + Tailwind）
 samples/          # 测试样本（入库：现场生成的 PDF 与真实书籍小样本）

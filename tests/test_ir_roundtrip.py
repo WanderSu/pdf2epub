@@ -17,8 +17,7 @@ import json
 import pytest
 
 from conftest import PROJECT_ROOT
-from ir import (IRError, ReadonlyBlockError, assert_roundtrip, build_ir,
-                block_to_dict, dump_ir, ir_dir, load_ir, parse_markdown,
+from pdf2epub.ir import (IRError, ReadonlyBlockError, assert_roundtrip, build_ir,                block_to_dict, dump_ir, ir_dir, load_ir, parse_markdown,
                 render_ir, spans_tile)
 
 #: 覆盖九类易错结构:标题层级、围栏代码、表格、列表、公式、图片、脚注定义、

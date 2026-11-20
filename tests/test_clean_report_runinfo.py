@@ -24,9 +24,8 @@
 """
 from __future__ import annotations
 
-from clean.options import CleanOptions
-from clean.pipeline import clean_text
-
+from pdf2epub.clean.options import CleanOptions
+from pdf2epub.clean.pipeline import clean_text
 #: 一条规则都不会命中的纯文本(没有页码行、空行、异常空格、重复标题……)
 CLEAN_MD = "# 书名\n\n一段很普通的中文正文,没有任何需要清理的东西。\n"
 

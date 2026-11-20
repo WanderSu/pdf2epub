@@ -14,9 +14,9 @@ from pathlib import Path
 
 import pytest
 
-from backends import paddleocr_backend
-from backends.base import is_retryable
-from backends.paddleocr_backend import JOBS_URL, PaddleOCRAdapter, PaddleOCRError
+from pdf2epub.backends import paddleocr_backend
+from pdf2epub.backends.base import is_retryable
+from pdf2epub.backends.paddleocr_backend import JOBS_URL, PaddleOCRAdapter, PaddleOCRError
 from conftest import make_pdf
 
 JSONL_URL = "https://result.local/out.jsonl"

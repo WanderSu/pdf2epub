@@ -14,8 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from backends.pymupdf_backend import convert_pdf_to_markdown  # noqa: E402
-
+from pdf2epub.backends.pymupdf_backend import convert_pdf_to_markdown  # noqa: E402
 # (文件名, 标题, 验证期望参数列表)
 PDFS = [
     ("中文电子书测试", "中文电子书排版测试", ["--expect-images", "2", "--expect-footnotes"]),

@@ -19,7 +19,7 @@ import json
 
 import pytest
 
-from backends.base import (VARIANT_ORIGINAL, PartStore, TaskCache,                           file_fingerprint, render_fingerprint,
+from pdf2epub.backends.base import (VARIANT_ORIGINAL, PartStore, TaskCache,                           file_fingerprint, render_fingerprint,
                            rendered_variant)
 from conftest import make_paged_pdf
 
@@ -161,7 +161,7 @@ def test_task_cache_refuses_to_write_another_variant(tmp_path) -> None:
 # ---------------------------------------------------------------- 6(端到端)
 
 def _adapter():
-    from backends.mineru_backend import MinerUAdapter
+    from pdf2epub.backends.mineru_backend import MinerUAdapter
     return MinerUAdapter(token="fake-token", poll_interval=0, timeout=30)
 
 

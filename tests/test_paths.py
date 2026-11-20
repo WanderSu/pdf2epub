@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-import paths
+import pdf2epub.paths as paths
 from conftest import PROJECT_ROOT
 
 

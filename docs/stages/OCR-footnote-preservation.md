@@ -11,7 +11,7 @@
 
 > **现行实现说明（v0.5.0）**：本阶段最初的 Cleaner 以文本掩码保护脚注定义；现行
 > Cleaner 已改为 IR 管线，脚注定义与其他结构块均作为不可编辑块保护。阶段中的「掩码」
-> 表述仅记录当时的实现，当前行为以 [`design.md`](../design.md) 和 `src/clean/` 为准。
+> 表述仅记录当时的实现，当前行为以 [`design.md`](../design.md) 和 `src/pdf2epub/clean/` 为准。
 
 ---
 
@@ -54,7 +54,7 @@
 ```text
                     ┌─ MinerU: content_list.json ─┐
 PDF → OCR ──────────┤                             ├→ Footnote Engine → Markdown
-                    └─ PaddleOCR: parsing_res_list┘        (src/markdown/footnotes.py)
+                    └─ PaddleOCR: parsing_res_list┘        (src/pdf2epub/markdown/footnotes.py)
                                                                   ↓
                                                           Markdown Cleaner
                                                                   ↓
@@ -85,7 +85,7 @@ MinerU Adapter ──────┐
 PaddleOCR Adapter ───┘
 ```
 
-- **不要**为新的 OCR 后端复制 `src/markdown/footnotes.py`，也**不要**在引擎里写
+- **不要**为新的 OCR 后端复制 `src/pdf2epub/markdown/footnotes.py`，也**不要**在引擎里写
   `if backend == "..."`。新后端只需实现「结构化结果 → 统一块」的 Adapter。
 - 统一块形状（两个后端一致，落在 `_parts/<段>/content_list.json`）：
 

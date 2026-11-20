@@ -774,16 +774,17 @@ If you want to work on the code, these are the folders to start from:
 
 ```text
 src/
-├── backends/       # PDF / OCR backends
-├── detector/       # PDF type detection
-├── clean/          # Markdown cleanup (IR engine: rules → patches → report)
-├── ir/             # IR (blocks / alignment / round-trip render)
-├── markdown/       # cleanup predicates & thresholds
-├── epub/           # EPUB generation and checks
-├── batch.py        # batch processing
-├── cli.py          # CLI
-├── convert.py      # conversion flow
-└── paths.py        # paths and configuration
+└── pdf2epub/       # engine package (own namespace, so it can't clobber same-named PyPI packages)
+    ├── backends/       # PDF / OCR backends
+    ├── detector/       # PDF type detection
+    ├── clean/          # Markdown cleanup (IR engine: rules → patches → report)
+    ├── ir/             # IR (blocks / alignment / round-trip render)
+    ├── markdown/       # cleanup predicates & thresholds
+    ├── epub/           # EPUB generation and checks
+    ├── batch.py        # batch processing
+    ├── cli.py          # CLI
+    ├── convert.py      # conversion flow
+    └── paths.py        # paths and configuration
 
 config/
 ├── config.yaml     # default configuration

@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import difflib
 
-from clean import apply_patches, propose_cjk_spaces, propose_ocr_spaces
-from ir import build_ir, render_ir
+from pdf2epub.clean import apply_patches, propose_cjk_spaces, propose_ocr_spaces
+from pdf2epub.ir import build_ir, render_ir
 # ---------------------------------------------------------------- 辅助
 
 

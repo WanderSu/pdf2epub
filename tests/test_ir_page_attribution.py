@@ -13,12 +13,10 @@ from __future__ import annotations
 
 import pytest
 
-from ir import (IRError, Producer, audit_page_attribution, build_ir,
-                covered_pages, format_attribution, gaps_by_state,
+from pdf2epub.ir import (IRError, Producer, audit_page_attribution, build_ir,                covered_pages, format_attribution, gaps_by_state,
                 page_coverage, uncovered_pages)
-from ir.model import Block, Provenance
-from ir.pages import PageAttribution, PageAuditError, PageGap, PageIssue
-
+from pdf2epub.ir.model import Block, Provenance
+from pdf2epub.ir.pages import PageAttribution, PageAuditError, PageGap, PageIssue
 MD = (
     "# 第一章 起头\n"
     "\n"

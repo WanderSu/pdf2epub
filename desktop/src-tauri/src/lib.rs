@@ -101,7 +101,7 @@ struct ConvertResult {
     epub: Option<String>,
     summary: Option<String>,
     error: Option<String>,
-    /// 引擎下发的机器可读错误码(src/events.py::error_code),GUI 按它分类显示
+    /// 引擎下发的机器可读错误码(src/pdf2epub/events.py::error_code),GUI 按它分类显示
     error_code: Option<String>,
 }
 

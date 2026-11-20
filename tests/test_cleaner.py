@@ -17,8 +17,8 @@ from __future__ import annotations
 
 import pytest
 
-from clean import clean_text
-from clean.options import (CLEAN_KEYS, CleanOptions, normalize_clean_keys,                           resolve_options)
+from pdf2epub.clean import clean_text
+from pdf2epub.clean.options import (CLEAN_KEYS, CleanOptions, normalize_clean_keys,                           resolve_options)
 
 
 def clean(text: str, **kwargs) -> str:
@@ -309,7 +309,7 @@ def test_verse_threshold_is_verse_max_chars() -> None:
     注意 `VERSE_MAX_CHARS`(18)与 `JOIN_MIN_CHARS`(20)之间有一条窄缝(19 字):
     这种长度既不算诗行、也够不着「排满一行」,按保守处理**不拼接**(宁可少拼)。
     """
-    from markdown.textrules import JOIN_MIN_CHARS, VERSE_MAX_CHARS
+    from pdf2epub.markdown.textrules import JOIN_MIN_CHARS, VERSE_MAX_CHARS
     inside = clean(f"{_line(VERSE_MAX_CHARS)}\n{_line(VERSE_MAX_CHARS)}\n")
     assert inside == f"{_line(VERSE_MAX_CHARS)}  \n{_line(VERSE_MAX_CHARS)}\n"
 

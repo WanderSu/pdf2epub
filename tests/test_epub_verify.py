@@ -14,7 +14,7 @@ from pathlib import Path
 
 from conftest import build_epub, corrupt_zip_member, rewrite_epub, truncate_file
 
-from epub.verify import archive_issue, verify_epub
+from pdf2epub.epub.verify import archive_issue, verify_epub
 
 def test_valid_epub_has_no_errors(sample_epub: Path) -> None:
     r = verify_epub(sample_epub, expect_math=True, expect_images=1)

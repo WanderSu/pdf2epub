@@ -32,7 +32,7 @@ def _keep(target_name: str) -> bool:
 
 
 a = Analysis(
-    ['src/cli.py'],
+    ['src/pdf2epub/cli.py'],
     pathex=['src'],
     binaries=[],
     datas=[d for d in datas if _keep(d[0])],

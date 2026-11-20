@@ -14,8 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from backends import get_backend  # noqa: E402
-
+from pdf2epub.backends import get_backend  # noqa: E402
 
 def run(cmd: list[str]) -> subprocess.CompletedProcess:
     print("  $ " + " ".join(str(c) for c in cmd))

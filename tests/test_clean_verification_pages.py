@@ -19,10 +19,9 @@ P4 时这个字典里的 ``blank`` 恒为空,注释写着"判定要渲染 PDF,�
 """
 from __future__ import annotations
 
-from clean import apply_patches, revert_patches
-from clean.report import Verification
-from ir import build_ir
-
+from pdf2epub.clean import apply_patches, revert_patches
+from pdf2epub.clean.report import Verification
+from pdf2epub.ir import build_ir
 MD = (
     "# 第一章 起头\n"
     "\n"

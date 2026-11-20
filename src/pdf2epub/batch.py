@@ -1,0 +1,918 @@
+"""批处理核心(见 docs/design.md §9 命令行与批处理)。
+
+能力:
+  - 批量处理(文件或目录,串行执行,优先稳定性)
+  - 日志(控制台 + 文件)
+  - 失败重试(指数退避)
+  - 跳过已完成文件(EPUB 存在且不早于源文件)
+  - 断点续跑(重跑时自动跳过已完成)
+  - 单个文件失败不中断整体
+
+状态判定:output/<name>.epub 存在、容器写完整、且 mtime ≥ 源文件 mtime → 已完成
+(只看「存在 + 非空 + 更新」会把截断/写坏的产物判成完成,见 is_done)。
+失败产物会被移出 output/(改名加 .failed),避免下一次运行把它当成已完成而跳过。
+重转(--force)时若新一轮「构建成功但校验失败」,上一轮**完整可读**的成品会还原回
+原位(见 preserve_previous_output):失败的是新一轮,不该连上一轮的书一起赔进去。
+"""
+from __future__ import annotations
+
+import contextlib
+import logging
+import os
+import re
+import shutil
+import tempfile
+import time
+import uuid
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+
+from pdf2epub.backends import get_backend
+from pdf2epub.backends.base import (VARIANT_ORIGINAL, BackendError, collect_evidence,                           file_fingerprint, is_retryable)
+from pdf2epub.clean import CleanEngineError, CleanOutcome, clean_book_md
+from pdf2epub.clean.options import CleanOptions, resolve_options
+from pdf2epub.convert import convert_auto, load_config
+from pdf2epub.cover import COVER_QUALITY, COVER_WIDTH, CoverInfo, detect_cover
+from pdf2epub.cover import render_cover as render_cover_page
+from pdf2epub.epub.content import verify_content
+from pdf2epub.epub.pandoc import (MISSING_PANDOC_HINT, PandocError, PandocMissingError,                        build_epub, pandoc_available)
+from pdf2epub.epub.verify import (VerifyResult, archive_issue, fatal_issue, verify_epub)
+from pdf2epub.ir import Producer
+from pdf2epub.lang_detect import resolve_language
+from pdf2epub.metadata import first_heading, front_fields, pdf_document_meta, resolve_book_meta
+from pdf2epub.paths import config_file
+import pdf2epub.events as events
+#: 语言检测读取的正文前多少字符(整本读没必要,前几万字足够定脚本)
+LANG_SAMPLE_CHARS = 20000
+#: 失败产物的改名后缀:失败产物要移出「完成判定」的视野,但保留现场供排查
+FAILED_OUTPUT_SUFFIX = ".failed"
+
+
+def stable_identifier(source: Path, epub_stem: str) -> str:
+    """由**源文件内容指纹**派生的稳定 dc:identifier。
+
+    同一本书重复转换必须得到同一个 id(否则阅读器会把它当新书,书架重复、
+    阅读进度丢失);内容变了才换 id。所以用 uuid5(内容指纹)而不是随机 uuid4。
+    """
+    digest = file_fingerprint(source)
+    return f"urn:uuid:{uuid.uuid5(uuid.NAMESPACE_URL, f'pdf2epub:{epub_stem}:{digest}')}"
+
+
+def source_date(source: Path) -> str:
+    """dc:date:优先用 PDF 内嵌的创建日期,取不到就用源文件修改日期(ISO)。"""
+    if source.suffix.lower() == ".pdf":
+        try:
+            import pymupdf
+
+            with pymupdf.open(source) as doc:
+                raw = (doc.metadata or {}).get("creationDate", "")
+            parsed = _parse_pdf_date(raw)
+            if parsed:
+                return parsed
+        except Exception:  # noqa: BLE001 - 元数据读不到不是失败理由
+            pass
+    return datetime.fromtimestamp(source.stat().st_mtime).date().isoformat()
+
+
+def _parse_pdf_date(raw: str) -> str | None:
+    """PDF 的 `D:20200101120000+08'00'` → `2020-01-01`。"""
+    m = re.match(r"D:(\d{4})(\d{2})?(\d{2})?", raw or "")
+    if not m or not m.group(2) or not m.group(3):
+        return None
+    return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+
+
+def render_cover(pdf: Path, work_dir: Path, *, width: int = COVER_WIDTH,
+                 quality: int = COVER_QUALITY,
+                 info: "CoverInfo | None" = None) -> Path | None:
+    """把封面页写成 ``<work>/cover.jpg``(见 :mod:`cover`)。
+
+    返回 None 表示这次没做成封面(渲染失败 / 空 PDF)—— 不阻断转换,EPUB 只是没封面。
+    取图规则(原书封面图优先、按主图矩形裁切)在 :func:`cover.render_cover`;
+    这里只负责把路径固定成 ``work/cover.jpg``。
+    """
+    out = Path(work_dir) / "cover.jpg"
+    cover = render_cover_page(pdf, out, info=info, width=width, quality=quality)
+    if cover is None:
+        logger.warning("封面渲染失败(%s);本次 EPUB 不带封面", Path(pdf).name)
+    return cover
+
+
+def epub_language(book_md: Path, override: str | None) -> str:
+    """EPUB dc:language:显式覆盖 > 正文脚本检测 > zh-CN。"""
+    try:
+        text = book_md.read_text(encoding="utf-8", errors="replace")[:LANG_SAMPLE_CHARS]
+    except OSError:
+        text = ""
+    return resolve_language(text, override=override)
+
+logger = logging.getLogger("pdf2epub.batch")
+
+SUPPORTED_SUFFIXES = {".pdf", ".md"}
+
+
+class VerifyError(RuntimeError):
+    """EPUB 结构校验未通过(--strict)。确定性失败:不重试。"""
+
+
+class VerifyStageError(RuntimeError):
+    """校验**过程**自己出错(不是「校验不通过」),如校验器内部异常、读盘失败。
+
+    与 :class:`VerifyError` 的区别:后者是确定性结论(同一份产物再验还是不过),
+    重试只会把整条链路——含云端 OCR 额度——白跑一遍;前者可能是临时故障,保留
+    重试机会。错误码仍归 ``verify_failed``:问题出在校验阶段,报成「转换失败」
+    会让使用者去查 pandoc,而 pandoc 其实已经写出了产物。
+    """
+
+
+def sanitize_name(name: str) -> str:
+    """规范化**工作目录**名:空白与非法字符 → 下划线。
+    必要原因:PyMuPDF 的 C 库保存图片时会把路径中的空格替换为下划线,
+    含空格的工作目录会导致图片写入失败。
+    """
+    name = re.sub(r"[\s]+", "_", name.strip())
+    name = re.sub(r'[\\/:*?"<>|]+', "_", name)
+    return name or "book"
+
+
+def output_stem(name: str) -> str:
+    """输出 EPUB 的**文件名**(保留原文空格)。
+
+    与工作目录不同,EPUB 由 Pandoc 写出、不经过 PyMuPDF,无需把空格换成下划线:
+    保留「标题 - 作者」原貌更易读,也让书库的「 - 」分隔解析与 EPUB 元数据一致。
+    仅替换 Windows 非法字符并去掉结尾空白/点。
+    """
+    name = re.sub(r'[\\/:*?"<>|]+', "_", name.strip()).rstrip(". ").strip()
+    return name or "book"
+
+
+def epub_path(source: Path, output_dir: Path) -> Path:
+    """输出 EPUB 路径(保留原文空格,与 output_stem 一致)。"""
+    return output_dir / f"{output_stem(source.stem)}.epub"
+
+
+def existing_epub(source: Path, output_dir: Path) -> Path | None:
+    """已存在的输出 EPUB:优先新命名,兼容旧版本的下划线命名。
+
+    旧版(≤v0.2.1)输出的文件名把空格 sanitize 成下划线;升级后若只认新名,
+    已完成的输出会被当成未完成而重复转换,所以跳过判断要认两种命名。
+    """
+    for p in (epub_path(source, output_dir),
+              output_dir / f"{sanitize_name(source.stem)}.epub"):
+        if p.exists():
+            return p
+    return None
+
+
+def source_identity(path: Path) -> str:
+    """源文件身份键(Windows 路径大小写不敏感,比较前统一规范化)。"""
+    return os.path.normcase(str(Path(path).resolve()))
+
+
+def name_conflicts(sources: list[Path]) -> dict[str, list[Path]]:
+    """同一批输入里**会写进同一个 work/ 与 output/ 路径**的源文件。
+
+    两个不同的源文件撞名(工作目录名或输出 EPUB 名相同)时,先转的那个会占住
+    `work/<名>/` 与 `output/<名>.epub`,后一个随即被 `is_done()` 判成「已完成」而
+    静默跳过 —— 用户以为两本都转了,交付物却少一本(工作目录还会串用上一本的图片)。
+    撞名时不猜谁该赢、也不覆盖:显式列出冲突,由 process_batch 判失败。
+
+    返回 ``{源文件身份键: [与之撞名的其它源文件]}``;同一条路径重复传入不算冲突。
+
+    键要按大小写归一(``casefold``):Windows/macOS 默认文件系统大小写不敏感,
+    ``Book.pdf`` 与 ``book.pdf`` 会写进同一个 ``work/Book/`` 与 ``output/Book.epub``;
+    不归一的话这种「只差大小写」的撞名漏检,后一本照旧被 ``is_done`` 静默跳过。
+    """
+    def work_key(p: Path) -> str:
+        return f"work:{sanitize_name(p.stem).casefold()}"
+
+    def out_key(p: Path) -> str:
+        return f"out:{output_stem(p.stem).casefold()}"
+
+    conflicts: dict[str, list[Path]] = {}
+    for key_of in (work_key, out_key):          # 工作目录名与输出名各自判重
+        groups: dict[str, list[Path]] = {}
+        for src in sources:
+            groups.setdefault(key_of(src), []).append(src)
+        for group in groups.values():
+            if len({source_identity(p) for p in group}) < 2:
+                continue
+            for src in group:
+                me = source_identity(src)
+                others = conflicts.setdefault(me, [])
+                others.extend(p for p in group
+                              if source_identity(p) != me and p not in others)
+    return conflicts
+
+
+def parse_title_author(stem: str) -> tuple[str, str | None]:
+    """解析文件名中的「标题 - 作者」模式。
+    匹配形如 "马克思主义与性少数解放 - 瑞士红星党" 的文件名:
+    - 以「空格-空格」分隔,前后两段
+    - 返回 (标题, 作者);不匹配时返回 (原文件名, None)
+    """
+    m = re.match(r"^(.*?)\s+-\s+(.+)$", stem)
+    if m:
+        title = re.sub(r"\s+", " ", m.group(1)).strip()
+        author = re.sub(r"\s+", " ", m.group(2)).strip()
+        if len(title) >= 2 and author:
+            return title, author
+    return stem, None
+
+
+@dataclass
+class TaskResult:
+    source: Path
+    status: str = "pending"   # done / skipped / failed / pending
+    backend: str = ""
+    pdf_type: str = ""
+    error: str = ""
+    elapsed: float = 0.0
+    epub: Path | None = None
+    verify: str = ""          # 结构校验摘要,如 "0 失败 0 警告"
+
+
+#: 目录递归时的排除清单:产物/环境/工程目录里的 .md/.pdf 不是「用户要转的书」
+#: (实测 `ebook-converter <目录>` 在项目根上命中 771 个文件,含 work/ 的中间产物、
+#: README 与 docs;撞名还会显式失败,把一次误操作变成一堆错误)。
+_SKIP_SOURCE_DIRS = frozenset({
+    "work", "output", "node_modules", "desktop", "tests", "docs", "__pycache__",
+    "dist", "build", "dist_cli", "dist_release", "build_cli",
+})
+
+#: 目录递归时按**文件名**跳过的仓库文档(README / CHANGELOG 这类不是书)。
+#: 只作用于「扫目录」:显式把文件路径交给 CLI 时照常转换 —— 真有一本书叫
+#: `readme.md`,直传路径就能转。
+_SKIP_SOURCE_NAMES = frozenset({
+    "readme.md", "readme.en.md", "changelog.md", "contributing.md",
+    "license.md", "security.md", "code_of_conduct.md",
+})
+
+
+def iter_sources(paths: list[Path]) -> list[Path]:
+    """展开输入:文件直接收,目录递归收集支持的扩展名。
+
+    递归时跳过产物/环境/工程目录(``_SKIP_SOURCE_DIRS`` 与一切 ``.`` 开头的
+    目录):那些地方的 .md 是转换中间产物(work/*/book.md)或文档,不是输入。
+    """
+    sources: list[Path] = []
+    for p in paths:
+        p = Path(p)
+        if p.is_dir():
+            for dirpath, dirnames, filenames in os.walk(p):
+                dirnames[:] = sorted(
+                    d for d in dirnames
+                    if d not in _SKIP_SOURCE_DIRS and not d.startswith(".")
+                )
+                for name in sorted(filenames):
+                    f = Path(dirpath) / name
+                    if name.casefold() in _SKIP_SOURCE_NAMES:
+                        continue
+                    if f.suffix.lower() in SUPPORTED_SUFFIXES:
+                        sources.append(f)
+        elif p.is_file():
+            sources.append(p)
+        else:
+            logger.warning("路径不存在,跳过: %s", p)
+    return sources
+
+
+def is_done(source: Path, output_dir: Path, force: bool = False) -> bool:
+    """EPUB 已存在、**容器写完整**且不早于源文件 → 视为已完成。
+
+    只比「文件存在 + 大小 > 0 + mtime ≥ 源」是不够的:被截断或写坏的 EPUB 同样
+    「非空且比源新」,于是被打上「已完成」永久跳过 —— 交付物打不开,用户还无从发现
+    (重跑也会跳过)。所以完成判定必须先把容器完整性验一遍,不完整就重转。
+    """
+    if force:
+        return False
+    epub = existing_epub(source, output_dir)
+    if epub is None:
+        return False
+    issue = archive_issue(epub)          # 0 字节、截断、数据区损坏都在这里被挡下
+    if issue is not None:
+        logger.warning("已有产物不完整(%s),将重新转换: %s", issue, epub.name)
+        events.emit("warning", code="output_incomplete", message=issue,
+                    file=source.name, epub=epub.name)
+        return False
+    return epub.stat().st_mtime >= source.stat().st_mtime
+
+
+def stat_signature(path: Path) -> tuple[int, float] | None:
+    """(大小, mtime) 快照;文件不存在时返回 None。"""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_size, st.st_mtime)
+
+
+def discard_failed_output(epub: Path, before: tuple[int, float] | None) -> Path | None:
+    """把**本次运行写出的失败产物**移出 output/,免得下次被 is_done() 判成「已完成」。
+
+    失败结果不能伪装成成功结果:`--strict` 判失败时(pandoc 只写了一半时同理)产物
+    已经在 output/ 里 —— 非空、mtime 比源新,下一次运行会直接跳过它,用户既看不到
+    失败,也没法重转。
+
+    只有在文件确实是**本次运行**写出的(大小/mtime 与运行前不同)时才动它:`--force`
+    重转时若失败发生在构建之前,output 里放的是上一轮**成功**的成果,不能动它。
+
+    改名不删除(现场留着排查);改名失败时退而删除 —— 总之不能把它留在那个位置上。
+    """
+    after = stat_signature(epub)
+    if after is None or after == before:
+        return None
+    target = epub.with_name(epub.name + FAILED_OUTPUT_SUFFIX)
+    try:
+        os.replace(epub, target)
+    except OSError as e:
+        logger.warning("失败产物改名失败(%s),改为删除以免被当成已完成", e)
+        try:
+            epub.unlink()
+        except OSError as e2:
+            logger.error("失败产物既移不走也删不掉(%s): %s 可能被下次运行判成已完成",
+                         e2, epub)
+        return None
+    logger.warning("失败产物已移到 %s(不会被当成已完成)", target.name)
+    return target
+
+
+def preserve_previous_output(epub: Path) -> Path | None:
+    """在**覆盖之前**把上一轮的有效成品另存一份;无需保全时返回 None。
+
+    为什么仍然需要:构建已经改成「先写 ``.part`` → 校验 → 原子 replace」
+    (见 ``epub.pandoc.build_epub``),所以构建过程被打断不会再毁掉旧书;但
+    **replace 之后的校验**仍可能判失败(断链/内容缩水),此时 output/ 里已经是新
+    产物,而失败产物又要改名移出 output/(见 :func:`discard_failed_output`)——
+    没有备份的话,用户重转一次,原本能读的那本书就没了。「重转失败」正确的结果是
+    回到「还有上一本」,而不是连上一本一起赔进去。
+
+    只保全**上一轮产物本身是完整 EPUB 包**的情况:残缺产物(``archive_issue``
+    非空)本来就该被重转覆盖,不值得留,留着还会被 ``is_done()`` 判成已完成。
+    """
+    if not epub.is_file():
+        return None
+    if archive_issue(epub) is not None:
+        return None
+    try:
+        handle, tmp = tempfile.mkstemp(prefix=f"{epub.stem}.", suffix=".epub.previous")
+        os.close(handle)
+    except OSError as e:
+        logger.warning("上一轮成品无法备份(本次失败后将不做保全): %s", e)
+        return None
+    try:
+        shutil.copy2(epub, tmp)
+    except OSError as e:
+        logger.warning("上一轮成品无法备份(本次失败后将不做保全): %s", e)
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        return None
+    return Path(tmp)
+
+
+def restore_previous_output(epub: Path, backup: Path | None) -> bool:
+    """把备份的上一轮成品放回原位;确实放回了才返回 True。
+
+    原位那份**本来还是好的**就不动它 —— 失败发生在构建之前时正是这种情况
+    (``discard_failed_output`` 也不会动它)。还原后它是完整 EPUB,``is_done()``
+    照旧按「完整 + 不早于源文件」判断,不会因为被还原就蒙混过关。
+    """
+    if backup is None or not backup.is_file():
+        return False
+    if epub.is_file() and archive_issue(epub) is None:
+        return False
+    try:
+        shutil.copy2(backup, epub)
+    except OSError as e:
+        logger.error("上一轮成品恢复失败(%s): %s 可能需要重新转换", e, epub)
+        return False
+    logger.warning("已恢复上一轮的成品 %s(本次产物未通过校验,改名保留在 .failed)",
+                   epub.name)
+    return True
+
+
+def _drop_previous_backup(backup: Path | None) -> None:
+    """任务结束后清掉备份(它只在失败的那一瞬间有用)。"""
+    if backup is None:
+        return
+    with contextlib.suppress(OSError):
+        backup.unlink()
+
+
+def _fail(result: TaskResult, source: Path, error: Exception, *, code: str,
+          out_epub: Path, before_output: tuple[int, float] | None,
+          backup: Path | None = None) -> TaskResult:
+    """统一的失败收尾:标记失败 → 移走本次的失败产物 → 还原上一轮成品 → 发事件 + 日志。"""
+    result.status = "failed"
+    result.error = str(error)
+    result.epub = None                    # 失败产物不是交付物
+    quarantined = discard_failed_output(out_epub, before_output)
+    if quarantined is not None:
+        result.error += f"(失败产物已移到 {quarantined.name},不会被当成已完成)"
+    if restore_previous_output(out_epub, backup):
+        result.error += f"(已恢复上一轮的成品 {out_epub.name})"
+    events.emit("error", code=events.error_code(error, default=code), message=str(error),
+                file=source.name)
+    logger.error("失败: %s → %s", source.name, result.error)
+    return result
+
+
+def verify_output(epub: Path, *, strict: bool = False,
+                  book_md: Path | None = None,
+                  expected_pages: int | None = None) -> VerifyResult:
+    """EPUB 结构与内容完整性校验(见 docs/design.md §7),接入转换流程。
+
+    - 结构:容器 / manifest / 链接 / 图片 / 公式 / CSS(verify_epub)
+    - 内容:对照源 Markdown 检查有无内容丢失(book_md 非空时追加)
+
+    **致命问题(``error`` 级)在任何模式下都判失败**(抛 :class:`VerifyError`):
+    产物残缺这件事不因为没加 ``--strict`` 就变成"成功" —— 旧行为把带断链的
+    EPUB 留在 output/ 里、退出码还是 0,调用方无从发现(P7 R-1),现在收敛为:
+    判失败 + 退出码非 0 + 失败产物改名移出完成判定视野(见 ``_fail``)。
+
+    ``strict=True`` 额外把**内容对照类** warning(疑似缩水/数量减少)也判失败;
+    排版与格式类提示(孤立图片、空章节、封面顺序…)在两种模式下都只提示,
+    不升级成错误 —— 否则正常书每次都会被判失败,用户很快学会忽略提示。
+
+    校验结论(含失败)都会先发 ``verify`` 事件再抛:调用方要看得到失败项。
+
+    校验器**自己**抛异常时(不是「校验不通过」):``verify`` 阶段同样要发 ``done``
+    收尾 —— 前端按 start/done 配对算进度,只有 start 没有 done 会永久卡在 95%;
+    异常包成 :class:`VerifyStageError`,错误码归 ``verify_failed``(问题出在校验
+    阶段,不是 pandoc 构建),重试语义保持不变(可能是临时故障)。
+    """
+    try:
+        result = verify_epub(epub)
+        if book_md is not None and Path(book_md).exists():
+            # 结构结果已算好,传进去复用 —— 否则同一本 EPUB 的结构校验跑两遍
+            content = verify_content(book_md, epub, expected_pages=expected_pages,
+                                     structure=result)
+            result.issues.extend(content.issues)
+            result.stats.update(content.stats)
+    except Exception as e:                   # noqa: BLE001 - 校验器内部错误也要收尾
+        events.stage("verify", "done", failed=True)
+        raise VerifyStageError(f"EPUB 校验过程出错: {e}") from e
+    for issue in result.issues:
+        log = logger.warning if issue.level == "warning" else logger.error
+        log("[verify] %s", issue.message)
+    logger.info("[verify] %s", result.summary())
+    events.emit("verify", errors=len(result.errors), warnings=len(result.warnings),
+                message=result.errors[0].message if result.errors else
+                        (result.warnings[0].message if result.warnings else ""))
+    fatal = fatal_issue(result, strict=strict)
+    if fatal is not None:
+        events.stage("verify", "done", failed=True,
+                     errors=len(result.errors), warnings=len(result.warnings))
+        raise VerifyError(
+            f"EPUB 校验未通过({result.summary()}): {fatal.message}"
+        )
+    events.stage("verify", "done",
+                 errors=len(result.errors), warnings=len(result.warnings))
+    return result
+
+
+def _conflict_result(source: Path, others: list[Path]) -> TaskResult:
+    """重名冲突的失败结果(不转换、不覆盖,并且**不静默**)。"""
+    result = TaskResult(source=source, status="failed")
+    result.error = (
+        f"源文件重名冲突:与 {'、'.join(sorted(p.name for p in others))} 解析出相同的"
+        f"输出文件名/工作目录(会互相覆盖产物,并被误判为「已完成」而静默跳过)"
+        f" —— 请重命名其中一个,或分开转换"
+    )
+    logger.error("失败: %s → %s", source.name, result.error)
+    events.emit("error", code="name_conflict", message=result.error, file=source.name)
+    return result
+
+
+def process_one(
+    source: Path,
+    *,
+    config: dict,
+    work_root: Path,
+    output_dir: Path,
+    backend_override: str | None = None,
+    retries: int = 2,
+    force: bool = False,
+    clean_options: CleanOptions | None = None,
+    strict: bool = False,
+    lang_override: str | None = None,
+) -> TaskResult:
+    """处理单个文件(PDF 或 Markdown),带重试与跳过。
+
+    lang_override: 显式指定的 EPUB 语言(CLI `--lang` / 配置),优先于正文检测。
+    """
+    t0 = time.time()
+    result = TaskResult(source=source)
+    safe_stem = sanitize_name(source.stem)   # 工作目录名(PyMuPDF 限制:不能含空格)
+    out_epub = epub_path(source, output_dir)  # 输出 EPUB(保留原文空格)
+
+    if is_done(source, output_dir, force):
+        result.status = "skipped"
+        result.epub = existing_epub(source, output_dir) or out_epub
+        result.elapsed = time.time() - t0
+        logger.info("跳过(已完成): %s", source.name)
+        events.emit("skip", file=source.name, epub=result.epub.name)
+        return result
+
+    # 失败时用它判断 out_epub 是不是本次运行写出来的(见 discard_failed_output)
+    before_output = stat_signature(out_epub)
+    # 重转(--force / 源比产物新)会就地覆盖 output/<名>.epub:先把上一轮的有效
+    # 成品备份下来,失败时放回原位(见 preserve_previous_output)。
+    previous_backup = preserve_previous_output(out_epub)
+
+    try:
+        # 环境缺失(未安装 pandoc)必须在昂贵阶段之前暴露:否则提取(含云端 OCR)全跑完
+        # 才发现生成不了 EPUB,重跑还得再花一次额度。
+        if not pandoc_available():
+            return _fail(
+                result, source,
+                PandocMissingError(f"{MISSING_PANDOC_HINT};本次未执行提取与 OCR"),
+                code="missing_dependency", out_epub=out_epub,
+                before_output=before_output, backup=previous_backup,
+            )
+
+        attempt = 0
+        last_error: Exception | None = None
+        while attempt <= retries:
+            attempt += 1
+            try:
+                if source.suffix.lower() == ".md":
+                    result.backend, result.pdf_type = "markdown", "markdown"
+                    result = _process_markdown(source, work_root, output_dir, t0, result,
+                                               safe_stem, out_epub.stem, clean_options, strict,
+                                               lang_override)
+                else:
+                    result = _process_pdf(source, config, work_root, output_dir,
+                                          backend_override, t0, result, safe_stem, out_epub.stem,
+                                          clean_options, strict, lang_override)
+                result.status = "done"
+                return result
+            except VerifyError as e:
+                # 校验失败是确定性结果:重试只会重复整条链路(含云端 OCR 额度),直接判失败
+                last_error = e
+                break
+            except PandocMissingError as e:
+                # 环境缺失(如运行中 PATH 变了)同样是确定性失败,重试只是再撞一次墙
+                last_error = e
+                break
+            except CleanEngineError as e:
+                # 清理是确定性的(同一份 md + 同一份证据必然同样结果),重试只会
+                # 重复整条链路(含云端 OCR 额度);而且清理失败就意味着产物不可信,
+                # 必须判失败 —— 不静默降级成"没清理就出书"
+                logger.error("清理失败(IR 引擎),不再重试: %s", e)
+                last_error = e
+                break
+            except Exception as e:  # noqa: BLE001 - 批处理需兜住所有失败
+                last_error = e
+                # 后端会明确标注「确定性失败」(认证/参数/配额/输入文件错误/云端任务判死):
+                # 这类错误重试改变不了结果,扫描书还会重复上传、重复消耗额度
+                if not is_retryable(e):
+                    logger.error("不可重试的失败,不再重试: %s", e)
+                    break
+                logger.warning("第 %d 次尝试失败(%s): %s", attempt, source.name, e)
+                if attempt <= retries:
+                    sleep = 2 ** attempt
+                    # 重试对用户可见(否则「卡住不动」与「正在重试」在界面上无法区分)
+                    events.emit("retry", attempt=attempt, retries=retries, wait=sleep,
+                                message=str(e), file=source.name)
+                    logger.info("  %ds 后重试...", sleep)
+                    time.sleep(sleep)
+
+        code = ("verify_failed" if isinstance(last_error, VerifyError)
+                else "missing_dependency" if isinstance(last_error, PandocMissingError)
+                else "pandoc_error" if isinstance(last_error, PandocError)
+                else "clean_failed" if isinstance(last_error, CleanEngineError)
+                else "convert_failed")
+        return _fail(result, source, last_error, code=code, out_epub=out_epub,
+                     before_output=before_output, backup=previous_backup)
+    finally:
+        _drop_previous_backup(previous_backup)
+
+
+def clean_stage(book_md: Path, *, backend: str, work: Path, source: Path,
+                total_pages: int = 0, options: CleanOptions | None = None,
+                images_dir: Path | None = None,
+                title_hint: str | None = None) -> CleanOutcome:
+    """正式清理阶段(IR 引擎的唯一入口)。
+
+    P6 起没有第二条路:清理只有 ``clean.clean_book_md`` 一条实现,失败就抛
+    :class:`CleanEngineError` 并让该文件判失败 —— **不回退到旧引擎**(旧引擎已删除),
+    也不允许"清理没做成但照样出 EPUB"。清理结果(逐条 Patch + 页账)落在
+    ``work/<书>/ir/`` 里,事后可复核、可撤销。
+
+    参数都是**显式**的,因为这些正是"清理看得到什么"的全部:
+
+    - ``backend``:这份 md 是哪个后端产出的(``hybrid(paddleocr)`` 这类复合名原样传);
+    - ``source`` + 内容指纹:回放时据此判断"这份 IR 对应的还是不是同一个 PDF";
+    - ``total_pages``:后端/检测给出的真实页数(页账的分母),没有就交给证据层;
+    - ``evidence``:段缓存里的 ``content_list``,页归属与跨块删除的唯一结构依据;
+    - ``title_hint``:书名。``front_matter`` 用它判断"第 1 页那个大标题是不是书名",
+      从而把封面/扉页从正文里去掉(封面图另由 cover.jpg 承担)。
+    """
+    events.stage("clean", "start")
+    bundle = collect_evidence(work, backend=backend)
+    if bundle.note:
+        logger.debug("[clean] 证据层: %s", bundle.note)
+    producer = Producer.from_backend(
+        backend, source=str(source), source_sha256=file_fingerprint(source),
+        variant=VARIANT_ORIGINAL,
+    )
+    try:
+        outcome = clean_book_md(
+            book_md, backend=backend, evidence=list(bundle.items),
+            total_pages=total_pages or bundle.total_pages,
+            variant=VARIANT_ORIGINAL, source=str(source), producer=producer,
+            options=options, images_dir=images_dir, title_hint=title_hint,
+        )
+    except CleanEngineError:
+        events.stage("clean", "done", failed=True)
+        raise
+    for issue in outcome.issues:
+        logger.info("[clean] %s", issue)
+    logger.info("[clean] %s", outcome.summary())
+    events.stage("clean", "done", issues=len(outcome.issues),
+                 applied=outcome.applied, suggested=outcome.suggested,
+                 failed=outcome.failed,
+                 chars=[len(outcome.md_before), len(outcome.md_after)])
+    return outcome
+
+
+def _process_pdf(source, config, work_root, output_dir, backend_override, t0, result,
+                 safe_stem, out_name, clean_options=None, strict=False,
+                 lang_override=None) -> TaskResult:
+    work = work_root / safe_stem
+    detection = None                      # 手动指定后端时没有检测结果
+    if backend_override and backend_override != "auto":
+        events.stage("detect", "done", skipped=True)
+        events.stage("extract", "start", backend=backend_override)
+        backend = get_backend(backend_override, config.get(backend_override, {}))
+        conv = backend.convert(source, work)
+        result.backend = conv.backend
+        result.pdf_type = "manual"
+        events.stage("extract", "done", backend=conv.backend)
+    else:
+        # detect / extract 阶段事件由 convert_auto 负责(检测与提取都在里面)
+        conv, detection = convert_auto(source, work, config=config)
+        result.backend = conv.backend
+        result.pdf_type = detection.pdf_type.value
+        if getattr(detection, "suspicious_pages", 0) > 0:
+            logger.warning(
+                "⚠️ %s: %d/%d 页疑似文字层损坏(乱码),本地提取可能不可读;"
+                "如需 OCR 请用 --backend mineru/paddleocr 重跑",
+                source.name, detection.suspicious_pages, detection.total_pages,
+            )
+            events.emit("warning", code="suspicious_pages",
+                        message=f"{detection.suspicious_pages}/{detection.total_pages} 页疑似文字层损坏",
+                        pages=detection.total_pages, suspicious_pages=detection.suspicious_pages)
+
+    # 书名/作者先解析:清理阶段要用它判定「第 1 页那个大标题是不是书名」
+    stem_title, stem_author = parse_title_author(source.stem)
+
+    # Markdown 清理(IR 引擎;按 clean_options 开关,失败即判该文件失败)
+    cleaned = clean_stage(conv.book_md, backend=conv.backend, work=work, source=source,
+                          total_pages=(getattr(detection, "total_pages", None)
+                                       or int(conv.stats.get("pages") or 0)),
+                          options=clean_options, images_dir=conv.images_dir,
+                          title_hint=stem_title)
+
+    # 元数据分级(文件名 > PDF 元数据 > 卷首字段 > 首个 H1)。
+    # 卷首字段要从**清理前**的正文里读(front_matter 规则正是把它们删掉的那一步),
+    # 首个 H1 要从**清理后**的正文里读(清理会把书名那一级标题归一到 H1 之下)。
+    meta = resolve_book_meta(
+        stem_title=stem_title, stem_author=stem_author,
+        pdf_meta=pdf_document_meta(source),
+        front=front_fields(cleaned.md_before),
+        heading=first_heading(cleaned.md_after),
+    )
+    events.emit("metadata", **meta.to_dict())
+
+    events.stage("build", "start")
+    # 封面:先判定第 1 页是不是封面,再决定「封面图怎么取 + 要不要生成标题页」。
+    # 两种形态互斥,不会同时出现两张"书名页":
+    #   有封面(整页图 / 只有几十个字的扉页)→ 原书封面图放首位,**不生成**标题页;
+    #   没有封面(第 1 页就是正文)→ 不硬拿正文页当封面,改为生成 pandoc 标题页。
+    info = detect_cover(source)
+    cover = render_cover(source, work, info=info) if info.is_cover else None
+    events.emit("cover", is_cover=info.is_cover, reason=info.reason,
+                image_ratio=round(info.image_ratio, 3), text_chars=info.text_chars)
+    epub = build_epub(conv.book_md, work, output_dir, title=meta.title, author=meta.author,
+                      publisher=meta.publisher, translator=meta.translator,
+                      out_name=out_name,
+                      lang=epub_language(conv.book_md, lang_override),
+                      identifier=stable_identifier(source, out_name),
+                      date=source_date(source), cover_image=cover,
+                      title_page=not info.is_cover)
+    events.stage("build", "done", cover=bool(cover))
+    result.epub = epub
+    events.stage("verify", "start")
+    verify = verify_output(
+        epub, strict=strict, book_md=conv.book_md,
+        expected_pages=getattr(detection, "total_pages", None) or conv.stats.get("pages"),
+    )
+    result.verify = verify.summary()
+    result.elapsed = time.time() - t0
+    events.emit("complete", file=source.name, epub=epub.name, backend=result.backend,
+                pdf_type=result.pdf_type, verify=result.verify,
+                seconds=round(result.elapsed, 2))
+    logger.info("完成(%s/%s): %s → %s", result.pdf_type, result.backend, source.name, epub.name)
+    return result
+
+
+def _read_markdown_source(source: Path) -> str:
+    """读取用户提供的 .md 输入,带编码兜底。
+
+    之前是 ``utf-8 + errors="replace"``:UTF-8 BOM 会把首个 ``# 标题`` 顶成
+    ``\\ufeff# 标题``(不再被识别为标题),GBK 存盘的书则整篇变 ``# ``
+    **照常转换出一本乱码书、零告警**。口径:
+    - BOM → utf-8-sig(剥掉 BOM);
+    - 严格 UTF-8 成功 → 直接用;
+    - 失败 → 回退 GB18030(中文 Windows 最常见的误存编码)并告警;
+    - 都解不出 → 明确失败(编码错误是输入问题,重试无意义)。
+    """
+    raw = Path(source).read_bytes()
+    if raw.startswith(b"\xef\xbb\xbf"):
+        text = raw.decode("utf-8-sig")
+        return _normalize_newlines(text)
+    try:
+        return _normalize_newlines(raw.decode("utf-8"))
+    except UnicodeDecodeError:
+        pass
+    try:
+        text = raw.decode("gb18030")
+    except UnicodeDecodeError as e:
+        # 输入编码是事实问题,重试不会改变字节 → 确定性失败(不占用重试次数)
+        raise BackendError(
+            f"Markdown 文件编码无法识别(既非 UTF-8 也非 GB18030): {source.name} — {e}",
+            retryable=False,
+        ) from e
+    logger.warning("%s 不是 UTF-8 编码,已按 GB18030 解码(建议另存为 UTF-8)", source.name)
+    events.emit("warning", code="encoding_fallback", file=source.name,
+                message="非 UTF-8 编码,已按 GB18030 解码")
+    return _normalize_newlines(text)
+
+
+def _normalize_newlines(text: str) -> str:
+    """换行符归一为 ``\\n``(read_bytes 不做通用换行转换,CRLF 原样残留会改变正文哈希)。"""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _process_markdown(source, work_root, output_dir, t0, result, safe_stem, out_name,
+                      clean_options=None, strict=False, lang_override=None) -> TaskResult:
+    work = work_root / safe_stem
+    work.mkdir(parents=True, exist_ok=True)
+    # 已有 Markdown:复制到统一 work 目录(连同 images/)
+    book_md = work / "book.md"
+    book_md.write_text(_read_markdown_source(source), encoding="utf-8")
+    src_images = source.parent / "images"
+    if src_images.is_dir():
+        import shutil
+
+        dst_images = work / "images"
+        dst_images.mkdir(parents=True, exist_ok=True)
+        for img in src_images.iterdir():
+            if img.is_file():
+                shutil.copy2(img, dst_images / img.name)
+
+    # Markdown 输入没有「提取」这一步(只是复制),extract 直接以 skipped 收尾
+    events.stage("extract", "done", backend="markdown", skipped=True)
+    # 现成的 md 没有证据层(没有 content_list):页账记 undecided,
+    # 需要结构证据的跨块拼接/删除只产建议 —— 不猜、不补页号
+    stem_title, stem_author = parse_title_author(source.stem)
+    cleaned = clean_stage(book_md, backend="markdown", work=work, source=source,
+                          options=clean_options, images_dir=work / "images",
+                          title_hint=stem_title)
+    # 没有 PDF 元数据这一级:文件名 > 卷首字段 > 首个 H1
+    meta = resolve_book_meta(
+        stem_title=stem_title, stem_author=stem_author,
+        front=front_fields(cleaned.md_before),
+        heading=first_heading(cleaned.md_after),
+    )
+    events.emit("metadata", **meta.to_dict())
+    events.stage("build", "start")
+    epub = build_epub(book_md, work, output_dir, title=meta.title, author=meta.author,
+                      publisher=meta.publisher, translator=meta.translator,
+                      out_name=out_name,
+                      lang=epub_language(book_md, lang_override),
+                      identifier=stable_identifier(source, out_name),
+                      date=source_date(source))
+    events.stage("build", "done", cover=False)
+    result.epub = epub
+    events.stage("verify", "start")
+    verify = verify_output(epub, strict=strict, book_md=book_md)
+    result.verify = verify.summary()
+    result.elapsed = time.time() - t0
+    events.emit("complete", file=source.name, epub=epub.name, backend="markdown",
+                pdf_type="markdown", verify=result.verify,
+                seconds=round(result.elapsed, 2))
+    logger.info("完成(markdown): %s → %s", source.name, epub.name)
+    return result
+
+
+def process_batch(
+    paths: list[Path],
+    *,
+    config: dict | None = None,
+    config_path: Path | None = None,
+    work_root: str | Path = "work",
+    output_dir: str | Path = "output",
+    backend_override: str | None = None,
+    retries: int = 2,
+    force: bool = False,
+    clean_options: CleanOptions | None = None,
+    strict: bool = False,
+    lang: str | None = None,
+) -> list[TaskResult]:
+    """批量处理,返回全部任务结果。单个失败不中断。
+
+    clean_options=None → 按 config 的 `clean:` 段(CleanOptions 默认值)。
+    传入的开关会先落到 config(如关闭 bold 等价于 pymupdf.bold_fonts 为空),
+    再逐文件生效。
+
+    校验不通过(致命问题:结构破损 / 内容丢失)一律判该任务失败 —— 默认模式也不
+    例外(残缺产物不能报成功)。
+    strict=True → 额外把内容对照的「疑似缩水」类警告也判失败;排版/格式类提示
+    任何模式下都只提示。
+
+    lang → EPUB dc:language 的显式覆盖(CLI `--lang`);为 None 时用配置 `language:`
+    再回退到正文脚本检测。
+
+    同一批输入里两个源文件解析出相同的输出名/工作目录时,它们会互相覆盖产物,后一个
+    还会被 is_done() 判成「已完成」而静默跳过(交付物悄悄少一本)—— 这种冲突一律判
+    失败,见 name_conflicts。
+    """
+    if config is None:
+        config = load_config(config_path or config_file())
+    if clean_options is None:
+        clean_options = resolve_options(config)
+    clean_options.apply(config)
+
+    work_root = Path(work_root)
+    output_dir = Path(output_dir)
+    work_root.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 语言:CLI --lang > config `language:` > 正文脚本检测(逐文件)
+    lang_override = lang or config.get("language") or None
+    if lang_override:
+        logger.info("EPUB 语言: %s(显式指定)", lang_override)
+
+    sources = iter_sources(paths)
+    if not sources:
+        logger.warning("没有找到可处理的文件")
+        return []
+
+    logger.info("共 %d 个文件待处理", len(sources))
+    logger.debug("清理项: %s", clean_options)
+    conflicts = name_conflicts(sources)
+    results: list[TaskResult] = []
+    for src in sources:
+        others = conflicts.get(source_identity(src))
+        if others:                    # 撞名:明确失败,不转换、不覆盖、不静默跳过
+            results.append(_conflict_result(src, others))
+            continue
+        results.append(process_one(
+            src,
+            config=config,
+            work_root=work_root,
+            output_dir=output_dir,
+            backend_override=backend_override,
+            retries=retries,
+            force=force,
+            clean_options=clean_options,
+            strict=strict,
+            lang_override=lang_override,
+        ))
+
+    # 汇总
+    done = sum(1 for r in results if r.status == "done")
+    skipped = sum(1 for r in results if r.status == "skipped")
+    failed = sum(1 for r in results if r.status == "failed")
+    total_s = sum(r.elapsed for r in results)
+    checked = [r for r in results if r.verify]
+    if checked:
+        # 校验摘要:有 error 的条目单独列出(便于 --strict 时定位)
+        bad = [r for r in checked if not r.verify.startswith("0 失败")]
+        logger.info("结构校验: %d 个 EPUB, %d 个存在失败项", len(checked), len(bad))
+        for r in bad:
+            logger.warning("  ⚠ %s: %s", r.source.name, r.verify)
+    logger.info("批处理完成: 共 %d, 成功 %d, 跳过 %d, 失败 %d, 总耗时 %.1fs",
+                len(results), done, skipped, failed, total_s)
+    return results
+
+
+def setup_logging(log_file: Path | None = None, verbose: bool = False) -> None:
+    """配置日志:控制台 + 可选文件。"""
+    handlers: list[logging.Handler] = []
+    console = logging.StreamHandler()
+    console.setLevel(logging.DEBUG if verbose else logging.INFO)
+    console.setFormatter(logging.Formatter("%(message)s"))
+    handlers.append(console)
+    if log_file:
+        log_file = Path(log_file)
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        fh = logging.FileHandler(log_file, encoding="utf-8")
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        handlers.append(fh)
+    logging.basicConfig(level=logging.DEBUG, handlers=handlers, force=True)

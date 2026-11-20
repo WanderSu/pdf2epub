@@ -11,8 +11,7 @@
 """
 from __future__ import annotations
 
-from ir import align_blocks, build_ir, links_monotonic
-
+from pdf2epub.ir import align_blocks, build_ir, links_monotonic
 LONG_A = "第一段正文,内容足够长,能被锚点匹配上。"
 LONG_B = "第二段正文,内容同样足够长,也能被锚点匹配上。"
 LONG_C = "第三段正文,内容依然足够长,还可以被锚点匹配上。"

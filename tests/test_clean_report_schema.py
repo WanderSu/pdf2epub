@@ -16,12 +16,10 @@ import json
 
 import pytest
 
-from clean import (CleanReport, Patch, PatchError, ReportVersionError,
-                   SCHEMA_VERSION, apply_patches, default_options, read_report,
+from pdf2epub.clean import (CleanReport, Patch, PatchError, ReportVersionError,                   SCHEMA_VERSION, apply_patches, default_options, read_report,
                    write_report)
-from clean.patch import BlockState, Evidence
-from ir import build_ir, text_sha256
-
+from pdf2epub.clean.patch import BlockState, Evidence
+from pdf2epub.ir import build_ir, text_sha256
 MD = """\
 # 第一章 起头
 
@@ -184,8 +182,7 @@ def test_deterministic_view_ignores_timestamps() -> None:
 
 
 def test_default_options_are_the_clean_keys() -> None:
-    from clean.options import CLEAN_KEYS
-
+    from pdf2epub.clean.options import CLEAN_KEYS
     options = default_options()
     assert set(options) == set(CLEAN_KEYS)
     assert options["bold"] is False            # 与 cleaner.CleanOptions 默认值一致

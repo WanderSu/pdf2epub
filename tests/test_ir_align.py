@@ -14,8 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from ir import (IRError, Link, Provenance, align_blocks, build_ir,
-                links_monotonic, render_ir, spans_tile)
+from pdf2epub.ir import (IRError, Link, Provenance, align_blocks, build_ir,                links_monotonic, render_ir, spans_tile)
 
 MD = """\
 # 第一章 起头
@@ -268,8 +267,7 @@ def test_links_monotonic_rejects_backwards_links() -> None:
 def test_alignment_does_not_mutate_input_blocks() -> None:
     """对齐返回新块,原块保持 page_idx=None(纯函数,方便重跑与差分)。"""
     ir = _ir(_evidence(("第一段正文,内容足够长,能被锚点匹配上。", 0)))
-    from ir import parse_markdown
-
+    from pdf2epub.ir import parse_markdown
     original = parse_markdown(MD).blocks          # 未对齐的原始块
     evidence = ir.evidence_blocks
     aligned, links, stats = align_blocks(original, evidence)

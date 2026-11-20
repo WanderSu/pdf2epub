@@ -783,16 +783,17 @@ MinerU 分段之后，跨段边界的表格和段落可能被截断。
 
 ```text
 src/
-├── backends/       # PDF / OCR 后端
-├── detector/       # PDF 类型检测
-├── clean/          # Markdown 清理(IR 引擎:规则 → Patch → 报告)
-├── ir/             # IR(块 / 对齐 / 往返渲染)
-├── markdown/       # 清理判定与阈值
-├── epub/           # EPUB 生成与检查
-├── batch.py        # 批处理
-├── cli.py          # CLI
-├── convert.py      # 转换流程
-└── paths.py        # 路径与配置
+└── pdf2epub/       # 引擎包(独立命名空间,避免与 PyPI 同名包互相覆盖)
+    ├── backends/       # PDF / OCR 后端
+    ├── detector/       # PDF 类型检测
+    ├── clean/          # Markdown 清理(IR 引擎:规则 → Patch → 报告)
+    ├── ir/             # IR(块 / 对齐 / 往返渲染)
+    ├── markdown/       # 清理判定与阈值
+    ├── epub/           # EPUB 生成与检查
+    ├── batch.py        # 批处理
+    ├── cli.py          # CLI
+    ├── convert.py      # 转换流程
+    └── paths.py        # 路径与配置
 
 config/
 ├── config.yaml     # 默认配置

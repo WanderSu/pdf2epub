@@ -14,8 +14,7 @@ import json
 
 import pytest
 
-from ir import (IR_SCHEMA, IRError, Producer, build_ir, dump_ir, ir_dir,
-                load_ir, producer_from_dict, producer_to_dict, render_ir)
+from pdf2epub.ir import (IR_SCHEMA, IRError, Producer, build_ir, dump_ir, ir_dir,                load_ir, producer_from_dict, producer_to_dict, render_ir)
 
 MD = "# 第一章 起头\n\n正文第一段,句尾没有标点。\n"
 
