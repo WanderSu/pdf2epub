@@ -46,10 +46,8 @@ from .base import (
     params_fingerprint,
 )
 from paths import load_api_key
-from markdown.footnotes import (PAGE_BREAK_TYPE, load_content_list,
-                                reconstruct_footnotes)
+from markdown.footnotes import (PAGE_BREAK_TYPE, load_content_list,                                reconstruct_footnotes)
 import events
-
 JOBS_URL = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
 MODEL = "PaddleOCR-VL-1.6"
 
@@ -248,6 +246,16 @@ class PaddleOCRAdapter(Backend):
         cached = cache.load(pdf_path) if self.resume else None
         job_id = cached.get("job_id") if cached else None
         if job_id:
+            # 与 MinerU 侧同一条原则:旧参数提交的批次不静默当成新参数的结果,
+            # 也不擅自丢掉已计费的任务 —— 告警 + 指明 --no-resume 这条重跑入口。
+            cached_fp = (cached or {}).get("params_fp")
+            if cached_fp and cached_fp != params_fp:
+                msg = ("已提交的云端任务是用旧 OCR 参数(版面过滤/方向/矫正)提交的,"
+                       "本次沿用它的解析结果、不重新计费;如需按当前参数重跑,"
+                       "请加 --no-resume 后重跑")
+                print(f"[paddleocr] ⚠ {msg}")
+                events.emit("warning", code="ocr_params_changed", message=msg,
+                            file=pdf_path.name)
             print(f"[paddleocr] 发现未取回的云端任务: jobId={job_id},继续轮询(不重新上传)")
             if self._probe(job_id) is None:
                 cache.clear()
@@ -256,7 +264,8 @@ class PaddleOCRAdapter(Backend):
         if not job_id:
             job_id = self._submit(pdf_path)
             print(f"[paddleocr] 任务已提交: jobId={job_id}")
-            cache.save(pdf_path, "original", job_id=job_id, model=MODEL)
+            cache.save(pdf_path, "original", job_id=job_id, model=MODEL,
+                       params_fp=params_fp)
 
         result = self._poll(job_id)
         print("[paddleocr] 解析完成, 下载结果...")
@@ -460,6 +469,7 @@ class PaddleOCRAdapter(Backend):
         img_count = 0
         blocks: list[dict] = []                         # 归一化结构化块(脚注数据源)
         page_idx = 0
+        parsed_lines = 0                                # 成功解析的 JSONL 行数(空结果判定用)
         for line in resp.text.splitlines():
             line = line.strip()
             if not line:
@@ -468,6 +478,7 @@ class PaddleOCRAdapter(Backend):
                 result = json.loads(line)["result"]
             except (json.JSONDecodeError, KeyError):
                 continue
+            parsed_lines += 1
             sizes = [p for p in (result.get("dataInfo") or {}).get("pages") or []
                      if isinstance(p, dict)]
             for i, res in enumerate(result.get("layoutParsingResults", [])):
@@ -513,6 +524,25 @@ class PaddleOCRAdapter(Backend):
                 md_text += "\n\n"
             blocks.append({"type": PAGE_BREAK_TYPE, "page_idx": page, "offset": len(md_text)})
             md_text += part
+
+        # **空结果绝不能当成功**:结果地址失效 / 代理返回 HTML 错误页 / 响应被截断时,
+        # 每一行都解析失败,上面会一路 continue 到「0 页内容」。若照旧写出空 book.md 并
+        # 落段缓存,这一段就被标记为「可用」—— 之后每次重跑都命中这份空缓存,静默产出
+        # 一本空书,连网络恢复都救不回来(内容对照在 md 字数为 0 时也全部跳过)。
+        # 抛错则不入缓存,重跑会继续轮询同一个 jobId(不重新上传、不重新计费)。
+        if parsed_lines == 0:
+            raise PaddleOCRError(
+                f"云端结果无法解析(返回 {len(resp.text)} 字节,没有一行是合法 JSON,"
+                f"jobId={job_id}):可能是结果地址失效或代理返回了错误页;"
+                f"本次结果不写入缓存,重跑会继续取同一个任务",
+                retryable=True,
+            )
+        if not pages_md and img_count == 0:
+            raise PaddleOCRError(
+                f"云端结果为空(解析到 {parsed_lines} 条、0 页正文与图片,"
+                f"jobId={job_id}):本次结果不写入缓存,重跑会继续取同一个任务",
+                retryable=True,
+            )
 
         book_md = work_dir / "book.md"
         book_md.write_text(md_text, encoding="utf-8")

@@ -114,8 +114,15 @@ class TaskCache:
         safe = re.sub(r"[^0-9A-Za-z._-]", "_", variant)
         return f"{TASK_CACHE_FILE[:-5]}.{safe}.json"
 
-    def load(self, source: str | Path, variant: str | None = None) -> dict | None:
-        """返回可复用的任务信息(不匹配则 None)。"""
+    def load(self, source: str | Path, variant: str | None = None,
+             params_fp: str | None = None) -> dict | None:
+        """返回可复用的任务信息(不匹配则 None)。
+
+        ``params_fp``:本次的 OCR 参数指纹。缓存里记的是**提交时**的参数指纹,两者
+        不一致说明用户改了模型/语言/开关 —— 那份云端任务的结果不满足新参数,不能
+        当成「这次的任务」直接复用(见各后端的 ``ocr_params_changed`` 告警)。
+        旧缓存没有这个字段时按「未知」放行,不因为加了这个键让现存批次整批失效。
+        """
         want = variant or self.variant
         if want != self.variant:
             # 调用方查的是另一个变体的缓存:那不是这份文件的职责(各变体各一个文件)
@@ -129,6 +136,9 @@ class TaskCache:
             and data.get("variant") == want
             and data.get("fingerprint") == file_fingerprint(source)
         ):
+            cached_fp = data.get("params_fp")
+            if params_fp is not None and cached_fp not in (None, params_fp):
+                return None
             return data
         return None
 
@@ -345,6 +355,35 @@ class PartStore:
 
     def images_dir(self, part_id: str) -> Path:
         return self.dir_for(part_id) / PART_IMAGES_DIR
+
+    def adopt(self, other: "PartStore", part_id: str, params_fp: str) -> bool:
+        """把**另一个变体**里同一段的有效结果收编到本变体,返回是否收编成功。
+
+        只给「原文件解析失败 → 降级渲染纯图」这一条路用(见 mineru ``convert``):
+        已经成功的段是同一批页面的 OCR 结果,变体不同只说明提交时用的图不同,
+        不该为了换变体把已完成的段再买一次。**必须显式调用** —— 变体隔离本身不变,
+        渲染变体不会因为这里存在一份原文件结果就"自动命中"。
+        """
+        if other.variant == self.variant:
+            return False
+        src = other.load(part_id, params_fp)
+        if src is None or self.has_result(part_id, params_fp):
+            return False
+        dst = self.dir_for(part_id)
+        if dst.exists():                       # 残缺/过期目录:换成本变体的有效结果
+            shutil.rmtree(dst, ignore_errors=True)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(src, dst)
+        # meta 里的 variant 必须改成本变体:否则下一次 has_result 会判不匹配,
+        # 等于白收编(而且目录与键再次错位)。
+        meta_path = dst / PART_META_FILE
+        meta = _read_json(meta_path)
+        if not meta:
+            shutil.rmtree(dst, ignore_errors=True)
+            return False
+        meta["variant"] = self.variant
+        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
 
 
 def _read_json(path: Path) -> dict:

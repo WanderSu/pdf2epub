@@ -33,7 +33,6 @@ import requests
 import pymupdf
 
 from .base import (
-    PART_MD_FILE,
     Backend,
     BackendError,
     ConversionResult,
@@ -51,7 +50,6 @@ from page_result import page_marker_from_range
 from paths import load_api_key
 from markdown.footnotes import load_content_list, reconstruct_footnotes
 import events
-
 DEFAULT_BASE_URL = "https://mineru.net/api/v4"
 DEFAULT_TIMEOUT = 600      # 轮询总超时(秒)
 POLL_INTERVAL = 5          # 轮询间隔(秒)
@@ -178,15 +176,16 @@ class MinerUAdapter(Backend):
             print("[mineru] 原文件解析失败(可能为伪文字层),降级为渲染纯图后重试 ...")
             rendered = self._render_to_image_pdf(pdf_path, work_dir)
             variant = rendered_variant()
-            # 原文件那批任务已判死:任务缓存作废(渲染变体自己那份也清一次,
-            # 上一次中断留下的渲染批次同样不可信)
+            # 原文件那批任务已判死:任务缓存作废。渲染变体自己那份**不清** ——
+            # 上一次中断留下的渲染批次可能已经提交(已计费),留着下次续跑;它的
+            # backend/变体/源文件指纹/参数指纹都在 load 时校验,不匹配就用不上。
             self._cache(work_dir, VARIANT_ORIGINAL).clear()
-            self._cache(work_dir, variant).clear()
             try:
                 # source_pdf=原文件:段缓存指纹跟着原始 PDF,降级只重做真正解析失败的
-                # 那些段,已经成功的段照样复用
+                # 那些段;adopt_from 把已经成功的段收编过来(不再上传、不再计费)
                 result = self._convert_inner(
-                    rendered, work_dir, variant=variant, source_pdf=pdf_path
+                    rendered, work_dir, variant=variant, source_pdf=pdf_path,
+                    adopt_from=VARIANT_ORIGINAL,
                 )
                 print("[mineru] 降级 OCR 成功(渲染纯图版)")
             finally:
@@ -216,6 +215,7 @@ class MinerUAdapter(Backend):
         work_dir: Path,
         variant: str = VARIANT_ORIGINAL,
         source_pdf: Path | None = None,
+        adopt_from: str | None = None,
     ) -> ConversionResult:
         """核心转换:按段提交云端任务,段结果落盘,重跑只补缺失的段。
 
@@ -244,6 +244,17 @@ class MinerUAdapter(Backend):
 
         # 2. 只提交仍然缺失的段;已落盘的段直接复用,不重复上传、不重复 OCR
         missing = [p for p in parts if not store.load(p.part_id, params_fp)]
+        # 2b. 降级重试(原文件 → 渲染纯图):把**已经成功**的段收编到渲染变体。
+        # 这一段是用户实打实付过钱的 OCR 结果,变体不同只说明提交的图不同,不该再买一次。
+        if missing and adopt_from and adopt_from != variant:
+            origin = PartStore(work_dir, self.name, file_fingerprint(source),
+                               variant=adopt_from)
+            adopted = [p.part_id for p in missing
+                       if store.adopt(origin, p.part_id, params_fp)]
+            if adopted:
+                print(f"[mineru] 复用{adopt_from}已完成的 {len(adopted)} 段"
+                      f"(不重新上传、不重新计费): {', '.join(adopted)}")
+                missing = [p for p in missing if p.part_id not in adopted]
         failed: dict[str, str] = {}
         if missing:
             task_id, failed = self._submit_missing(pdf_path, work_dir, cache, store, params_fp,
@@ -303,6 +314,16 @@ class MinerUAdapter(Backend):
         cached = cache.load(source, variant)
         if not cached or not cached.get("batch_id"):
             return None
+        # 已提交的批次可能是在**旧参数**下提交的(改 language/model 后重跑)。
+        # 不静默沿用:那份结果不满足新参数,但也不能丢掉已计费的任务 —— 明确告警,
+        # 并给出「按新参数重跑」的唯一入口(--no-resume),不替用户做重复付费的决定。
+        cached_fp = cached.get("params_fp")
+        if cached_fp and cached_fp != params_fp:
+            msg = ("已提交的云端批次是用旧 OCR 参数(模型/语言/开关)提交的,"
+                   "本次沿用该批次的解析结果、不重新计费;如需按当前参数重跑,"
+                   "请加 --no-resume(或在桌面端关闭「中断后继续」)后重跑")
+            print(f"[mineru] ⚠ {msg}")
+            events.emit("warning", code="ocr_params_changed", message=msg, file=source.name)
         batch_id = cached["batch_id"]
         targets_all = list(cached.get("targets") or [])
         if not targets_all:
@@ -351,6 +372,7 @@ class MinerUAdapter(Backend):
         cache.save(
             source, variant,
             batch_id=task_id, targets=targets, model_version=self.model_version,
+            params_fp=params_fp,
             parts=[{"part_id": p.part_id, "idx": p.idx, "range": p.page_range, "target": t}
                    for p, t in zip(missing, targets)],
         )

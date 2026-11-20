@@ -19,8 +19,7 @@ import json
 
 import pytest
 
-from backends.base import (VARIANT_ORIGINAL, PartStore, TaskCache,
-                           file_fingerprint, render_fingerprint,
+from backends.base import (VARIANT_ORIGINAL, PartStore, TaskCache,                           file_fingerprint, render_fingerprint,
                            rendered_variant)
 from conftest import make_paged_pdf
 
@@ -163,7 +162,6 @@ def test_task_cache_refuses_to_write_another_variant(tmp_path) -> None:
 
 def _adapter():
     from backends.mineru_backend import MinerUAdapter
-
     return MinerUAdapter(token="fake-token", poll_interval=0, timeout=30)
 
 
@@ -208,3 +206,59 @@ def test_rendered_conversion_really_uploads_instead_of_reusing_original(tmp_path
     uploads_after_rendered = len(cloud.uploads)
     adapter._convert_inner(rendered_pdf, work, variant=token, source_pdf=source)
     assert len(cloud.uploads) == uploads_after_rendered   # 同变体第二次才复用
+
+
+# ---------------------------------------------------------------- 7(降级收编)
+
+def test_adopt_copies_a_finished_part_into_another_variant(tmp_path) -> None:
+    """降级重试收编已完成的段:变体隔离不变,但已付过钱的段不再买一次。"""
+    original = _store(tmp_path)
+    original.save(PART, PARAMS, "原文件的 OCR 结果")
+    rendered = _store(tmp_path, "rendered:abc123")
+
+    assert rendered.adopt(original, PART, PARAMS) is True
+    assert rendered.load(PART, PARAMS) == rendered.dir_for(PART)
+    assert rendered.md_path(PART).read_text(encoding="utf-8") == "原文件的 OCR 结果"
+    meta = json.loads((rendered.dir_for(PART) / ".part.json").read_text(encoding="utf-8"))
+    assert meta["variant"] == "rendered:abc123"        # 目录与键必须一致
+    # 原文件那份不动,也不影响它自己的命中
+    assert original.md_path(PART).read_text(encoding="utf-8") == "原文件的 OCR 结果"
+    # 同变体 / 段不存在 / 参数不符 → 不收编
+    assert rendered.adopt(original, PART, PARAMS) is False
+    assert rendered.adopt(original, "9-9", PARAMS) is False
+    assert rendered.adopt(original, PART, "别的参数") is False
+
+
+def test_task_cache_matches_the_params_fingerprint(tmp_path) -> None:
+    """改了模型/语言之后,旧参数提交的那批任务不能被当成「这次的任务」。"""
+    source = tmp_path / "src.pdf"
+    source.write_bytes(b"%PDF-1.4 fake")
+    cache = TaskCache(tmp_path, "mineru")
+    cache.save(source, VARIANT_ORIGINAL, batch_id="b1", params_fp="P1")
+
+    assert cache.load(source)["batch_id"] == "b1"              # 不传指纹:照旧
+    assert cache.load(source, params_fp="P1")["batch_id"] == "b1"
+    assert cache.load(source, params_fp="P2") is None
+
+
+def test_rendered_inner_adopts_finished_original_parts(tmp_path, monkeypatch) -> None:
+    """降级路径真的不再上传已完成的段(计费问题按真实代码路径验证)。"""
+    fake = pytest.importorskip("test_ocr_sharding_resume")
+    cloud = fake.install_fake_cloud(monkeypatch)
+    work = tmp_path / "work"
+    source = make_paged_pdf(tmp_path / "book.pdf", 2)
+    adapter = _adapter()
+
+    adapter.convert(source, work)
+    uploads = len(cloud.uploads)
+    assert uploads > 0
+
+    rendered_pdf = make_paged_pdf(tmp_path / "rendered.pdf", 2)
+    result = adapter._convert_inner(
+        rendered_pdf, work, variant=rendered_variant(), source_pdf=source,
+        adopt_from=VARIANT_ORIGINAL,
+    )
+    assert len(cloud.uploads) == uploads, "已完成的段被重新上传了(重复计费)"
+    assert result.stats["total_pages"] == 2
+    names = sorted(p.name for p in (work / "_parts").iterdir())
+    assert any(n.startswith("1-2__rendered_") for n in names), names

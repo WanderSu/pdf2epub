@@ -252,3 +252,43 @@ def test_changed_labels_invalidate_the_part_cache(tmp_path, fake) -> None:
     # 标签一致时仍然复用(不因指纹里多了个字段就次次重跑)
     _adapter(markdown_ignore_labels=["footnote"]).convert(pdf, work)
     assert len(fake.posts) == 2
+
+
+# ---------------------------------------------------------------- 空结果守卫
+
+def test_unparsable_result_raises_and_is_not_cached(tmp_path, monkeypatch) -> None:
+    """结果地址返回 HTML 错误页:必须抛错,不能把空 book.md 当成功缓存。
+
+    修复前每一行解析失败就 continue,空 md_text 照写 book.md 并落段缓存 ——
+    之后每次重跑都命中这份「已完成」的空缓存,静默产出一本空书,网络恢复也救不回来。
+    """
+    fake = FakePaddle(jsonl="<html><body>503 Service Unavailable</body></html>")
+    monkeypatch.setattr(paddleocr_backend, "requests", fake)
+    pdf = make_pdf(tmp_path / "扫描书.pdf", pages=2)
+    work = tmp_path / "work"
+
+    with pytest.raises(PaddleOCRError, match="无法解析") as err:
+        _adapter().convert(pdf, work)
+
+    assert is_retryable(err.value)                 # 网络/代理问题:可重试
+    assert not (work / "_parts").exists()          # 空结果没有落段缓存
+    assert (work / ".ocr_task.json").exists()      # jobId 留着,重跑续取同一个任务
+
+    # 同一个任务后来拿到正常结果:直接出书,不重新提交
+    fake.jsonl = FakePaddle._default_jsonl()
+    result = _adapter().convert(pdf, work)
+    assert len(fake.posts) == 1
+    assert "第一页" in result.book_md.read_text(encoding="utf-8")
+
+
+def test_result_with_zero_pages_is_an_error(tmp_path, monkeypatch) -> None:
+    """JSONL 合法但 0 页内容(空数组)同样不能当成功缓存。"""
+    fake = FakePaddle(jsonl='{"result": {"layoutParsingResults": []}}\n')
+    monkeypatch.setattr(paddleocr_backend, "requests", fake)
+    pdf = make_pdf(tmp_path / "扫描书.pdf", pages=2)
+    work = tmp_path / "work"
+
+    with pytest.raises(PaddleOCRError, match="为空"):
+        _adapter().convert(pdf, work)
+    assert not (work / "_parts").exists()
+
