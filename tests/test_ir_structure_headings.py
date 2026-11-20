@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from ir.parse import parse_evidence
 from ir.structure import restore_headings
-
 TOC = """\
 目录
 
@@ -139,7 +138,6 @@ def test_no_evidence_leaves_md_untouched() -> None:
 def test_restored_md_still_parses_and_keeps_roundtrip() -> None:
     """插入/降级只动标题行,不该破坏 IR 的往返一致性。"""
     from ir import build_ir, render_ir
-
     md, _ = _run()
     ir = build_ir(md, source="synthetic.md", backend="mineru", total_pages=5)
     assert render_ir(ir) == md
@@ -194,3 +192,30 @@ def test_book_title_heading_is_demoted_when_a_chapter_shares_the_name() -> None:
     md, _ = restore_headings(md_in, ev, title_hint="烧纸")
     assert md.count("# 烧纸") == 1          # 只保留章标题(后面那个)
     assert md.lstrip().startswith("烧纸")   # 书名页那行降成正文
+
+
+def test_heading_restore_shares_one_before_after_snapshot(tmp_path) -> None:
+    """标题裁决属于「本次清理」:报告的字数口径与 outcome 必须是同一份 before/after。
+
+    修复前 ``md_before`` 快照取在裁决之前,outcome 却取在之后 —— 只补标题、没有
+    Patch 的一轮里 ``changed`` 为 False,补回的标题**从来没写进 book.md**;报告又
+    显示字数凭空增加,撤销时也算不回来。
+    """
+    from clean.pipeline import clean_book_md
+    path = tmp_path / "book.md"
+    path.write_text(MD, encoding="utf-8")
+    outcome = clean_book_md(path, backend="mineru", evidence=_evidence(
+        ("header", "第一章 起头", 1),
+        ("text", BODY_A, 1),
+        ("text", "2", 2),
+        ("heading", DIALOGUE, 2, MID),
+        ("header", "第二章 续篇", 3),
+        ("text", BODY_B, 3),
+        ("text", BODY_C, 5),
+    ))
+
+    assert "# 第一章 起头" in outcome.md_after
+    assert outcome.report.stats.chars_before == len(outcome.md_before)
+    assert outcome.report.stats.chars_after == len(outcome.md_after)
+    if outcome.changed:                       # 写回的内容必须与报告里的 after 一致
+        assert path.read_text(encoding="utf-8") == outcome.md_after

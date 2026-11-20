@@ -26,13 +26,24 @@ from dataclasses import dataclass, replace
 from typing import Iterable, Sequence
 
 from ir.align import align_blocks
-from ir.model import (IR_SCHEMA, UNKNOWN, Block, BookIR, DocMeta, IRError,
-                      Producer, Provenance, iter_text, text_sha256)
+from ir.model import (IR_SCHEMA, UNKNOWN, Block, BookIR, DocMeta, IRError,                      Producer, Provenance, iter_text, text_sha256)
 
 # ---------------------------------------------------------------- 行级模式
 
 _HEADING_RE = re.compile(r"^(#{1,6})(?:[ \t]|$)")
-_FENCE_RE = re.compile(r"^(`{3,}|~{3,})")
+#: 围栏块:CommonMark 允许 0–3 个空格缩进(列表项里的围栏通常是 2 空格)。
+#: 组 1 = 缩进,组 2 = 反引号 / 波浪号串。
+_FENCE_RE = re.compile(r"^([ \t]{0,3})(`{3,}|~{3,})")
+
+
+def _fence_close_re(mark: str) -> re.Pattern[str]:
+    """关闭围栏的判据:同种字符、**不短于**开头、缩进 ≤3、行内无其他内容。
+
+    CommonMark 允许用更长的围栏关闭(`````python … ```` `` 是合法的):只认
+    「长度完全相等」时,后面的整本书会被当成一个代码块 —— 清理静默失效,而
+    往返校验仍然通过(它只保证字节一致,不保证规则跑过)。
+    """
+    return re.compile(rf"^[ \t]{{0,3}}{re.escape(mark[0])}{{{len(mark)},}}[ \t]*$")
 _HR_RE = re.compile(r"^(?:\*[ \t]*){3,}$|^(?:-[ \t]*){3,}$|^(?:_[ \t]*){3,}$")
 _TABLE_RE = re.compile(r"^\|")
 _LIST_RE = re.compile(r"^([-*+]|\d{1,3}[.)])[ \t]+\S")
@@ -65,8 +76,11 @@ def _is_blank(line: str) -> bool:
 
 def _starts_block(line: str) -> bool:
     """这一行会不会开启一个新块(段落遇到它就收尾)。"""
-    if not line or line != line.lstrip():
-        return False                      # 缩进行是上一块的续行
+    if not line:
+        return False
+    # 缩进行是上一块的续行 —— 但 ≤3 空格的围栏块是合法块(CommonMark),不能并进段落
+    if line != line.lstrip() and not _FENCE_RE.match(line):
+        return False
     if _HEADING_RE.match(line) or _FENCE_RE.match(line):
         return True
     if line.startswith("<!--") or _TABLE_RE.match(line):
@@ -142,11 +156,12 @@ def parse_markdown(md: str, *, backend: str = "ir", part_id: str = "book",
         j = i + 1
         if cls == "fence":
             fence = _FENCE_RE.match(content)
-            mark = fence.group(1) if fence else "```"
+            mark = fence.group(2) if fence else "```"
+            close_re = _fence_close_re(mark)
             while j < len(lines):
                 nxt, _ = _strip_eol(lines[j])
                 j += 1
-                if nxt.startswith(mark[:3]) and nxt.strip() == mark:
+                if close_re.match(nxt):
                     break
         elif cls == "comment":
             if "-->" not in content:
@@ -230,7 +245,8 @@ def _classify(content: str) -> tuple[str, int | None, dict, str]:
         level = len(heading.group(1))
         return "heading", level, {"marker": heading.group(1)}, "heading"
     if _FENCE_RE.match(content):
-        mark = _FENCE_RE.match(content).group(1)      # type: ignore[union-attr]
+        # 缩进 1–3 空格的围栏同样是代码块;块文本保持原样(含缩进),往返仍逐字节一致
+        mark = _FENCE_RE.match(content).group(2)      # type: ignore[union-attr]
         return "code", None, {"fence": mark}, "fence"
     if content.startswith("<!--"):
         marker = _PAGE_MARKER_RE.match(content.strip())

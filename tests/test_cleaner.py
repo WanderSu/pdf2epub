@@ -18,8 +18,7 @@ from __future__ import annotations
 import pytest
 
 from clean import clean_text
-from clean.options import (CLEAN_KEYS, CleanOptions, normalize_clean_keys,
-                           resolve_options)
+from clean.options import (CLEAN_KEYS, CleanOptions, normalize_clean_keys,                           resolve_options)
 
 
 def clean(text: str, **kwargs) -> str:
@@ -311,7 +310,6 @@ def test_verse_threshold_is_verse_max_chars() -> None:
     这种长度既不算诗行、也够不着「排满一行」,按保守处理**不拼接**(宁可少拼)。
     """
     from markdown.textrules import JOIN_MIN_CHARS, VERSE_MAX_CHARS
-
     inside = clean(f"{_line(VERSE_MAX_CHARS)}\n{_line(VERSE_MAX_CHARS)}\n")
     assert inside == f"{_line(VERSE_MAX_CHARS)}  \n{_line(VERSE_MAX_CHARS)}\n"
 
@@ -698,3 +696,39 @@ def test_options_from_config() -> None:
     assert opts.cjk_spaces is False
     assert opts.bold is True
     assert opts.running_heads is True   # 未配置项取默认值
+
+
+# ---------------------------------------------------------------- 内容保护(回归)
+
+def test_running_heads_spares_poetry_refrain() -> None:
+    """诗歌/歌词的副歌是正文:重复的短行成块出现时不能被当页眉整段删掉。
+
+    修复前 ``running_heads`` 只按「短、无句末标点、全文出现 ≥3 次」删,三处「起来」
+    全部消失(实测国歌歌词)。
+    """
+    md = ("义勇军进行曲\n\n"
+          "起来\n不愿做奴隶的人们\n起来\n把我们的血肉筑成我们新的长城\n"
+          "起来\n每个人被迫着发出最后的吼声\n")
+    out = only(md, running_heads=True)
+    assert out.count("起来") == 3
+    assert "每个人被迫着发出最后的吼声" in out
+
+
+def test_join_lines_keeps_hard_break() -> None:
+    """行尾恰好两个空格是 Markdown 硬换行,``join_lines`` 重建行时不能吃掉。"""
+    md = "第一行文字  \n这是第二行,有句号。\n"
+    assert only(md, join_lines=True) == md
+
+
+def test_indented_fence_is_atomic() -> None:
+    """缩进 1–3 空格的围栏块也是代码块(CommonMark):缩进、空格都不许动。"""
+    md = "说明文字。\n\n  ```text\n  变量 名称 很长 很长 结束\n  ```\n\n后文。\n"
+    out = only(md, join_lines=True, cjk_spaces=True, ocr_spaces=True)
+    assert out == md
+
+
+def test_longer_closing_fence_ends_the_block() -> None:
+    """CommonMark 允许用更长的围栏关闭:后面的正文必须照常清理,不能被吞进代码块。"""
+    md = "```python\nprint(1)\n````\n\n正文 中文 空格 要修正。\n"
+    out = only(md, cjk_spaces=True)
+    assert "正文中文空格要修正。" in out

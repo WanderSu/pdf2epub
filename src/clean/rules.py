@@ -37,15 +37,13 @@ import re
 import time
 from dataclasses import dataclass, field, replace as _dc_replace
 
-from clean.options import CleanOptions
-from clean.patch import AfterState, Evidence, Patch, Validation
-from clean.policy import NON_PATCH_RULES, PIPELINE_ORDER, enabled_rules
+from clean.patch import Evidence, Patch, Validation
+from clean.policy import NON_PATCH_RULES, PIPELINE_ORDER
 from ir.model import Block, BookIR
-from markdown.textrules import (ADJACENT_MIN_CHARS, CROSS_BLANK_MIN_CHARS,
-                                CJK_CHARS, END_PUNCT, HARD_BREAK, INLINE_CODE_RE,
+from markdown.textrules import (ADJACENT_MIN_CHARS, CROSS_BLANK_MIN_CHARS,                                CJK_CHARS, END_PUNCT, HARD_BREAK,
                                 START_PUNCT, VERSE_MAX_CHARS, _is_block_start,
                                 _is_catalog_entry, _is_layout_unit, _is_note_line,
-                                _is_page_mark, _is_running_head_candidate,
+                                _is_running_head_candidate,
                                 _is_structure_line, _is_verse_line,
                                 _keep_line_break, _looks_like_layout_line,
                                 is_page_number_line)
@@ -121,8 +119,12 @@ class RuleProposal:
 # ================================================================ 行级过滤骨架
 
 def _filter_lines(ir: BookIR, *, rule_id: str, first_id: int,
-                  drop_line, atomic_skip: frozenset[str] = _ATOMIC_KINDS) -> RuleProposal:
+                  drop_line, atomic_skip: frozenset[str] = _ATOMIC_KINDS,
+                  skip_block=None) -> RuleProposal:
     """按行过滤的共用骨架:命中即删行,整块命中即删块。
+
+    ``skip_block``:整块跳过的附加判据(如「这一块是诗/歌词」),用于保护那些
+    行长形态与页眉页脚相同、但属于正文的块。
 
     返回的 Patch 顺序 = 块顺序(执行顺序即给定顺序,不重排)。
     """
@@ -134,6 +136,8 @@ def _filter_lines(ir: BookIR, *, rule_id: str, first_id: int,
 
     for blk in sorted(ir.editable_blocks, key=lambda b: b.order):
         if blk.kind in atomic_skip or _is_page_marker(blk):
+            continue
+        if skip_block is not None and skip_block(blk):
             continue
         lines = blk.text.split("\n")
         kept = [line for line in lines if not drop_line(line)]
@@ -184,18 +188,35 @@ RUNNING_HEAD_MIN_REPEATS = 3
 RUNNING_HEAD_MAX_LEN = 40
 
 
+def _is_verse_block(blk: Block) -> bool:
+    """整块像诗 / 歌词:多行、多数行短且不带句末标点。
+
+    为什么要单独排除:``running_heads`` 的候选判据是「短、无句末标点、重复 ≥3 次」,
+    诗歌的副歌(``起来``)完全满足 —— 实测《义勇军进行曲》三处 ``起来`` 会被整段删掉。
+    页眉页脚是**页面装饰**,通常单独成块;诗行是内容,成块连续排布。整块像诗时
+    宁可放过一处页眉,也不删正文。
+    """
+    lines = [ln for ln in blk.text.split("\n") if ln.strip()]
+    if len(lines) < 2:
+        return False                       # 单行块:页眉/页脚的典型形态,照常判定
+    verse = sum(1 for ln in lines if _is_verse_line(ln))
+    return verse * 2 >= len(lines)
+
+
 def propose_running_heads(ir: BookIR, *, first_id: int = 1) -> RuleProposal:
     """剔除页眉页脚重复行:同一短行全文出现 ≥3 次。
 
     保守之处(与 legacy 同款):只删「重复 且 短 且 无句末标点 且 非块结构」的行;
     目录条目行与注释行是有内容的行,不参与;单次出现的短行一律保留。
+    诗歌/歌词块整体不参与(见 :func:`_is_verse_block`)—— 副歌不是页眉。
     局限:同一页内重复出现的短句(如反复出现的口号)也会被删,可用
     ``--clean-disable running_heads`` 关闭。
     """
     from collections import Counter
 
     blocks = [b for b in ir.editable_blocks
-              if b.kind not in _ATOMIC_KINDS and not _is_page_marker(b)]
+              if b.kind not in _ATOMIC_KINDS and not _is_page_marker(b)
+              and not _is_verse_block(b)]
     counts: Counter[str] = Counter()
     for blk in blocks:
         for line in blk.text.split("\n"):
@@ -206,7 +227,8 @@ def propose_running_heads(ir: BookIR, *, first_id: int = 1) -> RuleProposal:
     if not dupes:
         return RuleProposal("running_heads", ())
     return _filter_lines(ir, rule_id="running_heads", first_id=first_id,
-                         drop_line=lambda line: line.strip() in dupes)
+                         drop_line=lambda line: line.strip() in dupes,
+                         skip_block=_is_verse_block)
 
 
 # ================================================================ trailing_spaces
@@ -676,6 +698,22 @@ def _sep_between(prev_tail: str, cur_head: str) -> str:
     return ""
 
 
+#: 行尾硬换行标记(恰好两个空格;三个以上属于「硬换行 + 多余空白」)。
+_HARD_BREAK_TAIL = re.compile(r" {2,}$")
+
+
+def _keep_hard_break(text: str) -> str:
+    """strip 行首尾空白,但把行尾的硬换行标记留下。
+
+    ``trailing_spaces`` 特意保留「恰好两个空格」当作 Markdown 硬换行(那是内容);
+    ``join_lines`` 重建每一行时若再 strip 一次,两条规则就互相抵消:作者有意断行
+    的地方在 EPUB 里被渲染成空格,断行消失,而且完全静默。
+    """
+    if _HARD_BREAK_TAIL.search(text):
+        return text.strip() + HARD_BREAK
+    return text.strip()
+
+
 def _joinable(pending_text: str, pending_is_text: bool, pending_layout: bool,
               unit: _Unit) -> bool:
     """拼接判据,逐条对应 legacy ``_join_broken_lines``。
@@ -696,6 +734,9 @@ def _joinable(pending_text: str, pending_is_text: bool, pending_layout: bool,
     pt = pending_text
     text = unit.text.strip()
     if not pt or not text:
+        return False
+    if pt.endswith(HARD_BREAK):
+        # 上一行是作者**有意**的硬换行:拼上去等于把这个断行删掉(见 _keep_hard_break)
         return False
     prev_len = len(re.sub(r"\s+", "", pt))
     cur_len = len(re.sub(r"\s+", "", text))
@@ -751,9 +792,10 @@ def _run_join_state_machine(units: list[_Unit], *,
         if pending is None:
             return
         # 拼接过程会把每个文本行 strip 后再重建(源文件里图片行、目录行的行尾
-        # 空白就是这么丢的)—— IR 版按同一语义 strip,才能逐字节对齐
+        # 空白就是这么丢的)—— IR 版按同一语义 strip,才能逐字节对齐。
+        # 唯一的例外是行尾硬换行(两个空格):那是内容,见 _keep_hard_break。
         if len(pending) == 1 and pending[0].kind == "text":
-            text = pending[0].text.strip()
+            text = _keep_hard_break(pending[0].text)
         else:
             text = pending_text               # 拼接结果(判据本来就跑在 strip 视图上)
         entries.append(_Entry("group", pending, text, pending[0].gap,
@@ -770,7 +812,7 @@ def _run_join_state_machine(units: list[_Unit], *,
                 pending_marks.append(u)
                 group_marks.append(u)
             continue
-        u_text = u.text.strip() if u.kind == "text" else u.text
+        u_text = _keep_hard_break(u.text) if u.kind == "text" else u.text
         if pending is None:
             pending = [u]
             pending_text = u_text
@@ -1020,11 +1062,24 @@ def propose_join_lines(ir: BookIR, *, first_id: int = 1) -> RuleProposal:
 
 # ================================================================ 空格规则骨架
 
+#: 行内受保护片段:行内代码 + 行内数学。
+#:
+#: 行内代码里的空格是代码的一部分;行内公式里的空格同样**是公式的一部分**:
+#: ``$a b c d$`` 是四个符号相乘,去掉空格就变成 ``$abcd$``(一个标识符)——
+#: 公式被静默改义,产物里看不出来。数学的定界规则按 pandoc:开 ``$`` 后不能紧跟
+#: 空白、收 ``$`` 前不能是空白、收 ``$`` 后不能紧跟数字(与 epub.content 同款)。
+_INLINE_PROTECTED_RE = re.compile(
+    r"(`+)(?:.+?)\1"
+    r"|\$\$.+?\$\$"
+    r"|(?<!\$)\$(?![\s$])[^$\n]+?(?<!\s)\$(?![\d$])"
+)
+
+
 def _fix_outside_inline(line: str, fix) -> str:
-    """把 fix 只作用在行内代码片段之外(行内代码里的空格是代码的一部分)。"""
+    """把 fix 只作用在行内代码与行内数学之外(两者的空格都是内容)。"""
     parts: list[str] = []
     last = 0
-    for m in INLINE_CODE_RE.finditer(line):
+    for m in _INLINE_PROTECTED_RE.finditer(line):
         parts.append(fix(line[last:m.start()]))
         parts.append(m.group(0))
         last = m.end()
@@ -1204,6 +1259,11 @@ def _ocr_line_fix(line: str) -> str:
         parts = m.group(0).split(" ")
         if sum(1 for p in parts if len(p) <= OCR_MIN_SHORT) < OCR_MIN_SHORT:
             return m.group(0)
+        # 全是 1–2 个字母的片段更像并列标签(``A B C D 四个选项``),不是被 OCR
+        # 拆开的词 —— 被拆的单词至少有一段 ≥3 个字母(``Py Mu PDF``)。不设这条,
+        # 选择题/字母清单会被静默拼成 ``ABCD``。
+        if max(len(p) for p in parts) <= OCR_MIN_SHORT:
+            return m.group(0)
         return "".join(parts)
 
     return pattern.sub(repl, line)
@@ -1336,7 +1396,6 @@ def propose_rules(ir: BookIR, rule_ids: tuple[str, ...] | None = None, *,
     返回 ``(final_ir, reports)``;patch_id 跨规则连续分配。
     """
     from clean.engine import apply_patches
-
     if rule_ids is None:
         rule_ids = PIPELINE_ORDER
     clock = clock or time.time

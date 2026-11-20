@@ -34,15 +34,13 @@ from clean.engine import build_verification
 from clean.options import CleanOptions, resolve_options
 from clean.patch import Patch
 from clean.policy import POLICY, auto_apply_rules, enabled_rules
-from clean.report import (DIFF_FILE, REPORT_FILE, CleanReport, RunInfo,
-                          build_stats, normalize_options, write_report)
+from clean.report import (DIFF_FILE, REPORT_FILE, CleanReport, RunInfo,                          build_stats, normalize_options, write_report)
 from clean.rules import check_image_refs, propose_rules
 from ir.model import UNKNOWN, BookIR, IRError, Producer, text_sha256
 from ir.parse import build_ir, parse_evidence
 from ir.render import render_ir
 from ir.store import dump_ir, ir_dir
 from ir.structure import restore_headings
-
 
 class CleanEngineError(RuntimeError):
     """清理失败(IR 构造/Patch 应用/复核)。**必须**上报,不得回退到别的引擎。"""
@@ -191,9 +189,12 @@ def clean_text(md: str, *, backend: str = UNKNOWN, source: str = "",
         issues.append(notice)
 
     # 标题裁决必须在 IR 之前:标题是结构事实,靠证据层改回来后再解析,后面所有规则
-    # (层级归一、按章切分、脚注归属)看到的才是真正的那本书。改的是 md 文本本身,
-    # 所以报告里的 before/after 差异会如实包含这几行插入。
-    md_before = md
+    # (层级归一、按章切分、脚注归属)看到的才是真正的那本书。
+    #
+    # md_before 的快照**放在裁决之后**:补回来的标题同样是「本次清理的结果」,要参与
+    # changed 判定、字数统计与写回。快照放在裁决之前会出现三种自相矛盾:报告的字数
+    # 对不上(多了几个字却没有 Patch)、changed 为 False 于是补回的标题根本不写盘、
+    # 撤销时又凭空少几行。裁决本身是否发生由 issues 里的说明负责交代。
     if evidence:
         md, head_notes = restore_headings(
             md, parse_evidence(evidence, backend=backend or UNKNOWN,
@@ -201,6 +202,7 @@ def clean_text(md: str, *, backend: str = UNKNOWN, source: str = "",
             title_hint=title_hint,
         )
         issues.extend(head_notes)
+    md_before = md
 
     try:
         ir = build_ir(
@@ -256,7 +258,6 @@ def write_artifacts(outcome: CleanOutcome, work_dir: str | Path) -> Path:
 
 def _diff(before: str, after: str) -> str:
     from clean.diff import render_unified_diff
-
     return render_unified_diff(before, after)
 
 

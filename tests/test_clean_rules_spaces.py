@@ -18,7 +18,6 @@ import difflib
 
 from clean import apply_patches, propose_cjk_spaces, propose_ocr_spaces
 from ir import build_ir, render_ir
-
 # ---------------------------------------------------------------- 辅助
 
 
@@ -171,3 +170,26 @@ def test_cjk_spaces_reports_per_block_patches() -> None:
     assert len(proposal.patches) == 2
     assert all(p.operation == "replace_text" for p in proposal.patches)
     assert all(p.rule_id == "cjk_spaces" for p in proposal.patches)
+
+
+# ================================================================ 行内公式与标签
+
+def test_ocr_spaces_protects_inline_math() -> None:
+    """行内公式里的空格是公式的一部分:``$a b c d$`` 变成 ``$abcd$`` 就是改义。"""
+    md = "当 $a b c d$ 成立时,结论为真。\n"
+    out, _ = _run(md, propose_ocr_spaces)
+    assert "$a b c d$" in out
+
+
+def test_cjk_spaces_protects_inline_math() -> None:
+    md = "设 $x = 中 1$ 为变量,代入 中文 空格 计算。\n"
+    out, _ = _run(md, propose_cjk_spaces)
+    assert "$x = 中 1$" in out
+    assert "代入中文空格计算" in out                 # 公式之外的空格照旧修正
+
+
+def test_ocr_spaces_does_not_merge_single_letter_labels() -> None:
+    """``A B C D`` 是四个并列标签,不是被拆开的单词;1–2 字母的片段一律不合并。"""
+    md = "四个选项 A B C D 中只有一个正确,请选出答案。\n"
+    out, _ = _run(md, propose_ocr_spaces)
+    assert "A B C D" in out
