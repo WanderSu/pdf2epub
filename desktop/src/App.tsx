@@ -521,7 +521,7 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
 
   // ── 导入复核闸门 ──
   //  新版设计把它放在「文件进来 → 按下」之间做的是复核,不是假的进度条:
-  //  表里的类型/页数/后端/折帖全部来自上一步 runPreflight 的真实计划,
+  //  表里的类型/页数/后端/折帖全部来自真实预检(窗口一开就在表里跑),
   //  拿不到就留空(known=false)。代价是多一次点击,换来的是在按页计费的
   //  云端 OCR 之前有一次反悔机会。
   //  只在**一次导入最多一张表**:复核表已经开着时再来一批,直接放行进队列,
@@ -589,33 +589,57 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
     }
   }, [preflightRow]);
 
-  /** 返回 null = 用户取消;返回行数组 = 开跑(force 或无需复核时为空数组) */
-  const requestReview = useCallback(async (report: PreflightReport | null, rows: QueueFile[], force: boolean): Promise<ReviewRow[] | null> => {
+  /** 导入复核闸门 —— 窗口先出来,检查在窗口里面跑。
+   *
+   *  顺序是有讲究的:先开窗、再检测。冷启动的引擎要两三秒才吐第一行
+   *  (PyInstaller 引导),先等它跑完再弹窗,用户的观感就是「拖进去什么也没发生,
+   *  过两秒突然弹出一张表」。反过来:表先开、行上标「检测中…」,这两三秒就有了解释,
+   *  用户也能先看清文件名,不必干等。
+   *
+   *  检查期间「开始制版」禁用:类型/页数/云端页数还没到,那时按下等于闭着眼睛
+   *  花钱(云端 OCR 按页计费)。
+   *
+   *  返回 null = 用户取消;返回行数组 = 开跑(force 或无需复核时为空数组) */
+  const requestReview = useCallback(async (
+    rows: QueueFile[],
+    force: boolean,
+    runCheck: () => Promise<PreflightReport | null>,
+  ): Promise<ReviewRow[] | null> => {
     // force = 用户已经明确要求「重转」(书库 RE-CONVERT),不必再问一遍
     if (force || rows.length === 0 || reviewing.current) return [];
     reviewing.current = true;
-    const sheet: ReviewSheet = {
-      rows: rows.map(f => {
-        const plan = report?.files.find(p => normPath(p.path) === normPath(f.path));
-        const known = Boolean(plan);
-        return plan
-          ? {
-            id: f.id, name: f.name, path: f.path,
+    // 行先按「未知」建(busy = 正在查):数字到了再填,拿不到就一直是未知,不编造
+    const sheetRows: ReviewRow[] = rows.map(f => ({
+      id: f.id, name: f.name, path: f.path, known: false, busy: true,
+    }));
+    reviewRows.current = sheetRows;
+    setReview({ rows: sheetRows });
+    const decision = new Promise<ReviewRow[] | null>(resolve => { reviewResolve.current = resolve; });
+    // 检查与「用户什么时候按下」并行:表已经开着,数字回来就填进去
+    void runCheck().then(report => {
+      // 检查期间用户已经取消(或切走了屏幕):这批数字没人要了,别把表复活回来
+      if (!reviewResolve.current) return;
+      setReview(prev => {
+        if (!prev) return prev;
+        const filled = prev.rows.map(row => {
+          const plan = report?.files.find(p => normPath(p.path) === normPath(row.path));
+          if (!plan) return { ...row, busy: false, known: false };
+          return {
+            ...row, busy: false, known: true,
             type: KIND_TO_TYPE[plan.kind],
             pages: plan.pages,
             backend: backendFromPlan(plan.backend),
             shards: plan.shards,
             ocrPages: plan.ocr_pages,
-            known,
-          }
-          : { id: f.id, name: f.name, path: f.path, known };
-      }),
-    };
-    reviewRows.current = sheet.rows;
-    setReview(sheet);
-    const decision = await new Promise<ReviewRow[] | null>(resolve => { reviewResolve.current = resolve; });
-    if (decision === null) notify(t.toast.held, "info");
-    return decision;
+          };
+        });
+        reviewRows.current = filled;
+        return { rows: filled };
+      });
+    });
+    const verdict = await decision;
+    if (verdict === null) notify(t.toast.held, "info");
+    return verdict;
   }, [notify, t]);
 
   //  addFiles(force=true) 只用于「明确要求重转」的入口(书库 RE-CONVERT):
@@ -660,9 +684,8 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
     setFiles(prev => [...prev, ...fresh]);
     rememberRecent(fresh.map(f => f.path));
     setScreen("convert");
-    // 先印前检查(真实的类型/页数/后端/折帖),让用户确认后再串行转换
-    const report = await runPreflight(fresh.map(f => f.path));
-    const decision = await requestReview(report, fresh, force);
+    // 先把复核表弹出来,检查在表里跑(顺序见 requestReview);确认后再串行转换
+    const decision = await requestReview(fresh, force, () => runPreflight(fresh.map(f => f.path)));
     if (decision === null) return;
     // 逐行选择只在**这一批**有效:没动过的行不传 backend,继续听设置里的偏好
     const chosen = new Map(decision.map(r => [r.id, r.override]));

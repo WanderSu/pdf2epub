@@ -264,6 +264,28 @@ describe("最近文件:划掉一条历史", () => {
   });
 });
 
+describe("复核表:窗口先开、检查在后面跑", () => {
+  it("检查未完成时标「检测中…」、禁用开始按钮,也不谎称本批只花本地时间", () => {
+    renderConvert([], { rows: [{ id: "r1", name: "a.pdf", path: "C:/books/a.pdf", known: false, busy: true }] });
+    const sheet = within(screen.getByRole("dialog"));
+
+    // 数字还没到:底部不能给「本批可在本地完成」这种结论,否则用户会以为不花钱
+    expect(sheet.getByText("正在检测类型、页数与云端页数…")).toBeTruthy();
+    expect(sheet.queryByText(/本批可在本地完成/)).toBeNull();
+    // 表头与按钮各一处
+    expect(sheet.getAllByText("检测中…").length).toBe(2);
+    // 检查期间按下 = 闭着眼睛花云端页数的钱
+    expect(sheet.getByRole("button", { name: "检测中…" }).hasAttribute("disabled")).toBe(true);
+  });
+
+  it("数字到齐后恢复可按下,并按云端页数改写按钮文案", () => {
+    renderConvert([], SHEET);
+    const sheet = within(screen.getByRole("dialog"));
+    expect(sheet.queryByText("检测中…")).toBeNull();
+    expect(sheet.getByRole("button", { name: "开始 OCR 制版" }).hasAttribute("disabled")).toBe(false);
+  });
+});
+
 describe("ConvertScreen 删除队列记录", () => {
   it("终态行的删除按钮打开确认框,「仅移除记录」只删记录", () => {
     const onDelete = vi.fn();

@@ -106,6 +106,10 @@ function ReviewTable({ sheet, lang, env, onCancel, onStart, onRowBackend }: {
   const t = T[lang].review;
   // 总额按行求和:逐行换过后端之后,「这笔要花多少钱」必须跟着变
   const totalOcr = reviewOcrPages(sheet.rows);
+  // busy = 这一行的数字还在路上(窗口一开就是这种状态,逐行换后端时也是)。
+  // 查的这段时间「开始制版」必须锁住:云端 OCR 按页计费,数字没到就按下等于闭眼花钱。
+  // 查完仍然 known=false 的行只是显示占位,不再拦按钮 —— 那种行引擎转换时会自己规划。
+  const checking = sheet.rows.some(row => row.busy);
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-[var(--foreground)]/20 p-8" role="dialog" aria-modal="true" aria-label={t.title}>
       <div className="w-full max-w-[760px] bg-[var(--card)] border border-[var(--foreground)]">
@@ -113,7 +117,10 @@ function ReviewTable({ sheet, lang, env, onCancel, onStart, onRowBackend }: {
           <div className="flex items-baseline gap-4">
             <span className="font-mono text-[11px] tracking-[0.1em] text-[var(--primary)]">PREFLIGHT</span>
             <span className={`font-serif text-[24px] text-[var(--foreground)] ${lang === "zh" ? "cjk-serif" : ""}`}>{t.title}</span>
-            <span className="ml-auto font-mono text-[11px] text-[var(--muted-foreground)]">{t.files(sheet.rows.length)}</span>
+            <span className="ml-auto flex items-baseline gap-4">
+              {checking && <span className="font-mono text-[11px] text-[var(--primary)]">{t.checking}</span>}
+              <span className="font-mono text-[11px] text-[var(--muted-foreground)]">{t.files(sheet.rows.length)}</span>
+            </span>
           </div>
           <div className="mt-4 h-px bg-[var(--primary)]" />
         </div>
@@ -142,7 +149,7 @@ function ReviewTable({ sheet, lang, env, onCancel, onStart, onRowBackend }: {
 
         <div className="mx-8 my-5 border-l-2 border-[var(--primary)] pl-4 py-1">
           <div className={`text-[12px] text-[var(--foreground)] ${lang === "zh" ? "cjk" : "font-mono"}`}>
-            {totalOcr > 0 ? t.estimate(totalOcr) : t.estimateLocal}
+            {checking ? t.checkingHint : totalOcr > 0 ? t.estimate(totalOcr) : t.estimateLocal}
           </div>
           <div className="font-mono text-[10px] text-[var(--muted-foreground)] mt-1">{t.pipeline}</div>
         </div>
@@ -151,8 +158,12 @@ function ReviewTable({ sheet, lang, env, onCancel, onStart, onRowBackend }: {
           <button onClick={onCancel} className={`font-mono text-[11px] text-[var(--muted-foreground)] hover:text-[var(--foreground)] ${lang === "zh" ? "cjk" : "tracking-[0.08em]"}`}>
             {t.cancel}
           </button>
-          <button onClick={onStart} className={`px-6 py-2 bg-[var(--primary)] text-[var(--primary-foreground)] font-mono text-[11px] hover:opacity-90 ${lang === "zh" ? "cjk" : "tracking-[0.08em]"}`}>
-            {totalOcr > 0 ? T[lang].convert.startOcr : T[lang].convert.start}
+          <button
+            onClick={onStart}
+            disabled={checking}
+            className={`px-6 py-2 bg-[var(--primary)] text-[var(--primary-foreground)] font-mono text-[11px] transition-opacity ${lang === "zh" ? "cjk" : "tracking-[0.08em]"} ${checking ? "opacity-40 cursor-not-allowed" : "hover:opacity-90"}`}
+          >
+            {checking ? t.checking : totalOcr > 0 ? T[lang].convert.startOcr : T[lang].convert.start}
           </button>
         </div>
       </div>
