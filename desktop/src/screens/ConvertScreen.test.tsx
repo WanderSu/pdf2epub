@@ -249,6 +249,17 @@ describe("导入复核表", () => {
   });
 });
 
+describe("队列表头与操作按钮对齐", () => {
+  it("操作列表头右对齐,与行内「取消 / 删除」按钮同一端", () => {
+    const { container } = renderConvert([makeFile({ status: "done", progress: 100, epub: "C:/out/a.epub" })]);
+    const [head, row] = [...container.querySelectorAll(".queue-table")] as HTMLElement[];
+    // 前六列都是左对齐或数字右对齐,操作列必须跟按钮一样靠右
+    expect(head.children[6].textContent).toBe("操作");
+    expect(head.children[6].className).toContain("text-right");
+    expect(row.children[6].className).toContain("justify-end");
+  });
+});
+
 describe("最近文件:划掉一条历史", () => {
   it("每条记录都有移除入口,点击只回传那条路径(不删文件)", () => {
     const onForgetRecent = vi.fn();
