@@ -143,8 +143,8 @@ export function LibraryScreen({ lang, books, loading, outputDir, onRefresh, onOp
 
         {/* 书目 */}
         <div className="flex-1 overflow-auto scroll-area pl-8 pr-[var(--gutter)] py-4">
-          <div className="grid grid-cols-[44px_1fr_80px_64px_88px_168px] gap-4 pb-1.5 border-b border-[var(--border)]">
-            {["", t.colTitle, t.colSize, t.colPages, t.colDate, ""].map((h, i) => (
+          <div className="library-table grid grid-cols-[44px_minmax(0,1fr)_minmax(0,140px)_80px_64px_88px_168px] gap-4 pb-1.5 border-b border-[var(--border)]">
+            {["", t.colTitle, t.colAuthor, t.colSize, t.colPages, t.colDate, ""].map((h, i) => (
               <span key={i} className={`text-[10px] text-[var(--muted-foreground)] ${lang === "zh" ? "cjk" : "font-mono tracking-[0.1em] uppercase"}`}>{h}</span>
             ))}
           </div>
@@ -174,24 +174,21 @@ export function LibraryScreen({ lang, books, loading, outputDir, onRefresh, onOp
           {filtered.map((book, i) => (
             <div
               key={book.id}
-              className="grid grid-cols-[44px_1fr_80px_64px_88px_168px] gap-4 py-3 border-b border-[var(--border)] hover:bg-[var(--secondary)] transition-colors row-enter"
+              className="library-table grid grid-cols-[44px_minmax(0,1fr)_minmax(0,140px)_80px_64px_88px_168px] gap-4 py-3 border-b border-[var(--border)] hover:bg-[var(--secondary)] transition-colors row-enter"
               style={{ animationDelay: `${Math.min(i, 8) * 24}ms` }}
               onMouseEnter={() => setHoveredId(book.id)}
               onMouseLeave={() => setHoveredId(null)}
               title={book.epub}
             >
               <SpineBlock title={book.title} />
-              <div className="min-w-0 flex flex-col justify-center gap-0.5">
-                <div className="flex items-baseline gap-1 overflow-hidden">
-                  <span className="font-serif text-[14px] text-[var(--foreground)] shrink-0 truncate max-w-[180px]">{book.title}</span>
-                  <span className="flex-1 border-b border-dotted border-[var(--border)] mb-[3px] min-w-[8px]" />
-                  <span className={`text-[12px] text-[var(--muted-foreground)] shrink-0 truncate max-w-[120px] ${lang === "zh" ? "cjk" : ""}`}>{book.author || "—"}</span>
-                </div>
+              <div className="min-w-0 flex flex-col justify-center gap-1">
+                <span className="font-serif text-[14px] text-[var(--foreground)] truncate">{book.title}</span>
                 <div className="flex items-center gap-1.5">
                   <TypeBadge type={book.type} />
                   <BackendBadge backend={book.backend} />
                 </div>
               </div>
+              <span className={`text-[12px] text-[var(--muted-foreground)] truncate self-center ${lang === "zh" ? "cjk" : ""}`}>{book.author || "—"}</span>
               <span className="font-mono text-[11px] text-[var(--muted-foreground)] tabular-nums self-center">{book.size}</span>
               <span className="font-mono text-[11px] text-[var(--muted-foreground)] tabular-nums self-center">{book.pages || "—"}</span>
               <span className="font-mono text-[11px] text-[var(--muted-foreground)] tabular-nums self-center">{(book.date || "").slice(5)}</span>

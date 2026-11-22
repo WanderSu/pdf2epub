@@ -38,6 +38,25 @@ function renderLibrary(books: LibraryBook[], onDelete = noop) {
   );
 }
 
+describe("LibraryScreen 标题 / 作者分列", () => {
+  it("表头把标题与作者拆成两列,同行里作者单独成格", () => {
+    const { container } = renderLibrary([makeBook()]);
+    // 旧版是一列「标题 / 作者」+ 引导点把两者串在同一行
+    expect(screen.queryByText("标题 / 作者")).toBeNull();
+
+    const [head, row] = [...container.querySelectorAll(".library-table")] as HTMLElement[];
+    // 七格:书脊 / 标题 / 作者 / 大小 / 页数 / 日期 / 操作
+    expect(head.children.length).toBe(7);
+    expect(head.children[1].textContent).toBe("标题");
+    expect(head.children[2].textContent).toBe("作者");
+
+    expect(row.children.length).toBe(7);
+    expect(row.children[1].textContent).toContain("烧纸");
+    expect(row.children[1].textContent).not.toContain("李沧东");
+    expect(row.children[2].textContent).toBe("[韩] 李沧东");
+  });
+});
+
 describe("LibraryScreen 删除书目", () => {
   it("每行都有删除入口,确认框点名书名、EPUB 路径与删除范围", () => {
     renderLibrary([makeBook()]);
