@@ -349,6 +349,63 @@ async fn convert_file(
     })
 }
 
+/// 预检结果缓存:同一份文件(路径 + mtime + size)配同一后端,计划是确定性的
+/// —— 检测只读文件内容,不碰网络。而每次预检都要新起一个引擎进程(PyInstaller
+/// 冷启动实测 2.3–2.5 s):复核表里逐行换后端、重复点「印前检查」、空状态自动预检
+/// 最近文件,问的都是已经算过的同一件事 —— 命中缓存就不再起进程、不再重新检测。
+#[derive(Default)]
+pub struct PreflightCache {
+    entries: Mutex<HashMap<String, String>>,
+}
+
+/// 缓存上限(条)。到顶就整批清掉:预检很便宜,不值得为淘汰策略写一堆逻辑。
+const PREFLIGHT_CACHE_LIMIT: usize = 64;
+
+fn preflight_cache_get(cache: &PreflightCache, key: &str) -> Option<String> {
+    cache.entries.lock().unwrap().get(key).cloned()
+}
+
+fn preflight_cache_put(cache: &PreflightCache, key: String, json: String) {
+    let mut entries = cache.entries.lock().unwrap();
+    if entries.len() >= PREFLIGHT_CACHE_LIMIT {
+        entries.clear();
+    }
+    entries.insert(key, json);
+}
+
+/// 文件身份:路径 + mtime(秒)+ 大小。三者任一变化都可能改变计划,
+/// 所以一起进缓存键(用户替换了同名 PDF 也会重新预检)。
+/// 路径**不在这里规范化** —— 归一化统一在 `preflight_cache_key` 里做,只留一处。
+fn file_stamp(path: &str) -> (String, u64, u64) {
+    let meta = std::fs::metadata(path).ok();
+    let mtime = meta
+        .as_ref()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+    (path.to_string(), mtime, size)
+}
+
+/// 预检缓存键:引擎 + 后端 + 每个文件的身份。引擎也进键 —— 设置页换了 CLI,
+/// 旧引擎算出来的计划不该继续冒充新引擎的答案。路径在这里统一规范化(大小写/
+/// 分隔符),否则同一个文件换个写法就换一个键,又会白起一个进程重算。
+fn preflight_cache_key(cli: &str, backend: Option<&str>, stamps: &[(String, u64, u64)]) -> String {
+    let mut key = norm_path(cli);
+    key.push('\u{1}');
+    key.push_str(backend.unwrap_or("auto"));
+    for (path, mtime, size) in stamps {
+        key.push('\u{1}');
+        key.push_str(&norm_path(path));
+        key.push('\u{1}');
+        key.push_str(&mtime.to_string());
+        key.push('\u{1}');
+        key.push_str(&size.to_string());
+    }
+    key
+}
+
 /// 预检(dry-run):检测类型 / 页数 / 计划后端 / 分片 / 当日云端额度,
 /// **不产出任何文件、不消耗 OCR 额度**。返回 CLI 的 JSON 文本,前端解析后
 /// 填「类型检测预览」与「印前检查」区域(转换前就能看到将要发生什么)。
@@ -371,6 +428,20 @@ async fn preflight(
         Some(p) if !p.trim().is_empty() => p,
         _ => state.cli_path.lock().unwrap().clone(),
     };
+    let backend_arg = backend
+        .as_deref()
+        .filter(|b| !b.trim().is_empty() && *b != "auto");
+    // 已经算过的计划直接给:同一份文件 + 同一后端,检测结果不会变
+    // (文件被替换会改 mtime/size,那时键就不同了)。
+    let key = preflight_cache_key(
+        &cli,
+        backend_arg,
+        &file_paths.iter().map(|p| file_stamp(p)).collect::<Vec<_>>(),
+    );
+    let cache = app.state::<PreflightCache>();
+    if let Some(hit) = preflight_cache_get(&cache, &key) {
+        return Ok(hit);
+    }
     let mut cmd = Command::new(&cli);
     #[cfg(windows)]
     cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
@@ -387,7 +458,7 @@ async fn preflight(
         cmd.current_dir(dir);
     }
     cmd.arg("--dry-run").arg("--json");
-    if let Some(b) = backend.filter(|b| !b.trim().is_empty() && b != "auto") {
+    if let Some(b) = backend_arg {
         cmd.arg("--backend").arg(b);
     }
     cmd.args(&file_paths);
@@ -405,7 +476,11 @@ async fn preflight(
             stderr
         });
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    let json = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // 只缓存成功的结果:失败往往是暂时的(文件被占用、配置刚改、Token 还没存),
+    // 记住它会让用户改完配置也看不到新答案。
+    preflight_cache_put(&cache, key, json.clone());
+    Ok(json)
 }
 
 /// 取消转换:杀掉对应任务 **整棵进程树**(Windows 用 taskkill /T)。
@@ -1824,6 +1899,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(CliConfig::default())
         .manage(RunningTasks::default())
+        .manage(PreflightCache::default())
         .invoke_handler(tauri::generate_handler![
             convert_file,
             preflight,
@@ -2269,5 +2345,37 @@ mod tests {
         // 旧位置没有文件 → 空,不报错
         assert!(migrate_library(&base.join("nope/library.json"), None).is_empty());
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn preflight_cache_key_ignores_separator_and_case() {
+        // Windows 路径大小写/分隔符不敏感:同一份文件必须落在同一个键上,
+        // 否则「换个写法再问一次」又会起一个进程重算一遍。
+        let a = preflight_cache_key("C:/app/cli.exe", None, &[("c:/books/a.pdf".into(), 100, 5)]);
+        let b = preflight_cache_key("C:\\app\\cli.exe", None, &[("C:\\books\\A.PDF".into(), 100, 5)]);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn preflight_cache_returns_what_it_stored_and_stays_bounded() {
+        let cache = PreflightCache::default();
+        let key = preflight_cache_key("cli", None, &[("c:/a.pdf".into(), 100, 5)]);
+        assert!(preflight_cache_get(&cache, &key).is_none());
+        preflight_cache_put(&cache, key.clone(), r#"{"files":[]}"#.into());
+        assert_eq!(preflight_cache_get(&cache, &key).as_deref(), Some(r#"{"files":[]}"#));
+        // 到上限整批清空:只要证明不会无界增长(不是 LRU,也没打算是)
+        for i in 0..PREFLIGHT_CACHE_LIMIT + 5 {
+            preflight_cache_put(&cache, format!("k{i}"), "{}".into());
+        }
+        assert!(cache.entries.lock().unwrap().len() <= PREFLIGHT_CACHE_LIMIT);
+    }
+
+    #[test]
+    fn preflight_cache_key_tracks_backend_engine_and_file_identity() {
+        let base = preflight_cache_key("cli", None, &[("c:/a.pdf".into(), 100, 5)]);
+        assert_ne!(base, preflight_cache_key("cli", Some("mineru"), &[("c:/a.pdf".into(), 100, 5)]));
+        assert_ne!(base, preflight_cache_key("cli", None, &[("c:/a.pdf".into(), 101, 5)]));
+        assert_ne!(base, preflight_cache_key("cli", None, &[("c:/a.pdf".into(), 100, 6)]));
+        assert_ne!(base, preflight_cache_key("other-engine", None, &[("c:/a.pdf".into(), 100, 5)]));
     }
 }
