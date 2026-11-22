@@ -50,6 +50,7 @@ function baseProps() {
     onPreflight: noop,
     onPreflightRecent: noop,
     onAddRecent: noop,
+    onForgetRecent: noop,
     onMoveTop: noop,
     onStartQueue: noop,
     onReviewStart: noop,
@@ -245,6 +246,21 @@ describe("导入复核表", () => {
       ],
     });
     expect(screen.getByText(/本批预计需要云端 300 页/)).toBeTruthy();
+  });
+});
+
+describe("最近文件:划掉一条历史", () => {
+  it("每条记录都有移除入口,点击只回传那条路径(不删文件)", () => {
+    const onForgetRecent = vi.fn();
+    render(
+      <ConvertScreen
+        {...baseProps()}
+        recent={[{ path: "C:/books/a.pdf", name: "a.pdf", at: 1 }]}
+        onForgetRecent={onForgetRecent}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "从最近文件移除" }));
+    expect(onForgetRecent).toHaveBeenCalledWith("C:/books/a.pdf");
   });
 });
 

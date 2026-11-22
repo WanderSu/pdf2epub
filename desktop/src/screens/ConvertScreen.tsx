@@ -166,7 +166,7 @@ export function ConvertScreen({
   lang, files, preview, preflightOf, batchNotice, dragging, recent, busyPreflight,
   composingExpanded, setComposingExpanded, consoleLines, review, env,
   onPick, onCancel, onRetry, onClearDone, onRetryFailed, onCancelAll, onUseOcr,
-  onPreflight, onPreflightRecent, onAddRecent, onMoveTop, onStartQueue,
+  onPreflight, onPreflightRecent, onAddRecent, onForgetRecent, onMoveTop, onStartQueue,
   onReviewStart, onReviewCancel, onRowBackend, onDelete,
 }: {
   lang: Lang;
@@ -194,6 +194,8 @@ export function ConvertScreen({
   onPreflight: () => void;
   onPreflightRecent: (path: string) => void;
   onAddRecent: (path: string) => void;
+  /** 从最近文件里划掉这一条历史(只动记录,源文件不删) */
+  onForgetRecent: (path: string) => void;
   onMoveTop: (ids: string[]) => void;
   onStartQueue: () => void;
   onReviewStart: () => void;
@@ -301,6 +303,15 @@ export function ConvertScreen({
                         </button>
                         <button onClick={() => onAddRecent(r.path)} className="opacity-55 group-hover:opacity-100 focus-visible:opacity-100 font-mono text-[10px] text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-opacity">
                           {t.addToQueue}
+                        </button>
+                        {/* 划掉这一条历史:只从「最近文件」里消失,磁盘上什么都不动 */}
+                        <button
+                          onClick={() => onForgetRecent(r.path)}
+                          aria-label={t.forgetRecent}
+                          title={t.forgetRecent}
+                          className="opacity-55 group-hover:opacity-100 focus-visible:opacity-100 p-0.5 text-[var(--muted-foreground)] hover:text-[var(--danger)] transition-opacity"
+                        >
+                          <TrashIcon />
                         </button>
                       </div>
                       <Rule />

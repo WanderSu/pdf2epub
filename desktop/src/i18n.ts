@@ -52,6 +52,7 @@ export const T = {
       retry: "RETRY",
       requeue: "RE-QUEUE",
       addToQueue: "ADD →",
+      forgetRecent: "REMOVE FROM RECENT",
       detection: {
         title: "TYPE DETECTION",
         empty: "Drop a file to preview",
@@ -261,6 +262,7 @@ export const T = {
       retry: "重试",
       requeue: "重新入队",
       addToQueue: "加入 →",
+      forgetRecent: "从最近文件移除",
       detection: {
         title: "类型检测",
         empty: "拖入文件以预览",

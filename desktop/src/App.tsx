@@ -501,6 +501,24 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
     });
   }, [persist]);
 
+  /** 从「最近文件」里划掉一条历史:只重写 settings.json 的 recent 列表,
+   *  源文件与产物一概不碰(那是删除按钮的事,不在这一栏)。
+   *  顺带丢掉它的预检缓存,免得同一份文件再拖进来时先闪一帧旧数字。 */
+  const forgetRecent = useCallback((path: string) => {
+    const key = normPath(path);
+    setRecent(prev => {
+      const next = prev.filter(r => normPath(r.path) !== key);
+      void persist({ recent: next });
+      return next;
+    });
+    setPreflights(prev => {
+      if (!(key in prev)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  }, [persist]);
+
   // ── 导入复核闸门 ──
   //  新版设计把它放在「文件进来 → 按下」之间做的是复核,不是假的进度条:
   //  表里的类型/页数/后端/折帖全部来自上一步 runPreflight 的真实计划,
@@ -1036,6 +1054,7 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
             onPreflight={() => void runPreflight(files.map(f => f.path))}
             onPreflightRecent={(p: string) => void runPreflight([p])}
             onAddRecent={(p: string) => void addFiles([p])}
+            onForgetRecent={forgetRecent}
             onMoveTop={moveTop}
             onStartQueue={() => void startQueue()}
             onReviewStart={() => settleReview(true)}

@@ -69,6 +69,7 @@ function renderQueue() {
       onPreflight={() => {}}
       onPreflightRecent={() => {}}
       onAddRecent={() => {}}
+      onForgetRecent={() => {}}
       onMoveTop={() => {}}
       onStartQueue={() => {}}
       onReviewStart={() => {}}
