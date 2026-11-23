@@ -61,7 +61,7 @@ def test_real_text_book_passes_both_verification_layers(tmp_path: Path) -> None:
     assert structure.ok
     assert structure.errors == []
     assert structure.warnings == [], [i.message for i in structure.warnings]
-    assert structure.stats["cover"] == 0          # 首页是正文页 → 不硬当封面
+    assert structure.stats["cover"] == 1          # 第 1 页渲染成封面(与扫描版同一口径)
     assert structure.stats["images"] >= 2         # 正文插图(没有封面图)
     assert structure.stats["toc_links"] >= 3      # 书名 + 三章
     assert structure.stats["css"] == 1
@@ -96,30 +96,31 @@ def test_real_book_epub_is_structurally_valid(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(not TEXT_BOOK.exists(), reason=f"缺少真实样本 {TEXT_BOOK.name}")
-def test_real_book_without_a_cover_page_gets_a_title_page(tmp_path: Path) -> None:
-    """这个样本首页就是正文(不是封面):不拿正文页冒充封面,改生成 pandoc 标题页。
+def test_real_book_cover_is_page_one_and_no_generated_title_page(tmp_path: Path) -> None:
+    """首页不是封面页(就是正文)时,封面取**第 1 页渲染图**,不生成 pandoc 标题页。
 
-    两条路都只允许**一处**书名页 —— 有封面用封面,没封面用标题页,不能既没封面
-    又不给标题页(读者打开书看到一个"第1章")。
+    旧契约是「认不出封面就不给封面、改让 pandoc 生成书名/作者/日期标题页」,实测
+    那会在电子版书上凭空多出一张台账式的扉页,而扫描版同一本书却是第 1 页的图。
+    现在两条链路同一口径:封面永远是原书第 1 页,pandoc 不再生成标题页
+    (``--epub-title-page=false``),书名只留在 ``dc:title`` 里。
     """
     result = _convert(TEXT_BOOK, tmp_path)
     work = tmp_path / "work" / batch.sanitize_name(TEXT_BOOK.stem)
 
-    assert not (work / "cover.jpg").exists()               # 没被硬当成封面
+    assert (work / "cover.jpg").exists()                    # 第 1 页确实渲染了
 
     with zipfile.ZipFile(result.epub) as z:
         names = z.namelist()
         opf = z.read("EPUB/content.opf").decode("utf-8")
-        assert 'properties="cover-image"' not in opf        # manifest 里也没有封面项
-        assert '<meta name="cover"' not in opf
-        assert "EPUB/text/cover.xhtml" not in names
-        assert "EPUB/text/title_page.xhtml" in names        # 标题页顶上了
-        # 书名页里确实写着书名 + 作者(标题页不是空壳)
-        title_page = z.read("EPUB/text/title_page.xhtml").decode("utf-8")
-    title, author = batch.parse_title_author(TEXT_BOOK.stem)
-    assert title in title_page
-    if author:                                   # 文件名里没有作者时只校验书名
-        assert author in title_page
+        assert 'properties="cover-image"' in opf
+        assert '<meta name="cover"' in opf
+        assert "EPUB/text/cover.xhtml" in names
+        assert "EPUB/text/title_page.xhtml" not in names     # 不自动生成标题页
+        # 封面排在最前:读者打开就是封面,不是正文第一章
+        spine = opf.split("<spine")[1].split("</spine>")[0]
+        first = re.search(r'<itemref idref="([^"]+)"', spine).group(1)
+        ids = dict(re.findall(r'<item id="([^"]+)" href="([^"]+)"', opf))
+        assert ids[first] == "text/cover.xhtml"
 
 
 @pytest.mark.skipif(not TWO_COLUMN_BOOK.exists(), reason=f"缺少真实样本 {TWO_COLUMN_BOOK.name}")

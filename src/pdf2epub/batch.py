@@ -486,12 +486,12 @@ def _process_pdf(source, config, work_root, output_dir, backend_override, t0, re
     events.emit("metadata", **meta.to_dict())
 
     events.stage("build", "start")
-    # 封面:先判定第 1 页是不是封面,再决定「封面图怎么取 + 要不要生成标题页」。
-    # 两种形态互斥,不会同时出现两张"书名页":
-    #   有封面(整页图 / 只有几十个字的扉页)→ 原书封面图放首位,**不生成**标题页;
-    #   没有封面(第 1 页就是正文)→ 不硬拿正文页当封面,改为生成 pandoc 标题页。
+    # 封面:一律用**第 1 页**渲染成 cover.jpg —— 扫描版与电子版同一口径。
+    # 不再让 pandoc 生成「书名 + 作者 + 日期」标题页:那是引擎自己造的封面,
+    # 原书并没有这一页,读者打开书先看到一张凭空生成的扉页(实测电子版 PDF 里
+    # 就出现了 title_page.xhtml,而扫描版是第 1 页的图)。渲染失败不阻断转换。
     info = detect_cover(source)
-    cover = render_cover(source, work, info=info) if info.is_cover else None
+    cover = render_cover(source, work, info=info)
     events.emit("cover", is_cover=info.is_cover, reason=info.reason,
                 image_ratio=round(info.image_ratio, 3), text_chars=info.text_chars)
     epub = build_epub(conv.book_md, work, output_dir, title=meta.title, author=meta.author,
@@ -500,7 +500,7 @@ def _process_pdf(source, config, work_root, output_dir, backend_override, t0, re
                       lang=epub_language(conv.book_md, lang_override),
                       identifier=stable_identifier(source, out_name),
                       date=source_date(source), cover_image=cover,
-                      title_page=not info.is_cover)
+                      title_page=False)
     events.stage("build", "done", cover=bool(cover))
     result.epub = epub
     events.stage("verify", "start")
