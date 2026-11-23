@@ -1,0 +1,137 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  engine:
+    name: 引擎与前端(Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装 uv
+        run: pip install uv
+
+      # 依赖一律按锁文件装:CI 不做依赖升级(--locked 过期就直接失败)
+      - name: 安装 Python 依赖(锁文件)
+        run: uv sync --locked
+
+      # 部分用例要 pandoc 才能跑;缺了会被静默 skip,所以先装上
+      - name: 安装 pandoc 与中文字体
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pandoc fonts-noto-cjk
+
+      - name: pytest
+        run: uv run pytest -q
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: 前端依赖(锁文件)
+        working-directory: desktop
+        run: npm ci
+
+      - name: 前端检查(tsc + eslint + vitest)
+        working-directory: desktop
+        run: npm run check
+
+      - name: 安装 Tauri 构建依赖
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf libssl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust 测试
+        working-directory: desktop/src-tauri
+        run: cargo test --locked
+
+  desktop:
+    name: 桌面端与发布形态(Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装 uv
+        run: pip install uv
+
+      - name: 安装 Python 依赖(锁文件)
+        run: uv sync --locked
+
+      # 7 处版本号同源(pyproject / uv.lock / tauri.conf / Cargo.toml / types.ts / README×2)
+      - name: 版本号一致性
+        run: uv run python scripts/bump_version.py --check
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: 前端依赖(锁文件)
+        working-directory: desktop
+        run: npm ci
+
+      - name: 前端检查(tsc + eslint + vitest)
+        working-directory: desktop
+        run: npm run check
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust 测试
+        working-directory: desktop/src-tauri
+        run: cargo test --locked
+
+      # 不产安装包:只验证壳能编译(体积小、不需要签名)
+      # 用 npx 直调 tauri CLI:`npm run tauri build -- --no-bundle` 会被 npm 当成
+      # 自身配置项解析(EUNKNOWNCONFIG),构建根本不会开始
+      - name: 桌面壳构建
+        working-directory: desktop
+        run: npx tauri build --no-bundle
+
+      - name: 打包引擎(PyInstaller onedir)
+        run: uv run --with pyinstaller pyinstaller cli.spec --noconfirm --distpath dist_ci --workpath build_ci
+
+      - name: 最小发布形态 smoke test
+        shell: pwsh
+        run: |
+          # 造一份两页文字 PDF(每页字数过检测阈值,走本地链路、不碰云端)
+          uv run python -c @"
+          import pymupdf
+          doc = pymupdf.open()
+          body = ('这是用于发布形态自检的正文段落,长度足够让检测器判定为文字页。' * 6)
+          for i in range(2):
+              page = doc.new_page()
+              page.insert_text((72, 100), f'Chapter {i+1}', fontsize=18)
+              page.insert_textbox(pymupdf.Rect(72, 130, 500, 700), body, fontsize=11)
+          doc.save('smoke.pdf')
+          "@
+          New-Item -ItemType Directory -Force -Path smoke_pkg | Out-Null
+          Copy-Item -Recurse dist_ci/cli smoke_pkg/cli
+          Copy-Item -Recurse config smoke_pkg/config
+          Copy-Item desktop/src-tauri/target/release/desktop.exe smoke_pkg/pdf2epub.exe
+          ./smoke_pkg/cli/cli.exe --help
+          ./smoke_pkg/cli/cli.exe smoke.pdf -o smoke_out
+          uv run python scripts/verify_epub.py smoke_out/smoke.epub
