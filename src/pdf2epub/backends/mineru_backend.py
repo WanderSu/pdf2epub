@@ -32,14 +32,12 @@ import requests
 
 import pdf2epub.events as events
 from pdf2epub.markdown.footnotes import load_content_list, reconstruct_footnotes
-from pdf2epub.net import DEFAULT_TIMEOUT as HTTP_TIMEOUT
 from pdf2epub.net import MAX_ZIP_BYTES, download_to
-from pdf2epub.paths import load_api_key, redact_secret
+from pdf2epub.paths import load_api_key
 
 from .base import (
     VARIANT_ORIGINAL,
     Backend,
-    BackendError,
     ConversionResult,
     OcrPart,
     PartStore,
@@ -49,6 +47,11 @@ from .base import (
     normalize_image_refs,
     params_fingerprint,
     rendered_variant,
+)
+from .mineru_http import (
+    DEFAULT_BASE_URL,
+    MinerUClient,
+    MinerUError,
 )
 from .mineru_package import (
     CONTENT_LIST_FILE,
@@ -60,7 +63,6 @@ from .mineru_package import (
 from .mineru_parts import build_page_ranges, plan_parts, target_name
 from .safe_zip import UnsafeArchiveError
 
-DEFAULT_BASE_URL = "https://mineru.net/api/v4"
 DEFAULT_TIMEOUT = 600      # 轮询总超时(秒)
 POLL_INTERVAL = 5          # 轮询间隔(秒)
 MAX_PAGES_PER_TASK = 200   # MinerU 官方单任务页数上限;超过自动按 page_ranges 分片
@@ -74,36 +76,6 @@ STATE_LABELS = {
     "done": "完成",
     "failed": "失败",
 }
-
-#: 客户端类 HTTP 状态码:认证/参数/配额问题,重试改变不了结果,只会重复消耗额度
-NON_RETRYABLE_HTTP = {400, 401, 403, 404, 405, 409, 413, 422, 429}
-
-
-def _category_for_status(status: int) -> str:
-    """HTTP 状态码 → 粗分类(只用于展示;要不要重试仍看 ``retryable``)。"""
-    if status in (401, 403):
-        return "auth"
-    if status == 429:
-        return "quota"
-    if status in (400, 404, 405, 409, 413, 422):
-        return "param"
-    if status >= 500:
-        return "network"
-    return "unknown"
-
-
-class MinerUError(BackendError):
-    """MinerU API 错误。
-
-    err_msg 是**云端返回的原始错误信息**:降级判定只看它,不看我们自己拼的中文前缀 ——
-    否则 `MinerU 解析失败: xxx` 这类消息会让任何失败都被误判成「解析失败」而触发
-    渲染纯图重试(白跑一轮、重复消耗额度)。
-    """
-
-    def __init__(self, message: str, *, err_msg: str | None = None,
-                 retryable: bool | None = None, category: str | None = None) -> None:
-        super().__init__(message, retryable=retryable, category=category)
-        self.err_msg = message if err_msg is None else err_msg
 
 
 def _is_parse_failure(err_msg: str) -> bool:
@@ -128,6 +100,7 @@ class MinerUAdapter(Backend):
         max_pages_per_task: int = MAX_PAGES_PER_TASK,
         resume: bool = True,
     ) -> None:
+        # 凭证顺序:显式参数 → 环境变量 → apikey.json;读取值不打印、不进日志
         self.token = (
             token
             or os.environ.get("MINERU_API_TOKEN", "")
@@ -152,41 +125,19 @@ class MinerUAdapter(Backend):
         self.resume = resume
 
     # ---------- HTTP 基础 ----------
-    @property
-    def _headers(self) -> dict:
-        return {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.token}",
-        }
+    def _client(self) -> MinerUClient:
+        """每次用当前模块属性构造:测试把 ``requests`` 换成假云端后立即生效。"""
+        return MinerUClient(self.token, getattr(self, "base_url", DEFAULT_BASE_URL),
+                            session=requests)
 
     def _post_json(self, path: str, payload: dict) -> dict:
-        resp = requests.post(f"{self.base_url}{path}", headers=self._headers, json=payload,
-                             timeout=HTTP_TIMEOUT)
-        return self._parse(resp)
+        return self._client().post_json(path, payload)
 
     def _get_json(self, path: str) -> dict:
-        resp = requests.get(f"{self.base_url}{path}", headers=self._headers, timeout=HTTP_TIMEOUT)
-        return self._parse(resp)
+        return self._client().get_json(path)
 
     def _parse(self, resp: requests.Response) -> dict:
-        # 消息可能被写进日志/事件/界面:所有来自云端或本地拼装的文本都先抹掉自身 Token
-        if resp.status_code != 200:
-            raise MinerUError(
-                redact_secret(f"HTTP {resp.status_code}: {resp.text[:300]}", self.token),
-                retryable=resp.status_code not in NON_RETRYABLE_HTTP,
-                category=_category_for_status(resp.status_code),
-            )
-        data = resp.json()
-        if data.get("code") != 0:
-            # API 层判定的错误(参数/配额/权限):重试无意义
-            raise MinerUError(
-                redact_secret(
-                    f"API 错误 code={data.get('code')} msg={data.get('msg')}", self.token
-                ),
-                retryable=False,
-                category="param",
-            )
-        return data
+        return self._client().parse(resp)
 
     # ---------- 核心流程 ----------
     def convert(self, pdf_path: str | Path, work_dir: str | Path) -> ConversionResult:
@@ -478,17 +429,9 @@ class MinerUAdapter(Backend):
             raise MinerUError(f"上传 URL 数量不符: 期望 {len(files)}, 实际 {len(file_urls)}")
 
         # PUT 上传(官方要求不设置 Content-Type);分片时同一文件上传到每个条目 URL
+        client = self._client()
         for url in file_urls:
-            with open(pdf_path, "rb") as f:
-                resp = requests.put(url, data=f, timeout=HTTP_TIMEOUT)
-            if resp.status_code not in (200, 201):
-                raise MinerUError(
-                    redact_secret(
-                        f"文件上传失败 HTTP {resp.status_code}: {resp.text[:200]}", self.token
-                    ),
-                    retryable=resp.status_code not in NON_RETRYABLE_HTTP,
-                    category=_category_for_status(resp.status_code),
-                )
+            client.upload_file(url, pdf_path)
         print(f"[mineru] 上传成功: {pdf_path.name} (×{len(file_urls)})")
         return batch_id
 
