@@ -171,6 +171,19 @@ def reconstruct_footnotes_in(md_text: str, blocks: list[dict]) -> tuple[str, dic
     return result.md, result.stats
 
 
+def _category_for_status(status: int) -> str:
+    """HTTP 状态码 → 粗分类(只用于展示;要不要重试仍看 ``retryable``)。"""
+    if status in (401, 403):
+        return "auth"
+    if status == 429:
+        return "quota"
+    if status in (400, 404, 405, 409, 413, 422):
+        return "param"
+    if status >= 500:
+        return "network"
+    return "unknown"
+
+
 class PaddleOCRError(BackendError):
     """PaddleOCR-VL API 错误。"""
 
@@ -205,6 +218,7 @@ class PaddleOCRAdapter(Backend):
             raise PaddleOCRError(
                 "缺少 PaddleOCR-VL Token:请设置环境变量 PADDLEOCR_TOKEN 或项目根目录 apikey.json",
                 retryable=False,
+                category="auth",
             )
         self.use_chart_recognition = use_chart_recognition
         self.use_doc_orientation_classify = use_doc_orientation_classify
@@ -241,7 +255,7 @@ class PaddleOCRAdapter(Backend):
         pdf_path = Path(pdf_path)
         work_dir = Path(work_dir)
         if not pdf_path.exists():
-            raise PaddleOCRError(f"文件不存在: {pdf_path}", retryable=False)
+            raise PaddleOCRError(f"文件不存在: {pdf_path}", retryable=False, category="input")
 
         cache = TaskCache(work_dir, PaddleOCRAdapter.name)
         params_fp = self._params_fp()
@@ -417,6 +431,7 @@ class PaddleOCRAdapter(Backend):
             raise PaddleOCRError(
                 redact_secret(f"提交失败 HTTP {resp.status_code}: {resp.text[:300]}", self.token),
                 retryable=resp.status_code not in NON_RETRYABLE_HTTP,
+                category=_category_for_status(resp.status_code),
             )
         job_id = resp.json().get("data", {}).get("jobId")
         if not job_id:
@@ -435,6 +450,7 @@ class PaddleOCRAdapter(Backend):
                 raise PaddleOCRError(
                     redact_secret(f"查询失败 HTTP {resp.status_code}: {resp.text[:300]}", self.token),
                     retryable=resp.status_code not in NON_RETRYABLE_HTTP,
+                    category=_category_for_status(resp.status_code),
                 )
             data = resp.json().get("data", {})
             state = data.get("state")
@@ -445,6 +461,7 @@ class PaddleOCRAdapter(Backend):
                 raise PaddleOCRError(
                     f"PaddleOCR 解析失败: {data.get('errorMsg', '未知错误')}",
                     retryable=False,
+                    category="cloud",
                 )
             progress = data.get("extractProgress") or {}
             detail = ""
@@ -453,7 +470,7 @@ class PaddleOCRAdapter(Backend):
             print(f"[paddleocr] {STATE_LABELS.get(state, state)}{detail} ...")
             time.sleep(self.poll_interval)
         # 超时可重试:jobId 还在缓存里,重跑继续轮询同一个任务,不重新上传
-        raise PaddleOCRError(f"轮询超时({self.timeout}s), jobId={job_id}")
+        raise PaddleOCRError(f"轮询超时({self.timeout}s), jobId={job_id}", category="network")
 
     def _download_result(self, data: dict, work_dir: Path, job_id: str
                          ) -> tuple[ConversionResult, list[dict]]:
@@ -464,7 +481,7 @@ class PaddleOCRAdapter(Backend):
         """
         jsonl_url = (data.get("resultUrl") or {}).get("jsonUrl")
         if not jsonl_url:
-            raise PaddleOCRError("结果中缺少 jsonUrl")
+            raise PaddleOCRError("结果中缺少 jsonUrl", category="cloud")
 
         # 统一下载保护:两段超时 + 体积上限(见 pdf2epub.net)
         payload = read_bytes(jsonl_url, max_bytes=MAX_JSON_BYTES, session=requests)

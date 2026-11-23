@@ -169,20 +169,31 @@ class TaskCache:
 # ---------- 失败分类:哪些错误重试是有意义的 ----------
 
 
+#: 错误分类(给日志/事件用的粗粒度标签,不参与重试判定 —— 那是 ``retryable`` 的活)。
+#: 分类的意义:用户看到的不再是笼统的「失败」,而是能直接照着做的方向
+#: (换 Token / 等额度 / 改参数 / 换输入文件 / 装依赖 / 稍后重试)。
+ERROR_CATEGORIES = ("auth", "quota", "param", "input", "dependency", "network", "cloud", "unknown")
+
+
 class BackendError(RuntimeError):
     """后端错误基类。
 
     ``retryable`` 是这套错误最要紧的信息:批处理按它决定「再跑一次」还是「当场判死」。
     重试一个认证失败/参数错误/配额用尽的书只是白跑一轮,扫描书还会重复消耗云端额度,
     所以这类错误必须显式标成不可重试;网络抖动、轮询超时才是可重试的。
+
+    ``category`` 只用于展示与日志(取值见 :data:`ERROR_CATEGORIES`),默认 ``unknown``;
+    它与 ``retryable`` 互相独立 —— 例如配额用尽不可重试,但不是认证问题。
     """
 
     retryable = True
 
-    def __init__(self, message: str, *, retryable: bool | None = None) -> None:
+    def __init__(self, message: str, *, retryable: bool | None = None,
+                 category: str | None = None) -> None:
         super().__init__(message)
         if retryable is not None:
             self.retryable = retryable
+        self.category = category or "unknown"
 
 
 def is_retryable(error: BaseException) -> bool:
