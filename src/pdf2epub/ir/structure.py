@@ -83,6 +83,17 @@ _TOC_TAIL_RE = re.compile(
     r"(?P<page>[0-9]{1,4}|[ivxlcdmIVXLCDM]{1,7})[ \t]*$"
 )
 
+#: 目录条目里「标题」与「作者/页码」之间的引线:目录常印成「标题……作者 页码」。
+#: 只认「标题……页码」时,整页带作者列的目录一条都读不出来 —— 目录权威于是整条失效
+#: (实测一本短篇集:目次 21 条一条没认出来,作者名与裸编号全成了章)。
+_TOC_LEADER_RE = re.compile(r"[ \t]*(?:[/／]|\.{2,}|…+|·{2,})[ \t]*")
+
+#: 目录条目行尾的页码
+_TOC_PAGE_RE = re.compile(r"(?P<page>[0-9]{1,4})[ \t]*$")
+
+#: 裸编号:整行只有一个数字或一个中文数字(短文里的「一」「二」「六」,不是章名)
+_BARE_NUMBER_RE = re.compile(r"^[0-9〇零一二三四五六七八九十百千]{1,3}$")
+
 #: 全角标点折叠成 ASCII:目录页与正文常常一份全角一份半角(``附录：`` vs ``附录:``)
 _PUNCT_FOLD = str.maketrans({
     "：": ":", "，": ",", "。": ".", "、": ",", "；": ";", "！": "!",
@@ -143,17 +154,20 @@ def _sentence_like(text: str) -> bool:
 
 
 def _never_a_title(text: str) -> bool:
-    """两种「几乎不可能是章标题」的形态:整句引语、裸数字。
+    """三种「几乎不可能是章标题」的形态:整句引语、裸数字、不含任何文字符号。
 
     即使证据层自己标成 heading 也算不上:后端版面模型把强调句、对白判成标题是常见
-    误判,而它们出现在导航里比「标题少一条」更刺眼。
+    误判,而它们出现在导航里比「标题少一条」更刺眼。第三种是纯标点行(实测 OCR 把
+    一页里的 ``=`` 标成了标题),它连一个字都没有,谈不上是章名。
     """
     norm = _norm(text)
     if not norm:
         return True
     if norm.isdigit() and len(norm) <= 3:
         return True
-    return norm[0] in "\"“‘「『" and norm[-1] in "\"”’」』"
+    if norm[0] in "\"“‘「『" and norm[-1] in "\"”’」』":
+        return True
+    return re.search(r"[^\W_]", norm) is None
 
 
 def _impossible_title(text: str) -> bool:
@@ -269,18 +283,85 @@ def _title_like(block: Block) -> bool:
     return True
 
 
-def _toc_titles(lines: Sequence[str]) -> dict[str, _Title]:
-    """目录页 → 标题候选。
+def _parse_toc_line(line: str) -> tuple[str, str, str] | None:
+    """目录条目行 → ``(标题, 作者, 页码)``;不是条目时返回 ``None``。
+
+    三种形态都要认(都是排版写明的列,不是猜的):
+
+    - ``标题 …… 35`` / ``标题 / 35``;
+    - ``标题 …… 作者 35``:目录带作者列,实测扫描书每行都是「沉船礁……齐平 3」;
+    - ``标题 作者  35``(裸空格分隔,弱形式):由 ``_is_catalog_entry`` 把关。
+
+    标题取**第一个引线之前**的文字,作者取引线与页码之间的文字 —— 少了这一步,
+    带作者列的目录整页都读不出来,「目录是权威」也就无从谈起。
+    """
+    s = line.strip()
+    if not s or not _is_catalog_entry(s):
+        return None
+    m = _TOC_PAGE_RE.search(s)
+    if not m:
+        return None
+    head = s[: m.start()].strip()
+    if not head:
+        return None
+    lead = _TOC_LEADER_RE.search(head)
+    if lead is None:
+        # 弱形式(只有裸空格):标题与作者列分不开,只认标题 —— 硬切会把
+        # 「第一章 绪论 35」切成标题「第一章」、作者「绪论」
+        return head, "", m.group("page")
+    title = head[: lead.start()].strip()
+    author = head[lead.end():].strip().strip("()（）[]【】")
+    if not title:
+        return None
+    return title, author, m.group("page")
+
+
+def _author_keys(author: str) -> set[str]:
+    """作者栏 → 比对键集合(多个名字用空格/顿号分开时逐个记)。"""
+    keys = {_key(part) for part in re.split(r"[\s、,，/]+", author or "")}
+    keys.add(_key(author or ""))
+    keys.discard("")
+    return keys
+
+
+def _same_name(a: str, b: str) -> bool:
+    """两个**人名**是否同名;三字以上允许一个字不同(OCR 形近字)。"""
+    if a == b:
+        return True
+    if len(a) < 3 or len(a) != len(b):
+        return False
+    return sum(1 for x, y in zip(a, b, strict=True) if x != y) <= 1
+
+
+def _byline_like(text: str, authors: set[str]) -> bool:
+    """这个「标题」其实是目录作者栏里的那个人名。
+
+    目录带作者列时,后端常把署名行也标成 heading(实测一本短篇集:每篇的作者名都
+    成了一个章)。判据只有一条:它就是目录作者栏里的名字 —— 不靠「短、没标点」
+    这类形态猜,免得把真正的短篇名(「在大路上」)一起删掉。
+    """
+    key = _key(text)
+    if not key or not authors:
+        return False
+    return any(_same_name(key, author) for author in authors)
+
+
+def _toc_titles(lines: Sequence[str]) -> tuple[dict[str, _Title], set[str]]:
+    """目录页 → ``(标题候选, 作者键集合)``。
 
     只认**连续 ≥3 行**且每行都是「标题 + 页码」的块:单行 ``…/35`` 可能是正文里的
-    引用,连续三行以上才是目录。
+    引用,连续三行以上才是目录。作者键只从这些确认过的条目里取 —— 没成块的「标题
+    作者 页码」不当目录,自然也不该拿它的中间那截去删署名。
     """
     found: dict[str, _Title] = {}
-    run: list[tuple[str, str]] = []
+    authors: set[str] = set()
+    run: list[tuple[str, str, str]] = []
 
     def flush() -> None:
-        for title, page in run:
-            key = _key(title)
+        for title, author, page in run:
+            if author:
+                authors.update(_author_keys(author))
+            key = _title_key(title)
             if not _norm(title) or key in found:
                 continue
             page_no = int(page) if page.isdigit() else None
@@ -291,9 +372,9 @@ def _toc_titles(lines: Sequence[str]) -> dict[str, _Title]:
         s = line.strip()
         if not s:
             continue
-        m = _TOC_TAIL_RE.search(s)
-        if m and _is_catalog_entry(s):
-            run.append((s[: m.start()].strip(), m.group("page")))
+        parsed = _parse_toc_line(s)
+        if parsed is not None:
+            run.append(parsed)
         else:
             if len(run) >= _TOC_MIN_RUN:
                 flush()
@@ -301,8 +382,54 @@ def _toc_titles(lines: Sequence[str]) -> dict[str, _Title]:
                 run.clear()
     if len(run) >= _TOC_MIN_RUN:
         flush()
-    return found
 
+    return found, authors
+
+
+def _adopt_gap_headings(lines: list[str], toc: dict[str, _Title],
+                        toc_keys: set[str], struct_keys: set[str]) -> dict[str, str]:
+    """按**目录顺序**补认「字形变了但位置对得上」的章标题,返回补认到的目录键。
+
+    为什么需要:OCR 会把同一本书排成繁简/异体两套字(目录印「巡线工」「骏马飞驰」
+    正文却是「巡 綫 工」「駿馬飞馳」),按文字比对永远配不上 —— 于是真章标题被降成
+    小节,挂在上一篇底下(实测一本短篇集:两篇丢章,导航层级也跟着错)。
+
+    判据只有位置:目录顺序 = 阅读顺序。目录里前后两条都找到了落点,中间**恰好**只
+    剩一个标题时,它就是这条目录对应的章;剩 0 个或 2 个以上都不猜。
+    """
+    order = list(toc)
+    pos_of: dict[str, int] = {}
+    for pos, line in enumerate(lines):
+        m = _HEADING_RE.match(line)
+        if not m:
+            continue
+        key = _title_key(m.group(2))
+        if key in toc_keys:
+            pos_of.setdefault(key, pos)
+    adopted: dict[str, str] = {}          # 目录键 → 正文里那个字形不同的标题键
+    for i, key in enumerate(order):
+        if key in pos_of:
+            continue
+        lo = next((pos_of[order[j]] for j in range(i - 1, -1, -1)
+                   if order[j] in pos_of), -1)
+        hi = next((pos_of[order[j]] for j in range(i + 1, len(order))
+                   if order[j] in pos_of), len(lines))
+        cands: list[int] = []
+        for pos in range(lo + 1, hi):
+            m = _HEADING_RE.match(lines[pos])
+            if not m:
+                continue
+            other = _title_key(m.group(2))
+            if other in toc_keys or other in struct_keys:
+                continue
+            cands.append(pos)
+        if len(cands) != 1:
+            continue
+        text = _HEADING_RE.match(lines[cands[0]]).group(2).strip()
+        lines[cands[0]] = f"# {text}"        # 章级:小节与章在同一个 xhtml 里分不开
+        pos_of[key] = cands[0]
+        adopted[key] = _title_key(text)
+    return adopted
 
 def _dedupe_chapter_numbers(titles: dict[str, _Title], toc_keys: set[str]) -> None:
     """同一章号只留一个标题(OCR 会把书眉认成不同的字,如「第一章 托神」/「托襟」)。
@@ -465,8 +592,9 @@ def restore_headings(md: str, evidence: Sequence[Block], *,
         return md, ()
 
     lines = md.split("\n")
-    toc = _toc_titles(lines)
+    toc, toc_authors = _toc_titles(lines)
     toc_keys = set(toc)
+    toc_authoritative = len(toc_keys) >= _MIN_TITLE_SOURCES
     ev_titles, mid_page, running_heads = _index_evidence(evidence, toc_keys)
     hint_key = _key(title_hint) if title_hint else ""
 
@@ -576,13 +704,25 @@ def restore_headings(md: str, evidence: Sequence[Block], *,
             key = _title_key(text)
             if key in toc_keys:
                 continue                       # 目录点名 = 真章名,不降
+            if toc_authoritative and (
+                    key in struct_keys
+                    or _byline_like(text, toc_authors)
+                    or _BARE_NUMBER_RE.match(_norm(text)) is not None
+                    or text.rstrip().endswith(("：", ":"))):
+                # 目录是权威时,这四类"标题"都不是章:
+                #   目录页自己的标签(目次/目录)、目录作者栏里的人名(署名行)、
+                #   裸编号(短篇内部的一/二/六)、以冒号收尾的称呼或字段行。
+                # 实测一本短篇集:「目次」「齐平」「六」「八」「=」「負責同志：」
+                # 全都进了导航,与目次 21 条对不上。判据都来自目录或形态本身,
+                # 不做"短、没标点就删"的猜测。
+                lines[pos] = text
+                demoted.append(text[:24])
+                continue
             if (key in running_heads and key not in toc_keys
                     and pos != first_heading):
                 # 书眉上的文字被 md 写成了标题(实测:每页都印书名,后端把某一页的
                 # 书名标成了 heading)。它每页都有,不是章节标题。
                 lines[pos] = text
-                demoted.append(text[:24])
-                continue
                 demoted.append(text[:24])
                 continue
             if key in titles and not _never_a_title(text):
@@ -597,10 +737,35 @@ def restore_headings(md: str, evidence: Sequence[Block], *,
                 lines[pos] = text
                 demoted.append(text[:24])
 
+    adopted: dict[str, str] = {}
+    if toc_authoritative:
+        # 字形变了但位置对得上的章标题(繁简/异体),按目录顺序补认;必须在**降级之后**
+        # 跑:只有真标题(署名/裸编号已被降成正文)才剩下,窗口里才可能「恰好一个」。
+        adopted = _adopt_gap_headings(lines, toc, toc_keys, struct_keys)
+        for body_key in adopted.values():
+            text = next((ln.lstrip("#").strip() for ln in lines
+                         if (m := _HEADING_RE.match(ln))
+                         and _title_key(m.group(2)) == body_key), "")
+            titles[body_key] = _Title(body_key, text)   # 认作章:不再被降成小节
+        if adopted:
+            missing = [t for t in missing if _title_key(t) not in adopted]
+
+    if toc_authoritative and base:
+        # 目录之外的真标题是**章内小节**:统一降到章下面一级。它们仍是标题(小节名
+        # 是内容),但不再与章并列 —— 后端把每个小标题都标成一级时,导航里会排出一整
+        # 列与章同级的条目(实测:目次 21 条的书里出现 41 条)。
+        for pos, line in enumerate(lines):
+            m = _HEADING_RE.match(line)
+            if not m or _title_key(m.group(2)) in titles:
+                continue
+            if len(m.group(1)) <= base:
+                lines[pos] = "#" * min(6, base + 1) + " " + m.group(2)
+
     notes: list[str] = []
-    if inserted or promoted or demoted:
+    if inserted or promoted or demoted or adopted:
         notes.append(
             f"标题裁决:{len(titles)} 个标题来源,补回 {inserted} 个、提升 {promoted} 个、"
+            f"按目录顺序补认 {len(adopted)} 个、"
             f"降级 {len(demoted)} 个无出处标题"
             + (f"(如 {'、'.join(demoted[:3])})" if demoted else "")
         )

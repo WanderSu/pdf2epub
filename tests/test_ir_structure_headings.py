@@ -219,3 +219,116 @@ def test_heading_restore_shares_one_before_after_snapshot(tmp_path) -> None:
     assert outcome.report.stats.chars_after == len(outcome.md_after)
     if outcome.changed:                       # 写回的内容必须与报告里的 after 一致
         assert path.read_text(encoding="utf-8") == outcome.md_after
+
+
+# ---------------------------------------------------------------- 目录带作者列(短篇集实测形态)
+
+_TOC_WITH_AUTHOR = """\
+沉船礁……齐平 3
+两个班长……王世阁 34
+"鉄笔御史"……王杏元 166
+"""
+
+MD_WITH_AUTHOR = f"""\
+# 书名
+
+目次
+
+{_TOC_WITH_AUTHOR}
+# 沉船礁
+
+# 齐平
+
+副艦长楊亭山交完班,順着鉄梯輕快地下了指揮台,心里想着海上的臭咸魚味。
+
+## =
+
+# 两个班长
+
+梁柏林决定先走一步棋:在邓金正式被任命当班长之前,找他谈谈。
+
+## 六
+
+# "鉄笔御史"
+
+杏林村过去也叫三类村,怎么一轉眼就这样好呢？
+
+## 負責同志：
+
+# 別处的短篇
+
+这一篇不在目次里,只是章内的小节名被后端标成了标题。
+"""
+
+
+def _run_author_toc(md: str = MD_WITH_AUTHOR):
+    rows = _evidence(
+        ("header", "书名", 0),
+        ("text", "沉船礁", 1),
+        ("text", "齐平", 1),
+    )
+    ev = parse_evidence(rows, backend="mineru", part_id="book")
+    return restore_headings(md, ev)
+
+
+def test_toc_with_author_column_is_parsed() -> None:
+    """目录印成「标题……作者 页码」:作者列必须读出来,否则整页目录一条都认不出。"""
+    from pdf2epub.ir.structure import _parse_toc_line
+
+    assert _parse_toc_line("沉船礁……齐平 3") == ("沉船礁", "齐平", "3")
+    assert _parse_toc_line("第一章 绪论 35") == ("第一章 绪论", "", "35")
+    assert _parse_toc_line("这一行是正文,不是目录条目。") is None
+
+
+def test_toc_authors_are_not_chapters() -> None:
+    """目录作者栏里的人名成了标题 → 降回正文(实测每篇的署名都成了一个章)。"""
+    md, notes = _run_author_toc()
+    assert "\n齐平\n" in md and "# 齐平" not in md
+    assert any("降级" in n for n in notes)
+
+
+def test_bare_numbers_and_salutations_are_not_chapters() -> None:
+    """裸编号(「六」)、纯标点(「=」)、以冒号收尾的称呼行都不是章。"""
+    md, _ = _run_author_toc()
+    for fake in ("## 六", "# 六", "# =", "## 負責同志："):
+        assert fake not in md
+
+
+def test_toc_is_authority_for_non_listed_headings() -> None:
+    """目录是权威:目录之外的真标题降为章内小节(不再与章并列)。"""
+    md, _ = _run_author_toc()
+    heads = [ln for ln in md.split("\n") if ln.startswith("#")]
+    assert "## 別处的短篇" in heads
+    assert "# 別处的短篇" not in heads
+
+
+def test_chapter_with_variant_characters_is_adopted_by_toc_order() -> None:
+    """繁简/异体导致文字对不上时,按目录顺序补认(窗口里恰好一个标题才认)。
+
+    实测形态:目录印「巡线工」,正文 OCR 成「巡 綫 工」—— 文字比对永远配不上,
+    于是真章标题被降成小节、挂在上一篇底下。判据只有位置:目录前后两条都找到了
+    落点,中间恰好只剩一个标题,它就是这条目录对应的章。
+    """
+    md_in = """\
+沉船礁……齐平 3
+巡线工……刘安琪 86
+路考……张天民 102
+
+# 沉船礁
+
+正文开头足够长,可以当作锚点用,不是标题。
+
+# 巡 綫 工
+
+这一篇的正文也足够长,可以当作锚点用,不是标题。
+
+# 路 考
+
+第三篇正文同样足够长,可以当作锚点用,不是标题。
+"""
+    ev = parse_evidence(_evidence(("text", "与标题无关的一条正文", 0)),
+                        backend="mineru", part_id="book")
+    md, notes = restore_headings(md_in, ev)
+    heads = [ln for ln in md.split("\n") if ln.startswith("#")]
+    assert "# 巡 綫 工" in heads, "字形不同的章标题被降成了小节"
+    assert any("补认" in n for n in notes)
