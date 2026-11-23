@@ -132,6 +132,12 @@ def print_report(epub_path: Path, result: VerifyResult, extract_dir: Path | None
 
 
 def main() -> int:
+    # 与控制台编码无关地输出:非 UTF-8 终端下只降级字符,不抛异常
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, OSError, ValueError):
+            continue
     parser = argparse.ArgumentParser(description="pdf2epub EPUB 验证")
     parser.add_argument("epub", type=Path)
     parser.add_argument("--extract-dir", type=Path, default=None)

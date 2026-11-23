@@ -60,11 +60,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    # stdout 被桌面端管道捕获时默认块缓冲,进度日志不实时;强制行缓冲
-    try:
-        sys.stdout.reconfigure(line_buffering=True)
-    except (AttributeError, OSError):
-        pass
+    # stdout 被桌面端管道捕获时默认块缓冲,进度日志不实时;强制行缓冲。
+    # errors="replace":控制台编码可能不是 UTF-8(cp1252 / cp936),日志里的 → ↗ ✓
+    # 这类字符会让 print 抛 UnicodeEncodeError —— 冻结成 exe 后尤其明显(不认
+    # PYTHONUTF8),一次输出就能把整次转换打死。宁可降级成 ?。
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(line_buffering=True, errors="replace")
+        except (AttributeError, OSError, ValueError):
+            continue
     args = build_parser().parse_args(argv)
 
     # --json-events:stdout 只留给 JSON 事件,人类可读输出(print)改走 stderr。
