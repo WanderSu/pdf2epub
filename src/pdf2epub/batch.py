@@ -29,6 +29,12 @@ from datetime import datetime
 from pathlib import Path
 
 from pdf2epub.backends import get_backend
+from pdf2epub.taskrun import (
+    BatchSummary,
+    TaskResult,
+    retry_delay,
+    run_with_retries,
+)
 from pdf2epub.artifacts import (
     FAILED_OUTPUT_SUFFIX,
     discard_failed_output,
@@ -152,18 +158,6 @@ def parse_title_author(stem: str) -> tuple[str, str | None]:
         if len(title) >= 2 and author:
             return title, author
     return stem, None
-
-
-@dataclass
-class TaskResult:
-    source: Path
-    status: str = "pending"   # done / skipped / failed / pending
-    backend: str = ""
-    pdf_type: str = ""
-    error: str = ""
-    elapsed: float = 0.0
-    epub: Path | None = None
-    verify: str = ""          # 结构校验摘要,如 "0 失败 0 警告"
 
 
 #: 目录递归时的排除清单:产物/环境/工程目录里的 .md/.pdf 不是「用户要转的书」
@@ -366,56 +360,22 @@ def process_one(
                 before_output=before_output, backup=previous_backup,
             )
 
-        attempt = 0
-        last_error: Exception | None = None
-        while attempt <= retries:
-            attempt += 1
-            try:
-                if source.suffix.lower() == ".md":
-                    result.backend, result.pdf_type = "markdown", "markdown"
-                    result = _process_markdown(source, work_root, output_dir, t0, result,
-                                               safe_stem, out_epub.stem, clean_options, strict,
-                                               lang_override)
-                else:
-                    result = _process_pdf(source, config, work_root, output_dir,
-                                          backend_override, t0, result, safe_stem, out_epub.stem,
-                                          clean_options, strict, lang_override)
-                result.status = "done"
-                return result
-            except VerifyError as e:
-                # 校验失败是确定性结果:重试只会重复整条链路(含云端 OCR 额度),直接判失败
-                last_error = e
-                break
-            except PandocMissingError as e:
-                # 环境缺失(如运行中 PATH 变了)同样是确定性失败,重试只是再撞一次墙
-                last_error = e
-                break
-            except CleanEngineError as e:
-                # 清理是确定性的(同一份 md + 同一份证据必然同样结果),重试只会
-                # 重复整条链路(含云端 OCR 额度);而且清理失败就意味着产物不可信,
-                # 必须判失败 —— 不静默降级成"没清理就出书"
-                logger.error("清理失败(IR 引擎),不再重试: %s", e)
-                last_error = e
-                break
-            except Exception as e:  # noqa: BLE001 - 批处理需兜住所有失败
-                last_error = e
-                # 兜底分支也要留栈:否则只有一句 str(e),排查时不知道是哪个环节抛的。
-                # 用 debug 级别 —— 可重试的失败会打很多次,info 日志不该被栈刷满。
-                logger.debug("第 %d 次尝试异常堆栈", attempt, exc_info=True)
-                # 后端会明确标注「确定性失败」(认证/参数/配额/输入文件错误/云端任务判死):
-                # 这类错误重试改变不了结果,扫描书还会重复上传、重复消耗额度
-                if not is_retryable(e):
-                    logger.error("不可重试的失败,不再重试: %s", e)
-                    break
-                logger.warning("第 %d 次尝试失败(%s): %s", attempt, source.name, e)
-                if attempt <= retries:
-                    sleep = 2 ** attempt
-                    # 重试对用户可见(否则「卡住不动」与「正在重试」在界面上无法区分)
-                    events.emit("retry", attempt=attempt, retries=retries, wait=sleep,
-                                message=str(e), file=source.name)
-                    logger.info("  %ds 后重试...", sleep)
-                    time.sleep(sleep)
+        def _run_once() -> TaskResult:
+            if source.suffix.lower() == ".md":
+                result.backend, result.pdf_type = "markdown", "markdown"
+                return _process_markdown(source, work_root, output_dir, t0, result,
+                                       safe_stem, out_epub.stem, clean_options, strict,
+                                       lang_override)
+            return _process_pdf(source, config, work_root, output_dir,
+                                backend_override, t0, result, safe_stem, out_epub.stem,
+                                clean_options, strict, lang_override)
 
+        outcome, last_error = run_with_retries(
+            _run_once, retries=retries, file_label=source.name, logger=logger,
+            deterministic=(VerifyError, CleanEngineError, PandocMissingError),
+        )
+        if outcome is not None:
+            return outcome
         code = ("verify_failed" if isinstance(last_error, VerifyError)
                 else "missing_dependency" if isinstance(last_error, PandocMissingError)
                 else "pandoc_error" if isinstance(last_error, PandocError)
@@ -722,10 +682,6 @@ def process_batch(
         ))
 
     # 汇总
-    done = sum(1 for r in results if r.status == "done")
-    skipped = sum(1 for r in results if r.status == "skipped")
-    failed = sum(1 for r in results if r.status == "failed")
-    total_s = sum(r.elapsed for r in results)
     checked = [r for r in results if r.verify]
     if checked:
         # 校验摘要:有 error 的条目单独列出(便于 --strict 时定位)
@@ -733,8 +689,10 @@ def process_batch(
         logger.info("结构校验: %d 个 EPUB, %d 个存在失败项", len(checked), len(bad))
         for r in bad:
             logger.warning("  ⚠ %s: %s", r.source.name, r.verify)
+    summary = BatchSummary.of(results)
     logger.info("批处理完成: 共 %d, 成功 %d, 跳过 %d, 失败 %d, 总耗时 %.1fs",
-                len(results), done, skipped, failed, total_s)
+                summary.total, summary.done, summary.skipped, summary.failed,
+                summary.seconds)
     return results
 
 

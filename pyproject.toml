@@ -43,6 +43,7 @@ include = [
     "src/pdf2epub/net.py",
     "src/pdf2epub/paths.py",
     "src/pdf2epub/artifacts.py",
+    "src/pdf2epub/taskrun.py",
     "src/pdf2epub/backends/*.py",
     "tests/test_mineru_parts.py",
     "tests/test_mineru_http.py",
@@ -52,6 +53,7 @@ include = [
     "tests/test_mineru_zip_guard.py",
     "tests/test_credentials.py",
     "tests/test_artifacts.py",
+    "tests/test_taskrun.py",
     "tests/test_error_categories.py",
     "tests/test_console_encoding.py",
 ]
