@@ -13,9 +13,11 @@ from pathlib import Path
 
 import pymupdf4llm
 
-from .base import Backend, ConversionResult, normalize_image_refs
 from pdf2epub.markdown.bold import annotate_bold
 from pdf2epub.page_result import PageResult
+
+from .base import Backend, ConversionResult, normalize_image_refs
+
 IMAGES_DIR = "images"
 
 

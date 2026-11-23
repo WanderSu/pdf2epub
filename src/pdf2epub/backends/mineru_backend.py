@@ -28,29 +28,32 @@ import shutil
 import time
 from pathlib import Path
 
-import requests
 import pymupdf
+import requests
+
+import pdf2epub.events as events
+from pdf2epub.markdown.footnotes import load_content_list, reconstruct_footnotes
+from pdf2epub.net import DEFAULT_TIMEOUT as HTTP_TIMEOUT
+from pdf2epub.net import MAX_ZIP_BYTES, download_to
+from pdf2epub.page_result import page_marker_from_range
+from pdf2epub.paths import load_api_key, redact_secret
 
 from .base import (
+    VARIANT_ORIGINAL,
     Backend,
     BackendError,
     ConversionResult,
     OcrPart,
     PartStore,
     TaskCache,
-    VARIANT_ORIGINAL,
     _safe_part_name,
     file_fingerprint,
     normalize_image_refs,
     params_fingerprint,
     rendered_variant,
 )
-from pdf2epub.page_result import page_marker_from_range
-from pdf2epub.paths import load_api_key, redact_secret
-from pdf2epub.net import MAX_ZIP_BYTES, DEFAULT_TIMEOUT, download_to
-from pdf2epub.markdown.footnotes import load_content_list, reconstruct_footnotes
 from .safe_zip import UnsafeArchiveError, safe_extract
-import pdf2epub.events as events
+
 DEFAULT_BASE_URL = "https://mineru.net/api/v4"
 DEFAULT_TIMEOUT = 600      # 轮询总超时(秒)
 POLL_INTERVAL = 5          # 轮询间隔(秒)
@@ -138,11 +141,11 @@ class MinerUAdapter(Backend):
 
     def _post_json(self, path: str, payload: dict) -> dict:
         resp = requests.post(f"{self.base_url}{path}", headers=self._headers, json=payload,
-                             timeout=DEFAULT_TIMEOUT)
+                             timeout=HTTP_TIMEOUT)
         return self._parse(resp)
 
     def _get_json(self, path: str) -> dict:
-        resp = requests.get(f"{self.base_url}{path}", headers=self._headers, timeout=DEFAULT_TIMEOUT)
+        resp = requests.get(f"{self.base_url}{path}", headers=self._headers, timeout=HTTP_TIMEOUT)
         return self._parse(resp)
 
     def _parse(self, resp: requests.Response) -> dict:
@@ -378,13 +381,13 @@ class MinerUAdapter(Backend):
             batch_id=task_id, targets=targets, model_version=self.model_version,
             params_fp=params_fp,
             parts=[{"part_id": p.part_id, "idx": p.idx, "range": p.page_range, "target": t}
-                   for p, t in zip(missing, targets)],
+                   for p, t in zip(missing, targets, strict=False)],
         )
         if len(targets) > 1:
             events.emit("shards", total=len(targets),
                         ranges=[p.page_range for p in missing])
 
-        lookup = {t: p for p, t in zip(missing, targets)}
+        lookup = {t: p for p, t in zip(missing, targets, strict=False)}
         _done, failed = self._poll_batch(
             task_id, targets,
             on_done=lambda item: self._store_item(store, params_fp, variant,
@@ -473,7 +476,7 @@ class MinerUAdapter(Backend):
         # PUT 上传(官方要求不设置 Content-Type);分片时同一文件上传到每个条目 URL
         for url in file_urls:
             with open(pdf_path, "rb") as f:
-                resp = requests.put(url, data=f, timeout=DEFAULT_TIMEOUT)
+                resp = requests.put(url, data=f, timeout=HTTP_TIMEOUT)
             if resp.status_code not in (200, 201):
                 raise MinerUError(
                     redact_secret(

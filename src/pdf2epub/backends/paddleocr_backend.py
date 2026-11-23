@@ -34,15 +34,20 @@ import time
 from pathlib import Path
 
 import requests
-from pdf2epub.paths import redact_secret
+
+import pdf2epub.events as events
+from pdf2epub.markdown.footnotes import PAGE_BREAK_TYPE, load_content_list, reconstruct_footnotes
 from pdf2epub.net import (
-    DEFAULT_TIMEOUT,
+    DEFAULT_TIMEOUT as HTTP_TIMEOUT,
+)
+from pdf2epub.net import (
     MAX_IMAGE_BYTES,
     MAX_JSON_BYTES,
     DownloadError,
     download_to,
     read_bytes,
 )
+from pdf2epub.paths import load_api_key, redact_secret
 
 from .base import (
     Backend,
@@ -54,9 +59,7 @@ from .base import (
     normalize_image_refs,
     params_fingerprint,
 )
-from pdf2epub.paths import load_api_key
-from pdf2epub.markdown.footnotes import (PAGE_BREAK_TYPE, load_content_list,                                reconstruct_footnotes)
-import pdf2epub.events as events
+
 JOBS_URL = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
 MODEL = "PaddleOCR-VL-1.6"
 
@@ -374,7 +377,7 @@ class PaddleOCRAdapter(Backend):
         会让已提交的任务被重新上传、重新计费。
         """
         try:
-            resp = requests.get(f"{JOBS_URL}/{job_id}", headers=self._headers, timeout=DEFAULT_TIMEOUT)
+            resp = requests.get(f"{JOBS_URL}/{job_id}", headers=self._headers, timeout=HTTP_TIMEOUT)
         except requests.RequestException as e:
             raise PaddleOCRError(f"续跑探测失败({e}),保留缓存稍后重试") from e
         if resp.status_code != 200:
@@ -427,7 +430,7 @@ class PaddleOCRAdapter(Backend):
         """轮询任务状态,返回 data 字典(含 resultUrl)。"""
         start = time.time()
         while time.time() - start < self.timeout:
-            resp = requests.get(f"{JOBS_URL}/{job_id}", headers=self._headers, timeout=DEFAULT_TIMEOUT)
+            resp = requests.get(f"{JOBS_URL}/{job_id}", headers=self._headers, timeout=HTTP_TIMEOUT)
             if resp.status_code != 200:
                 raise PaddleOCRError(
                     redact_secret(f"查询失败 HTTP {resp.status_code}: {resp.text[:300]}", self.token),
@@ -531,7 +534,7 @@ class PaddleOCRAdapter(Backend):
         # 逐页拼接,同时记下每页的起始偏移 → 作为「页边界」块交给脚注层,
         # 页归属不再靠文本对齐去猜(重复页眉/页脚会把它带偏)
         md_text = ""
-        for page, part in zip(page_indices, pages_md):
+        for page, part in zip(page_indices, pages_md, strict=False):
             if md_text:
                 md_text += "\n\n"
             blocks.append({"type": PAGE_BREAK_TYPE, "page_idx": page, "offset": len(md_text)})

@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import shutil
-import stat
 import zipfile
 from pathlib import Path
 

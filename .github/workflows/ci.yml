@@ -35,6 +35,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends pandoc fonts-noto-cjk
 
+      # 只检查 pyproject 的 [tool.ruff] include 里那批路径(新增 + 核心模块):
+      # 存量代码按模块逐步并入,不在一次提交里格式化整个历史仓库
+      - name: Ruff
+        run: uvx ruff check
+
       - name: pytest
         run: uv run pytest -q
 

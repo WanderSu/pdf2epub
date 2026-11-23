@@ -8,9 +8,7 @@ from pathlib import Path
 import pytest
 
 from pdf2epub import paths
-from pdf2epub.backends import mineru_backend
 from pdf2epub.backends.mineru_backend import MinerUAdapter, MinerUError
-
 
 TOKEN = "sk-live-0123456789abcdef"
 

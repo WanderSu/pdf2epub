@@ -29,7 +29,7 @@ class _Resp:
     def iter_content(self, chunk_size: int = 1 << 16):
         yield from self._chunks
 
-    def __enter__(self) -> "_Resp":
+    def __enter__(self) -> _Resp:
         return self
 
     def __exit__(self, *exc) -> bool:

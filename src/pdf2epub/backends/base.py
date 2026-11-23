@@ -356,7 +356,7 @@ class PartStore:
     def images_dir(self, part_id: str) -> Path:
         return self.dir_for(part_id) / PART_IMAGES_DIR
 
-    def adopt(self, other: "PartStore", part_id: str, params_fp: str) -> bool:
+    def adopt(self, other: PartStore, part_id: str, params_fp: str) -> bool:
         """把**另一个变体**里同一段的有效结果收编到本变体,返回是否收编成功。
 
         只给「原文件解析失败 → 降级渲染纯图」这一条路用(见 mineru ``convert``):
