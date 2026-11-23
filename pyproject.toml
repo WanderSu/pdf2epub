@@ -31,3 +31,23 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+# ---- 静态检查(ratchet)
+# 历史代码尚未逐条清理,一次性全量开规则会带来几百处噪音、也容易在无关提交里
+# 改动大量历史行。这里先用 `include` 钉住"新增 + 核心"路径:**新代码必须过**,
+# 存量按模块逐步并入 include,而不是反过来给存量加一堆 ignore。
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+include = [
+    "src/pdf2epub/net.py",
+    "src/pdf2epub/paths.py",
+    "src/pdf2epub/backends/*.py",
+    "tests/test_net.py",
+    "tests/test_safe_zip.py",
+    "tests/test_mineru_zip_guard.py",
+    "tests/test_credentials.py",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]

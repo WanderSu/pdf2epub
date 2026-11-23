@@ -27,7 +27,7 @@ class _Resp:
         for i in range(0, len(self._content), chunk_size):
             yield self._content[i : i + chunk_size]
 
-    def __enter__(self) -> "_Resp":
+    def __enter__(self) -> _Resp:
         return self
 
     def __exit__(self, *exc) -> bool:
