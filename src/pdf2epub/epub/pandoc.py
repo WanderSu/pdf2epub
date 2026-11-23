@@ -251,6 +251,30 @@ def normalize_xhtml_voids(text: str) -> str:
     return "".join(parts)
 
 
+def drop_leading_page_marks(text: str) -> str:
+    """删掉**第一个标题之前**的页码注释(``<!-- page 3 -->``)。
+
+    pandoc 把「第一个标题之前的内容」单独写成一个 xhtml 文件:只含一条 HTML 注释
+    时,产物里就多出一个空章节 —— 阅读器先翻到一页空白,结构校验还会报「疑似空
+    章节」(实测:电子版 PDF 的第 1 页标题前有页码注释,成品首章是空的)。
+    页码注释在阅读器里本来就不可见,删掉不丢内容;正文中间的注释照留,它们标记页界。
+    """
+    lines = text.split("\n")
+    out: list[str] = []
+    in_fence = False
+    seen_heading = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(("```", "~~~")):
+            in_fence = not in_fence
+        elif not in_fence and HEADING_RE.match(line):
+            seen_heading = True
+        if not in_fence and not seen_heading and _PAGE_MARK_LINE_RE.match(stripped):
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
 def prepare_pandoc_markdown(text: str) -> str:
     """把 Markdown 归一化成「Pandoc 能写出合法 EPUB3」的形式(见模块 docstring)。"""
     return normalize_xhtml_voids(escape_pseudo_html(normalize_math_tags(text)))
@@ -272,6 +296,10 @@ def infer_title(book_md: Path, fallback: str | None = None) -> str:
 
 #: 标题行(`#{1,6} 文字`),用于算目录深度
 HEADING_RE = re.compile(r"^(#{1,6})\s+\S", re.MULTILINE)
+
+
+#: 独占一行的页码注释(格式由 page_result 定义)
+_PAGE_MARK_LINE_RE = re.compile(r"^<!--\s*page\s+[\d,\s-]+?(?:\s+[A-Za-z_]+)?\s*-->$")
 
 
 def heading_depth(text: str) -> int:
@@ -624,7 +652,7 @@ def build_epub(
     # 不就地改 book.md(它是内容对照的源),只在确有改动时写一份给 pandoc 用的副本。
     source_md = book_md
     md_text = book_md.read_text(encoding="utf-8", errors="replace")
-    prepared = prepare_pandoc_markdown(md_text)
+    prepared = drop_leading_page_marks(prepare_pandoc_markdown(md_text))
     if prepared != md_text:
         source_md = book_md.parent / f"{book_md.stem}.pandoc.md"
         source_md.write_text(prepared, encoding="utf-8")
