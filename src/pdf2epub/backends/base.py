@@ -12,6 +12,7 @@ import re
 import shutil
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -437,6 +438,11 @@ def normalize_image_refs(md: str, images_abs: Path, images_dir: str = "images") 
 #: 段缓存里附带的结构化结果(与 mineru/paddle 适配器写的同名)
 EVIDENCE_FILE = "content_list.json"
 
+#: 本地文字层后端(没有云端结果包)自带的证据层:``work_dir/evidence.json``。
+#: 形状与 ``content_list.json`` 相同(条目带 0-indexed ``page_idx``),区别只在于
+#: ``page_idx`` 已经是**整本**页码 —— 它由逐页提取直接生成,不存在段偏移。
+LOCAL_EVIDENCE_FILE = "evidence.json"
+
 
 @dataclass(frozen=True)
 class EvidenceBundle:
@@ -478,6 +484,54 @@ def _part_span(part_dir: Path, base_offset: int) -> tuple[int, int] | None:
     if not m:
         return None
     return base_offset + int(m.group(1)) - 1, int(m.group(2)) - int(m.group(1))
+
+
+def write_local_evidence(work_dir: str | Path, items: Sequence[dict], *,
+                         backend: str, total_pages: int = 0) -> Path:
+    """写出本地后端的证据层 ``work_dir/evidence.json``(形状同 ``content_list.json``)。
+
+    ``page_idx`` 直接是整本 0-indexed 页码 —— 本地后端逐页提取,不存在段偏移。
+    """
+    path = Path(work_dir) / LOCAL_EVIDENCE_FILE
+    payload = {
+        "schema": 1,
+        "backend": backend,
+        "total_pages": int(total_pages or 0),
+        "items": list(items),
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def _local_evidence(root: Path, wanted: str) -> EvidenceBundle | None:
+    """读本地后端写的 ``evidence.json``;没有 / 后端不符 / 读不动 → ``None``。
+
+    后端不符就不采用:同一个 ``work/<书>/`` 可能先后被不同后端写过,拿上一次的
+    证据去对齐这一次的正文,页号会整本错位。
+    """
+    path = root / LOCAL_EVIDENCE_FILE
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    got = str(data.get("backend") or "")
+    if wanted and got and got != wanted:
+        return None
+    items = data.get("items") or data.get("blocks") or data.get("content_list") or []
+    if not isinstance(items, list):
+        return None
+    keep = [dict(item) for item in items if isinstance(item, dict)]
+    if not keep:
+        return None
+    pages = [p for p in (_page_idx_of(it) for it in keep) if p is not None]
+    total = int(data.get("total_pages") or 0) or (max(pages) + 1 if pages else 0)
+    return EvidenceBundle(items=tuple(keep), total_pages=total,
+                          parts=(LOCAL_EVIDENCE_FILE,),
+                          note=f"本地证据层 {got or '未知后端'}")
 
 
 def collect_evidence(work_dir: str | Path, backend: str = "") -> EvidenceBundle:
@@ -529,6 +583,9 @@ def collect_evidence(work_dir: str | Path, backend: str = "") -> EvidenceBundle:
                 consider(child, int(nm.group(1)) - 1, f"{scan.name}/{child.name}")
 
     if not spans:
+        local = _local_evidence(root, wanted)
+        if local is not None:
+            return local
         return EvidenceBundle(note="没有段缓存或段里没有 content_list.json")
 
     items: list[dict] = []
