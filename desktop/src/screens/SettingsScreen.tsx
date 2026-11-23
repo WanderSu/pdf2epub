@@ -5,7 +5,7 @@ import { T, CLEAN_GROUPS, type Lang } from "../i18n";
 import { mergeCleanOpts } from "../format";
 import { Rule, Switch, Segment, RadioRow, ChapterHead, ToggleSwitch } from "../primitives";
 import {
-  CLEAN_KEYS, type BackendPref, type CleanKey, type CleanOpts, type EnvState,
+  CLEAN_KEYS, type AiSettings, type BackendPref, type CleanKey, type CleanOpts, type EnvState,
 } from "../types";
 
 // ── SETTINGS SCREEN(规范页)───────────────────────────────────────────────────
@@ -17,6 +17,7 @@ export interface SettingsSnapshot {
   cliPath: string;
   cleanOpts: CleanOpts;
   strictVerify: boolean;
+  aiSettings: AiSettings;
 }
 
 /* 以下三个组件必须是模块级定义:定义在 SettingsScreen 内部会在每次渲染时产生
@@ -110,7 +111,7 @@ function TokenRow({ lang, label, configured, pending, value, onChange, onClear }
 export function SettingsScreen({
   lang, setLang, darkMode, setDarkMode, backendPref, setBackendPref,
   outputDir, setOutputDir, cliPath, setCliPath, env,
-  cleanOpts, cleanBaseline, setCleanOpts, strictVerify, setStrictVerify, onInstallPandoc, onSave,
+  cleanOpts, cleanBaseline, setCleanOpts, strictVerify, setStrictVerify, aiSettings = { provider: "OpenAI", api_url: "https://api.openai.com/v1", model: "gpt-4.1-mini" }, setAiSettings = () => {}, onInstallPandoc, onSave,
 }: {
   lang: Lang;
   setLang: (l: Lang) => void;
@@ -128,6 +129,8 @@ export function SettingsScreen({
   cleanBaseline: Record<string, boolean>;
   setCleanOpts: (v: CleanOpts) => void;
   strictVerify: boolean;
+  aiSettings?: AiSettings;
+  setAiSettings?: (v: AiSettings) => void;
   /** pandoc 缺失时的一键下载(进度 overlay 由 App 渲染);成功返回 true */
   onInstallPandoc: () => Promise<boolean>;
   setStrictVerify: (v: boolean) => void;
@@ -137,6 +140,9 @@ export function SettingsScreen({
   const groups = CLEAN_GROUPS[lang];
   const [mineruToken, setMinerUToken] = useState("");
   const [paddleToken, setPaddleToken] = useState("");
+  const [aiToken, setAiToken] = useState("");
+  const [aiTest, setAiTest] = useState<string | null>(null);
+  const [aiTesting, setAiTesting] = useState(false);
   const [note, setNote] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -144,11 +150,11 @@ export function SettingsScreen({
   const [savedFlash, setSavedFlash] = useState(false);
 
   const snapRef = useRef<SettingsSnapshot>({
-    backendPref, outputDir, cliPath, cleanOpts: { ...cleanOpts }, strictVerify,
+    backendPref, outputDir, cliPath, cleanOpts: { ...cleanOpts }, strictVerify, aiSettings: { ...aiSettings },
   });
   const snap = snapRef.current;
   const snapshot = (): SettingsSnapshot => ({
-    backendPref, outputDir, cliPath, cleanOpts: { ...cleanOpts }, strictVerify,
+    backendPref, outputDir, cliPath, cleanOpts: { ...cleanOpts }, strictVerify, aiSettings: { ...aiSettings },
   });
   // 差异数:把开关拨回去就归零(不再是「操作次数」)
   const dirty =
@@ -156,10 +162,11 @@ export function SettingsScreen({
     (outputDir !== snap.outputDir ? 1 : 0) +
     (cliPath !== snap.cliPath ? 1 : 0) +
     (strictVerify !== snap.strictVerify ? 1 : 0) +
+    (JSON.stringify(aiSettings) !== JSON.stringify(snap.aiSettings) ? 1 : 0) +
     CLEAN_KEYS.reduce((n, k) => n + (cleanOpts[k] !== snap.cleanOpts[k] ? 1 : 0), 0);
   // 凭证是「写入式」字段:已输入但未保存也必须计入未保存,
   // 否则粘完密钥、别处没改动 → 未保存数为 0 → 底部保存栏根本不出现
-  const tokenPending = (mineruToken.trim() ? 1 : 0) + (paddleToken.trim() ? 1 : 0);
+  const tokenPending = (mineruToken.trim() ? 1 : 0) + (paddleToken.trim() ? 1 : 0) + (aiToken.trim() ? 1 : 0);
   const unsaved = dirty + tokenPending;
 
   const backendIndex = backendPref === "auto" ? 0 : backendPref === "mineru" ? 1 : 2;
@@ -172,8 +179,10 @@ export function SettingsScreen({
     setCliPath(snap.cliPath);
     setCleanOpts({ ...snap.cleanOpts });
     setStrictVerify(snap.strictVerify);
+    setAiSettings({ ...snap.aiSettings });
     setMinerUToken("");
     setPaddleToken("");
+    setAiToken("");
     setNote(null);
     setSavedFlash(false);
   };
@@ -183,10 +192,12 @@ export function SettingsScreen({
     const jobs: { service: string; token: string }[] = [];
     if (mineruToken.trim()) jobs.push({ service: "MinerU", token: mineruToken });
     if (paddleToken.trim()) jobs.push({ service: "PaddleOCR-VL", token: paddleToken });
+    if (aiToken.trim()) jobs.push({ service: "AI", token: aiToken });
     if (jobs.length === 0) return false;
     for (const j of jobs) await invoke<string>("save_apikey", { service: j.service, token: j.token });
     setMinerUToken("");
     setPaddleToken("");
+    setAiToken("");
     setNote(null);
     return true;
   };
@@ -198,6 +209,26 @@ export function SettingsScreen({
       onSave();
     } catch (e) {
       setNote(String(e));
+    }
+  };
+
+  /** 测试连接前先把刚粘贴、尚未点「保存设置」的密钥落盘，否则后端读不到它。
+   *  顺带刷新环境检查，让 CONFIGURED 状态立刻更新。 */
+  const testAi = async () => {
+    setAiTesting(true);
+    setAiTest(null);
+    try {
+      if (aiToken.trim()) {
+        await invoke<string>("save_apikey", { service: "AI", token: aiToken });
+        setAiToken("");
+        onSave();
+      }
+      const res = await invoke<string>("ai_test_connection", { apiUrl: aiSettings.api_url });
+      setAiTest(res);
+    } catch (e) {
+      setAiTest(String(e));
+    } finally {
+      setAiTesting(false);
     }
   };
 
@@ -451,6 +482,62 @@ export function SettingsScreen({
               onChange={v => setLang(v as Lang)}
             />
           </div>
+        </SectionCard>
+        <Rule />
+
+        {/* E: AI 优化（独立设置面板） */}
+        <SectionCard lang={lang} letter="E" title={t.sections[4]} summary={aiSettings.model}>
+          <div className={`text-[12px] text-[var(--muted-foreground)] mb-3 ${lang === "zh" ? "cjk" : ""}`}>{t.aiTitle}</div>
+          <FieldRow lang={lang} label={t.aiProvider}>
+            <select
+              value={aiSettings.provider === "自定义" ? "Custom" : aiSettings.provider}
+              onChange={e => {
+                const provider = e.target.value;
+                const presets: Record<string, Pick<AiSettings, "api_url" | "model">> = {
+                  OpenAI: { api_url: "https://api.openai.com/v1", model: "gpt-4.1-mini" },
+                  DeepSeek: { api_url: "https://api.deepseek.com/v1", model: "deepseek-chat" },
+                  OpenRouter: { api_url: "https://openrouter.ai/api/v1", model: "openai/gpt-4.1-mini" },
+                  DashScope: { api_url: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus" },
+                  Zhipu: { api_url: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4-flash" },
+                  Moonshot: { api_url: "https://api.moonshot.cn/v1", model: "moonshot-v1-8k" },
+                  Custom: { api_url: aiSettings.api_url, model: aiSettings.model },
+                };
+                setAiSettings({ provider, ...presets[provider] });
+              }}
+              className="flex-1 bg-transparent border-b border-[var(--border)] py-1 text-[12px] focus:outline-none selectable"
+            >
+              <option value="OpenAI">OpenAI</option>
+              <option value="DeepSeek">DeepSeek</option>
+              <option value="OpenRouter">OpenRouter</option>
+              <option value="DashScope">通义千问 / DashScope</option>
+              <option value="Zhipu">智谱 / Zhipu</option>
+              <option value="Moonshot">Moonshot / Kimi</option>
+              <option value="Custom">{t.aiCustom}</option>
+            </select>
+          </FieldRow>
+          <FieldRow lang={lang} label={t.aiApiUrl}>
+            <input value={aiSettings.api_url} onChange={e => setAiSettings({ ...aiSettings, api_url: e.target.value })}
+              placeholder="https://api.example.com/v1" spellCheck={false} autoComplete="off"
+              className="flex-1 bg-transparent border-b border-[var(--border)] font-mono text-[11px] py-1 focus:outline-none selectable" />
+          </FieldRow>
+          <FieldRow lang={lang} label={t.aiModel}>
+            <input value={aiSettings.model} onChange={e => setAiSettings({ ...aiSettings, model: e.target.value })}
+              placeholder={aiSettings.provider === "OpenRouter" ? "provider/model, e.g. openai/gpt-4.1-mini" : "gpt-4.1-mini"} spellCheck={false} autoComplete="off"
+              className="flex-1 bg-transparent border-b border-[var(--border)] font-mono text-[11px] py-1 focus:outline-none selectable" />
+          </FieldRow>
+          <div className="mt-4">
+            <TokenRow lang={lang} label={t.aiApiKey}
+              configured={env?.ai_configured ?? false} pending={aiToken.trim().length > 0}
+              value={aiToken} onChange={setAiToken} onClear={() => void clearCredential("AI")} />
+          </div>
+          <div className="flex items-center gap-3 mt-3">
+            <button onClick={() => void testAi()} disabled={aiTesting}
+              className="border border-[var(--border)] px-3 py-1 font-mono text-[10px] tracking-[0.08em] hover:border-[var(--foreground)] disabled:opacity-50">
+              {aiTesting ? t.aiTesting : t.aiTest}
+            </button>
+            {aiTest && <span className={`text-[10px] break-all ${aiTest.startsWith("连接成功") ? "text-[var(--ok)]" : "text-[var(--danger)]"}`}>{aiTest}</span>}
+          </div>
+          <p className={`text-[10px] leading-relaxed text-[var(--muted-foreground)] mt-3 ${lang === "zh" ? "cjk" : "font-mono"}`}>{t.aiHint}</p>
         </SectionCard>
       </div>
 

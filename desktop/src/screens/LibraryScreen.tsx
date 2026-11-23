@@ -1,20 +1,44 @@
 import { useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { T, type Lang } from "../i18n";
 import {
   Rule, TypeBadge, BackendBadge, SpineBlock, ChapterHead, DeleteDialog, TrashIcon,
 } from "../primitives";
 import { formatSize } from "../format";
-import type { Backend, LibraryBook } from "../types";
+import type { AiSettings, Backend, LibraryBook } from "../types";
+import { AiWorkbench } from "./AiWorkbench";
 
 // ── LIBRARY SCREEN(书目)──────────────────────────────────────────────────────
 
 type SortKey = "date" | "title" | "size";
 
-export function LibraryScreen({ lang, books, loading, outputDir, onRefresh, onOpenFolder, onOpenEpub, onReconvert, onDelete }: {
+/** EPUB 内的 cover-image 是最可信的缩略图来源。加载失败（旧书、无封面、损坏包）
+ * 保留原来的文字书脊，不能因为一张图让书目行消失。 */
+function CoverThumb({ book }: { book: LibraryBook }) {
+  const [src, setSrc] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    setSrc(null); setFailed(false);
+    void invoke<{ data_url: string } | null>("epub_cover", { path: book.epub })
+      .then(cover => { if (alive) setSrc(cover?.data_url ?? null); })
+      .catch(() => { if (alive) setFailed(true); });
+    return () => { alive = false; };
+  }, [book.epub]);
+  if (!src || failed) return <SpineBlock title={book.title} />;
+  return (
+    <div className="w-11 h-[58px] border border-[var(--border)] bg-[var(--secondary)] overflow-hidden flex items-center justify-center" title={book.title}>
+      <img src={src} alt={`${book.title} cover`} className="w-full h-full object-contain" onError={() => setFailed(true)} />
+    </div>
+  );
+}
+
+export function LibraryScreen({ lang, books, loading, outputDir, aiSettings = { provider: "OpenAI", api_url: "https://api.openai.com/v1", model: "gpt-4.1-mini" }, onRefresh, onOpenFolder, onOpenEpub, onReconvert, onDelete }: {
   lang: Lang;
   books: LibraryBook[];
   loading: boolean;
   outputDir: string;
+  aiSettings?: AiSettings;
   onRefresh: () => void;
   onOpenFolder: () => void;
   onOpenEpub: (epub: string) => void;
@@ -29,6 +53,8 @@ export function LibraryScreen({ lang, books, loading, outputDir, onRefresh, onOp
   const [search, setSearch] = useState("");
   /** 正在等确认删除的书 —— 对话框里由用户决定删不删文件 */
   const [deleteTarget, setDeleteTarget] = useState<LibraryBook | null>(null);
+  /** 打开工作台的目标书；生成、预览、另存都在 AiWorkbench 内部完成 */
+  const [aiTarget, setAiTarget] = useState<LibraryBook | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
   // 页快捷键「/」由 App 广播(Booklist 自己不该关心键盘),这里只认事件
@@ -180,12 +206,18 @@ export function LibraryScreen({ lang, books, loading, outputDir, onRefresh, onOp
               onMouseLeave={() => setHoveredId(null)}
               title={book.epub}
             >
-              <SpineBlock title={book.title} />
+              <CoverThumb book={book} />
               <div className="min-w-0 flex flex-col justify-center gap-1">
                 <span className="font-serif text-[14px] text-[var(--foreground)] truncate">{book.title}</span>
                 <div className="flex items-center gap-1.5">
                   <TypeBadge type={book.type} />
                   <BackendBadge backend={book.backend} />
+                  {/AI优化/.test(book.epub) && (
+                    <span
+                      className="font-mono text-[9px] tracking-[0.08em] border border-[var(--ok)] text-[var(--ok)] px-1 leading-[14px]"
+                      title={lang === "zh" ? "这本书是 AI 优化产物" : "AI-optimized output"}
+                    >AI</span>
+                  )}
                 </div>
               </div>
               <span className={`text-[12px] text-[var(--muted-foreground)] truncate self-center ${lang === "zh" ? "cjk" : ""}`}>{book.author || "—"}</span>
@@ -194,6 +226,8 @@ export function LibraryScreen({ lang, books, loading, outputDir, onRefresh, onOp
               <span className="font-mono text-[11px] text-[var(--muted-foreground)] tabular-nums self-center">{(book.date || "").slice(5)}</span>
               <div className={`flex items-center gap-3 self-center transition-opacity duration-[140ms] ${hoveredId === book.id ? "opacity-100" : "opacity-55"} focus-within:opacity-100`}>
                 <button onClick={() => onOpenEpub(book.epub)} className={`font-mono text-[10px] tracking-[0.06em] uppercase text-[var(--foreground)] hover:text-[var(--primary)] transition-colors ${lang === "zh" ? "cjk font-mono" : ""}`}>{t.openEpub}</button>
+                <Rule vertical />
+                <button onClick={() => setAiTarget(book)} className={`font-mono text-[10px] tracking-[0.06em] uppercase text-[var(--primary)] hover:text-[var(--foreground)] transition-colors ${lang === "zh" ? "cjk font-mono" : ""}`}>{t.aiButton}</button>
                 {book.path && (
                   <>
                     <Rule vertical />
@@ -236,6 +270,15 @@ export function LibraryScreen({ lang, books, loading, outputDir, onRefresh, onOp
             setDeleteTarget(null);
             onDelete(book);
           }}
+        />
+      )}
+      {aiTarget && (
+        <AiWorkbench
+          lang={lang}
+          book={aiTarget}
+          aiSettings={aiSettings}
+          onClose={() => setAiTarget(null)}
+          onSaved={onRefresh}
         />
       )}
     </div>

@@ -37,6 +37,7 @@ import {
   CLEAN_KEYS,
   MAX_RECENT,
   type Backend,
+  type AiSettings,
   type BackendPref,
   type CleanOpts,
   type ConsoleLine,
@@ -100,6 +101,7 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
   //  三层取值:内置默认 → config.yaml 的 clean: 段 → 用户改过的键
   const [cleanOpts, setCleanOpts] = useState<CleanOpts>(() => mergeCleanOpts(baseline, file.clean ?? {}));
   const [strictVerify, setStrictVerify] = useState<boolean>(file.strict ?? false);
+  const [aiSettings, setAiSettings] = useState<AiSettings>(file.ai ?? { provider: "OpenAI", api_url: "https://api.openai.com/v1", model: "gpt-4.1-mini" });
   const canceled = useRef<Set<string>>(new Set());
   // 队列最新快照:转换结束回写书库元数据时取用(不依赖 setState 的异步性)
   const filesRef = useRef<QueueFile[]>([]);
@@ -852,6 +854,7 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
       cli_path: cliPath,
       clean: diffCleanOpts(cleanOpts, baseline),
       strict: strictVerify,
+      ai: aiSettings,
     });
     try {
       await invoke("set_cli_path", { path: cliPath || null });
@@ -862,7 +865,7 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
     // 生效是在**下一次**转换,所以「保存了」这件事在当前屏没有任何视觉变化 ——
     // 不播报的话,用户会反复点保存确认到底写没写进去
     notify(t.toast.saved, "ok");
-  }, [backendPref, outputDir, cliPath, cleanOpts, strictVerify, baseline, persist, notify, t]);
+  }, [backendPref, outputDir, cliPath, cleanOpts, strictVerify, aiSettings, baseline, persist, notify, t]);
 
   // ── 书库数据:library.json(含转换时回写的类型/后端/页数)+ 本会话兜底 ──
   //  memo:转换期间每行日志都会触发 App 重渲染,这里不必跟着重算
@@ -1092,6 +1095,7 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
             books={books}
             loading={libraryLoading}
             outputDir={outputDir}
+            aiSettings={aiSettings}
             onRefresh={() => void loadLibrary()}
             onOpenFolder={openFolder}
             onOpenEpub={openEpub}
@@ -1117,6 +1121,8 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
             setCleanOpts={setCleanOpts}
             strictVerify={strictVerify}
             setStrictVerify={handleStrict}
+            aiSettings={aiSettings}
+            setAiSettings={setAiSettings}
             onInstallPandoc={() => downloadPandoc()}
             onSave={() => void saveSettings()}
           />
