@@ -11,7 +11,7 @@
   - desktop/src-tauri/tauri.conf.json (壳:安装包/窗口版本)
   - desktop/src-tauri/Cargo.toml (Rust crate 版本)
   - desktop/src/types.ts         (界面左下角显示的 APP_VERSION;拆分前在 App.tsx)
-  - README.md / README.en.md     (发布包文件名,避免下载引导指向旧版本)
+  - README.md / README.zh-CN.md  (发布包文件名,避免下载引导指向旧版本)
 """
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ TARGETS: tuple[tuple[str, str, str], ...] = (
     ("README.md",
      r'pdf2epub-v(\d+\.\d+\.\d+)-win-x64\.zip',
      'pdf2epub-v{v}-win-x64.zip'),
-    ("README.en.md",
+    ("README.zh-CN.md",
      r'pdf2epub-v(\d+\.\d+\.\d+)-win-x64\.zip',
      'pdf2epub-v{v}-win-x64.zip'),
 )

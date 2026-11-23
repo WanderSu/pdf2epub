@@ -172,8 +172,9 @@ _SKIP_SOURCE_DIRS = frozenset({
 #: 只作用于「扫目录」:显式把文件路径交给 CLI 时照常转换 —— 真有一本书叫
 #: `readme.md`,直传路径就能转。
 _SKIP_SOURCE_NAMES = frozenset({
-    "readme.md", "readme.en.md", "changelog.md", "contributing.md",
-    "license.md", "security.md", "code_of_conduct.md",
+    "readme.md", "readme.en.md", "readme.zh-cn.md", "changelog.md",
+    "contributing.md", "contributing.zh-cn.md",
+    "license.md", "security.md", "security.zh-cn.md", "code_of_conduct.md",
 })
 
 

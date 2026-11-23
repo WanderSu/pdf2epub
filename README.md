@@ -1,9 +1,8 @@
 # pdf2epub
 
-一个用于将 PDF 和 Markdown 转换为 EPUB 电子书的工具。
+A tool that converts PDF and Markdown files into EPUB ebooks.
 
-支持电子版 PDF、扫描版 PDF、混合 PDF，以及已有的 Markdown 文件。  
-可以自动提取文字、调用 OCR、整理 Markdown，并生成适合阅读器使用的 EPUB。
+It handles digital PDFs, scanned PDFs, mixed PDFs, and existing Markdown files. Text extraction, OCR, Markdown cleanup and EPUB generation are handled for you, so the result reads properly on Kindle, KOReader, Apple Books, Calibre and similar readers.
 
 [![Release](https://img.shields.io/github/v/release/WanderSu/pdf2epub?label=release)](https://github.com/WanderSu/pdf2epub/releases)
 [![Stars](https://img.shields.io/github/stars/WanderSu/pdf2epub?label=stars)](https://github.com/WanderSu/pdf2epub)
@@ -11,315 +10,310 @@
 [![CI](https://github.com/WanderSu/pdf2epub/actions/workflows/ci.yml/badge.svg)](https://github.com/WanderSu/pdf2epub/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-**中文** | [English](README.en.md)
+[中文](README.zh-CN.md) | **English**
 
 ---
 
-## 目录
+## Contents
 
-- [这是什么？](#这是什么)
-- [效果](#效果)
-- [主要功能](#主要功能)
-- [安装](#安装)
-- [使用桌面版](#使用桌面版)
-- [命令行](#命令行)
-- [OCR 配置](#ocr-配置)
-- [输出文件](#输出文件)
-- [EPUB 样式](#epub-样式)
-- [常见问题](#常见问题)
-- [CLI 参数](#cli-参数)
-- [已知限制](#已知限制)
-- [项目结构](#项目结构)
-- [从源码运行](#从源码运行)
-- [反馈问题](#反馈问题)
-
----
-
-## 这是什么？
-
-pdf2epub 是一个面向电子书阅读的 PDF → EPUB 转换工具。
-
-它主要解决这样的问题：
-
-> 手里有一本 PDF，但更希望在 Kindle、KOReader、Apple Books、Calibre 等阅读器中以 EPUB 的形式阅读。
-
-不同类型的 PDF 会采用不同的处理方式：
-
-- **电子版 PDF**：直接从 PDF 提取文字和图片。
-- **扫描版 PDF**：使用 OCR 识别文字、图片和公式。
-- **混合 PDF**：根据页面情况分别处理文字页和扫描页。
-- **Markdown**：可以直接转换为 EPUB，也可以使用 OCR 产生的 Markdown 继续加工。
-
-转换过程中还会处理常见的 PDF/OCR 问题，例如页码、页眉页脚、断行、中文空格和标题层级等。
+- [What it does](#what-it-does)
+- [Screenshots](#screenshots)
+- [Features](#features)
+- [Installation](#installation)
+- [Using the desktop app](#using-the-desktop-app)
+- [Command line](#command-line)
+- [OCR setup](#ocr-setup)
+- [Output](#output)
+- [EPUB styling](#epub-styling)
+- [FAQ](#faq)
+- [CLI options](#cli-options)
+- [Known limitations](#known-limitations)
+- [Project layout](#project-layout)
+- [Running from source](#running-from-source)
+- [Reporting issues](#reporting-issues)
 
 ---
 
-## 效果
+## What it does
 
-### 转换界面
+pdf2epub converts a PDF into an EPUB for reading.
 
-| 浅色模式 | 深色模式 |
+It is mainly meant for this situation:
+
+> You have a PDF, but you would rather read it as an EPUB on Kindle, KOReader, Apple Books, Calibre or another reader.
+
+Different kinds of PDF are handled differently:
+
+- **Digital PDF**: text and images are extracted directly from the file.
+- **Scanned PDF**: text, figures and formulas are recognised with OCR.
+- **Mixed PDF**: text pages and scanned pages are routed separately, page by page.
+- **Markdown**: converted to EPUB as is, or used as the starting point after OCR.
+
+Along the way it also deals with the usual PDF and OCR problems: page numbers, running heads, broken lines, spacing in Chinese text, heading levels and so on.
+
+---
+
+## Screenshots
+
+### Convert
+
+| Light | Dark |
 | --- | --- |
-| ![转换界面](docs/screenshot-convert-light.png) | ![转换界面](docs/screenshot-convert-dark.png) |
+| ![convert, light theme](docs/screenshot-convert-light.png) | ![convert, dark theme](docs/screenshot-convert-dark.png) |
 
-队列里每个文件都有独立的工序条（制版 → 检字 → 校勘 → 付印 → 核验）和一条常驻进度线
-（失败红、完成绿、跳过蓝、进行中朱砂），收起详情也能看到进度。
+Each file in the queue gets its own stage strip (detect → extract → clean → build → verify)
+and a persistent progress line (failed = red, done = green, skipped = blue, running = cinnabar),
+visible even when the row details are collapsed.
 
-### 印前复核
+### Preflight check
 
-![印前复核](docs/screenshot-review-sheet.png)
+![preflight check](docs/screenshot-review-sheet.png)
 
-文件导入后先出一张复核表：类型、页数、后端和折帖都取自真实的预检计划，需要云端 OCR 的批次
-会标出预计页数；确认之后才开始转换。中途取消的文件留在队列里，点「开始制版」可以再跑。
+Importing files opens a review sheet first: type, page count, backend and signature count come
+straight from the real preflight plan, and batches that need cloud OCR show the estimated page
+count. Conversion starts only after you confirm; cancelling leaves the files queued, and START
+runs them later.
 
-### 设置
+### Settings
 
-![设置界面](docs/screenshot-settings-light.png)
+![settings](docs/screenshot-settings-light.png)
 
-### 书目
+### Library
 
-![书目界面](docs/screenshot-library-light.png)
+![library](docs/screenshot-library-light.png)
 
-桌面端采用「铅字工坊」的界面设计，将转换过程分成几个比较直观的步骤：
+The desktop app uses a letterpress-inspired layout and splits the work into three workspaces:
 
-- **转换**：添加文件并开始转换
-- **书目**：查看已经转换的电子书
-- **规范**：设置 OCR、清理、输出和 EPUB 检查等选项
+- **Convert**: add files and start converting
+- **Library**: browse the ebooks you have already produced
+- **Settings**: OCR, cleanup, output and EPUB checks
 
 ---
 
-## 主要功能
+## Features
 
-### PDF 自动识别
+### Automatic PDF detection
 
-工具会自动判断 PDF 的类型，并选择合适的处理方式：
+The tool decides what kind of PDF it is looking at and picks the right path:
 
-- 有正常文字层的 PDF → 本地提取
-- 扫描 PDF → OCR
-- 文字和扫描页面混合 → 按页面分别处理
-- 疑似存在损坏或无效文字层 → 提示用户选择处理方式
+- PDF with a usable text layer → local extraction
+- Scanned PDF → OCR
+- Text pages mixed with scanned pages → handled page by page
+- Damaged or fake text layer → asks you how to proceed
 
-不需要每次手动判断一本 PDF 应该使用什么方法。
+You do not have to work out the right method for each book yourself.
 
 ### OCR
 
-目前支持：
+Supported services:
 
 - [MinerU](https://mineru.net/)
 - PaddleOCR-VL
 
-OCR 使用云端服务，因此扫描版 PDF 需要相应的 API Token（获取方式见 [OCR 配置](#ocr-配置)）。
-使用云端 OCR 时，PDF 的页面图片会发送到所选的 OCR 服务。
+OCR runs in the cloud, so scanned PDFs need an API token (see [OCR setup](#ocr-setup)).
+When cloud OCR is used, the page images of your PDF are sent to the service you selected.
 
-对于超过单次任务页数限制的书籍，工具会自动分段处理，并按照原来的顺序合并。
+Books longer than a single cloud task are split automatically and merged back in the original order.
 
-### 脚注
+### Footnotes
 
-扫描版的脚注（页底注释）来自 OCR 的结构化结果，工具会把正文里的注释标记与脚注对应起来，输出成电子书阅读器里的**原生脚注**：正文里的标记可以点击跳到注释，注释里可以点回正文。
+Footnotes in scanned books (notes printed at the bottom of a page) come from the OCR structured result. The tool links a marker in the body text to its note and writes real **native EPUB footnotes**: the marker jumps to the note, and the note links back to the text.
 
-对应关系只在证据充分时才建立：同一页（或紧邻的下一页）、注释标记一致、两边数量吻合。对不上的脚注不会硬猜，而是按原样留在正文里（普通文字），正文标记也保持不动 —— 宁可少链接，也不做错误链接。
+A link is only created when the evidence is solid: same page (or the page right after), matching marker, and matching counts on both sides. A footnote that cannot be confirmed is left in place as plain text and the body marker stays untouched — better a missing link than a wrong one.
 
-### 中断后继续
+### Resuming after an interruption
 
-OCR 任务提交后会保存任务信息。
+Submitted OCR tasks are recorded.
 
-如果转换过程中：
+If a conversion is interrupted by a network failure, an OCR timeout, a closed window or a failed EPUB build, running it again continues from the submitted task instead of uploading the whole book a second time.
 
-- 网络中断
-- OCR 超时
-- 关闭程序
-- EPUB 生成失败
+Finished parts are kept as well.
 
-重新运行时可以继续使用已经提交的 OCR 任务，而不必重新上传整本书。
+### Markdown cleanup
 
-已经完成的分段结果也会保存下来。
+Markdown produced by OCR or by PDF extraction usually is not pleasant to read as is, so the conversion cleans it up:
 
-### Markdown 清理
+- remove standalone page numbers
+- remove repeated running heads
+- join lines broken across pages
+- fix odd spaces introduced by OCR
+- fix spacing in Chinese text
+- drop duplicate headings
+- repair heading levels
+- optional bold detection
+- check image references
 
-OCR 或 PDF 提取出来的 Markdown 往往不能直接拿来阅读，因此转换过程中会进行一些整理：
-
-- 删除独立页码
-- 删除重复页眉页脚
-- 合并跨页断行
-- 修正 OCR 产生的异常空格
-- 修正中文排版空格
-- 删除重复标题
-- 修正标题层级
-- 可选的粗体识别
-- 检查图片引用
-
-这些规则可以分别关闭，以便处理特殊排版的书籍。
+Each rule can be turned off for books with unusual typography.
 
 ### EPUB
 
-最终输出为 EPUB 文件，并包含：
+The final output is an EPUB containing:
 
-- 目录
-- 标题层级
-- 图片
-- 表格
-- 公式
-- 脚注
-- 代码块
-- 内部链接
-- EPUB CSS
+- table of contents
+- heading hierarchy
+- images
+- tables
+- formulas
+- footnotes
+- code blocks
+- internal links
+- EPUB stylesheet
 
-同时会对生成的 EPUB 进行基本结构检查。
+The result is also checked for basic structural problems.
 
-### 批量转换
+### Batch conversion
 
-可以一次转换多个文件或整个目录。
+Several files, or a whole directory, can be converted at once.
 
-单个文件转换失败不会影响其他文件，并支持：
+One failing file does not affect the others, and the batch supports:
 
-- 自动重试
-- 跳过已经完成的文件
-- 中断后继续
-- 检查已有输出文件是否完整
+- automatic retries
+- skipping files that are already done
+- resuming after an interruption
+- checking whether an existing output file is complete
 
 ---
 
-## 安装
+## Installation
 
-### Windows 桌面版
+### Windows desktop app
 
-如果只是想使用 pdf2epub，推荐直接使用桌面版。目前桌面版只提供 Windows 版本，其他系统可以[从源码运行](#从源码运行)。
+If you just want to use pdf2epub, the desktop app is the recommended way. It is Windows only; on other systems you can [run from source](#running-from-source).
 
-前往：
+Go to:
 
 [GitHub Releases](https://github.com/WanderSu/pdf2epub/releases)
 
-下载最新的 Windows 压缩包，例如：
+and download the latest Windows archive, for example:
 
 ```text
 pdf2epub-v0.5.6-win-x64.zip
 ```
 
-文件名中的版本号会随版本更新。解压后运行：
+The version number in the file name changes with each release. Unzip it and run:
 
 ```text
 pdf2epub.exe
 ```
 
-桌面版已经包含转换所需的 Python 运行环境，不需要另外安装 Python。
+The desktop build bundles the Python runtime it needs, so no separate Python installation is required.
 
-注意保持 `pdf2epub.exe`、`cli/`（引擎目录）和 `config/` 在同一个文件夹里，不要把 exe 或 `cli/` 单独挪出去；解压目录的整体结构不要打乱。
+Keep `pdf2epub.exe`, `cli.exe` and `config/` in the same folder — do not move the exe out on its own.
 
-### 设置与书库放在哪里
+### Where your settings and library live
 
-界面设置和书库**不在解压目录里**，而是每个 Windows 用户一份：
+Your UI settings and book library are **not** stored in the unzipped folder — they are per Windows
+user:
 
 ```text
 %LOCALAPPDATA%\pdf2epub\
-    settings.json     界面与转换偏好（主题、输出目录、清理开关…）
-    library.json      已转换的书目
+    settings.json     UI and conversion preferences (theme, output dir, cleanup switches…)
+    library.json      the books you have produced
 ```
 
-放在这里的好处是升级不会丢数据：把新版本解压覆盖到同一个文件夹，设置和书目都还在。
-备份或换机时，把这个文件夹复制走即可。
+This keeps them safe across upgrades: unzip a newer build over the same folder and both survive.
+To back up or move to another machine, copy that folder.
 
-清理开关的默认值来自解压目录里的 `config/config.yaml`：界面上**没动过**的开关跟随它，
-动过的那几项以界面为准；「规范」页底部的「恢复默认」会把动过的项交还给它。
+Cleanup switches default to `config/config.yaml` in the unzipped folder: switches you have **not**
+touched follow it, the ones you changed win, and RESET at the bottom of the Settings page hands the
+changed ones back to it.
 
-### 还需要安装 Pandoc
+### Pandoc is also required
 
-EPUB 生成使用 Pandoc，因此需要安装 Pandoc。有三种方式：
+EPUB files are produced by Pandoc, so Pandoc has to be installed. There are three ways:
 
-**方式一：程序内一键下载（推荐）**
+**Option 1: in-app download (recommended)**
 
-第一次添加文件转换时，如果程序检测到没有安装 Pandoc，会弹窗询问是否立即下载。
-选择「立即下载」，程序会自动下载（约 43 MB）并安装到自己的目录里，无需任何手动操作。
-下载完成后会先校验官方 SHA256 再解压执行，校验不通过会直接丢弃并提示（不会运行来源不明的 exe）。
+When you add files for the first time and Pandoc is missing, the app offers to download it right away — about 43 MB, installed into the app's own folder automatically, no manual steps.
+The download is verified against the official SHA256 before extraction and execution; a mismatch is discarded with an error instead of running an unverified exe.
 
-**方式二：手动安装**
+**Option 2: manual install**
 
 ```powershell
 winget install pandoc
 ```
 
-或从 Pandoc 官网下载安装：
+Or download it from the Pandoc website:
 
 [https://pandoc.org/installing.html](https://pandoc.org/installing.html)
 
-安装完成后需要重新打开 pdf2epub（或者重新开一个终端窗口），Pandoc 才会被程序找到。
+Pandoc is only picked up by programs started afterwards, so reopen pdf2epub (or open a new terminal window) once the installation is finished.
 
-**方式三：便携内置**
+**Option 3: portable copy**
 
-把 `pandoc.exe` 放进解压目录的 `pandoc/` 文件夹（没有就新建一个），程序会优先使用它，
-不依赖系统 PATH——适合把 pdf2epub 整个目录拷到 U 盘随身携带的场景。
+Drop `pandoc.exe` into the `pandoc/` folder inside the extracted directory (create it if needed). The app prefers this bundled copy and ignores the system PATH — handy when carrying the whole folder on a USB stick.
 
-### 第一次使用
+### First run
 
-如果转换的是普通电子版 PDF，只需要安装 Pandoc 即可。
+For an ordinary digital PDF, installing Pandoc is all you need.
 
-如果需要转换扫描版 PDF，还需要配置 OCR 服务。
-
-可以在桌面端：
+Scanned PDFs additionally need an OCR service, configured in the desktop app under:
 
 ```text
-03 规范 → OCR 与凭证
+03 Settings → OCR & credentials
 ```
 
-中填写对应的 Token。
-
-也可以在程序目录创建：
+You can also create this file in the program folder:
 
 ```text
 apikey.json
 ```
 
-例如：
+for example:
 
 ```json
 {
-    "MinerU": "你的 MinerU Token",
-    "PaddleOCR-VL": "你的 PaddleOCR Token"
+    "MinerU": "your MinerU token",
+    "PaddleOCR-VL": "your PaddleOCR token"
 }
 ```
 
-`apikey.json` 不会被提交到 Git。
+`apikey.json` is never committed to Git.
 
-程序在读取与保存凭证时会自动把这个文件收紧为「仅当前用户可读写」——Windows 去掉继承权限、只留你的账号，Linux / macOS 设为 `600`，不需要手工处理。若确实要在多个系统账号间共享同一份凭证文件，可用环境变量 `PDF2EPUB_APIKEY_PERMS=0` 关掉这个行为。
+Whenever a credential file is read or written, the app automatically narrows its permissions to the
+current user only — on Windows it strips inherited entries and keeps your account, on Linux / macOS
+it chmods to `600`. Nothing to configure by hand. If you genuinely need to share one credential file
+between several OS accounts, set `PDF2EPUB_APIKEY_PERMS=0` to opt out.
 
 ---
 
-## 使用桌面版
+## Using the desktop app
 
-打开 `pdf2epub.exe` 后，将 PDF 或 Markdown 文件拖入转换区域即可。
+Open `pdf2epub.exe` and drop a PDF or Markdown file onto the convert area.
 
-基本流程：
+The flow:
 
 ```text
-添加文件
+add a file
    ↓
-检测 PDF 类型
+detect the PDF type
    ↓
-选择处理方式
+choose how to handle it
    ↓
-提取文字 / OCR
+extract text / OCR
    ↓
-整理 Markdown
+clean up the Markdown
    ↓
-生成 EPUB
+build the EPUB
    ↓
-检查 EPUB
+check the EPUB
 ```
 
-转换完成后，EPUB 会出现在设置的输出目录中。
+Once it finishes, the EPUB is in the output directory configured in settings.
 
 ---
 
-## 命令行
+## Command line
 
-如果需要批量处理，或者希望把 pdf2epub 集成到自己的工作流中，可以使用 CLI。
+The CLI is meant for batch work, or for hooking pdf2epub into your own workflow.
 
-### 安装
+### Install
 
-需要：
+You need:
 
 * Python 3.12
 * [uv](https://docs.astral.sh/uv/)
-* [Pandoc](https://pandoc.org/installing.html) 3.0 或更高版本
+* [Pandoc](https://pandoc.org/installing.html) 3.0 or newer
 
 ```bash
 git clone https://github.com/WanderSu/pdf2epub.git
@@ -327,399 +321,400 @@ cd pdf2epub
 uv sync
 ```
 
-后续示例使用 `uv run ebook-converter`：它会自动使用项目锁定的 Python 环境，适用于 Windows、macOS 和 Linux。
+The examples below use `uv run ebook-converter`. It automatically uses the project's locked Python environment and works on Windows, macOS and Linux.
 
-### 转换 PDF
+### Convert a PDF
 
 ```bash
-uv run ebook-converter "我的书.pdf" -o output
+uv run ebook-converter "my-book.pdf" -o output
 ```
 
-程序会自动判断 PDF 类型。
+The PDF type is detected automatically.
 
-### 批量转换
+### Batch conversion
 
 ```bash
 uv run ebook-converter samples/pdfs/ -o output
 ```
 
-### 转换 Markdown
+### Convert Markdown
 
 ```bash
-uv run ebook-converter "我的书.md" -o output
+uv run ebook-converter "my-book.md" -o output
 ```
 
-Markdown 里引用的图片放在同目录的 `images/` 文件夹中：
+Images referenced by the Markdown go in an `images/` folder next to it:
 
 ```text
-我的书.md
+my-book.md
 images/
 ```
 
-如果使用 MinerU 等工具提前生成了 Markdown，把输出的 `full.md` 改名为 `书名.md`（图片文件夹保持 `images/`）就可以直接转换。EPUB 的标题取自文件名，所以文件名要改成想要的书名。
+If the Markdown was produced by a tool such as MinerU, rename its `full.md` to `书名.md` (keep the image folder as `images/`) and convert it directly. The EPUB title comes from the file name, so name the file after the book.
 
-### 转换前检查
+### Preflight
 
-如果只是想先看看 PDF 会采用什么处理方式，可以使用：
-
-```bash
-uv run ebook-converter "我的书.pdf" --dry-run
-```
-
-它不会生成 EPUB，也不会提交 OCR 任务。
-
-可以查看：
-
-* PDF 类型
-* 页数
-* 计划使用的后端
-* OCR 分段情况
-* 云端 OCR 页数需求
-
-### 指定 OCR 后端
-
-例如使用 MinerU：
+To see how a PDF would be handled before converting anything:
 
 ```bash
-uv run ebook-converter "扫描书.pdf" -o output --backend mineru
+uv run ebook-converter "my-book.pdf" --dry-run
 ```
 
-也可以使用 `--backend paddleocr` 或 `--backend pymupdf`。
+It writes no EPUB and submits no OCR task. It reports:
 
-默认情况下使用 `--backend auto`，由程序自动判断。
+* PDF type
+* page count
+* planned backend
+* how the book would be split
+* how many cloud OCR pages it needs
+
+### Choosing an OCR backend
+
+For example, to use MinerU:
+
+```bash
+uv run ebook-converter "scanned.pdf" -o output --backend mineru
+```
+
+`--backend paddleocr` and `--backend pymupdf` work the same way.
+
+The default is `--backend auto`, which lets the program decide.
 
 ---
 
-## OCR 配置
+## OCR setup
 
-只有扫描版 PDF 需要 OCR。
+Only scanned PDFs need OCR.
 
-### 获取 Token
+### Getting a token
 
-- **MinerU**：在 [mineru.net](https://mineru.net/) 注册登录后，在控制台创建 API Token。免费额度按天计算，一般的书基本用不完。
-- **PaddleOCR-VL**：Token 来自百度 [AI Studio](https://aistudio.baidu.com/)，在该服务页面开通后获取。
+- **MinerU**: register at [mineru.net](https://mineru.net/) and create an API token in the console. The free allowance is counted per day and is normally more than enough for a book.
+- **PaddleOCR-VL**: the token comes from [Baidu AI Studio](https://aistudio.baidu.com/); enable the service there to get one.
 
-两个 Token 只需要填你实际要用的那一个。
+You only need to fill in the token for the service you actually use.
 
-### 填写凭证
+### Credentials
 
-在项目根目录（桌面版是程序所在目录）创建：
+In the project root (the program folder for the desktop build) create:
 
 ```text
 apikey.json
 ```
 
-内容：
+with:
 
 ```json
 {
-    "MinerU": "你的 MinerU Token",
-    "PaddleOCR-VL": "你的 PaddleOCR Token"
+    "MinerU": "your MinerU token",
+    "PaddleOCR-VL": "your PaddleOCR token"
 }
 ```
 
-也可以使用环境变量：
+Environment variables work too:
 
 ```text
 MINERU_API_TOKEN
 PADDLEOCR_TOKEN
 ```
 
-环境变量优先级高于 `apikey.json`。桌面端也可以直接在「03 规范 → OCR 与凭证」里填写并保存。
+They take precedence over `apikey.json`. In the desktop app you can also paste and save the tokens under `03 Settings → OCR & credentials`.
 
-### OCR 配额
+### Quota
 
-OCR 是云端服务，通常按照页面消耗额度。
+OCR is a cloud service and is normally billed per page.
 
-在开始正式转换之前，可以先运行：
+Before a real conversion you can run:
 
 ```bash
-uv run ebook-converter "扫描书.pdf" --dry-run
+uv run ebook-converter "scanned.pdf" --dry-run
 ```
 
-桌面端也会在开始转换前显示预计需要处理的 OCR 页面数量。
+The desktop app also shows how many OCR pages a book is expected to need before it starts.
 
-预检默认按每天 1000 页的额度判断，超出时会给出提示。
+Preflight assumes a daily allowance of 1000 pages and warns when a book exceeds it.
 
-如果不希望失败后自动重试，可以使用 `--retries 0`。
+If you would rather not have failed pages retried automatically, use `--retries 0`.
 
 ---
 
-## 输出文件
+## Output
 
-默认情况下，每本书会生成：
+By default each book produces:
 
 ```text
 output/
-└── 书名.epub
+└── <title>.epub
 ```
 
-输出的 EPUB 与源文件同名，只是把扩展名换成 `.epub`。
+The EPUB keeps the source file name, with the extension changed to `.epub`.
 
-转换过程中产生的中间文件保存在：
+Intermediate files are kept in:
 
 ```text
 work/
-└── 书名/
+└── <title>/
     ├── book.md
     └── images/
 ```
 
-如果需要手动修改转换结果，可以直接编辑 `book.md`，然后再次生成 EPUB。
+Logs are written to `logs/batch-<timestamp>.log` by default. Archive them by book or task as needed; deleting a book's `work/` directory also removes its resumable intermediate state.
 
-这对于处理特殊排版的书籍比较方便。
-
-日志默认写入 `logs/batch-<时间>.log`。可以按书籍或任务自行归档；删除 `work/` 会使对应任务失去可继续使用的中间结果。
+If you want to fix something by hand, edit `book.md` and build the EPUB again. That is convenient for books with unusual typography.
 
 ---
 
-## EPUB 样式
+## EPUB styling
 
-默认样式位于：
+The default stylesheet lives at:
 
 ```text
 config/book.css
 ```
 
-它主要负责：
+It covers:
 
-* 中文正文排版
-* 首行缩进
-* 标题样式
-* 图片
-* 表格
-* 公式
-* 代码块
-* 脚注
+* body text for Chinese
+* first-line indentation
+* headings
+* images
+* tables
+* formulas
+* code blocks
+* footnotes
 
-样式不会强制指定阅读器的文字颜色和背景颜色，因此一般可以配合阅读器的深色模式使用。
+The stylesheet does not force text or background colours, so it generally works with a reader's dark mode. Fonts and font sizes can be overridden by the reader as well.
 
-字体和字号也可以由阅读器覆盖。
-
-如果你有自己的阅读习惯，可以直接修改 `book.css`。
+If you have your own preferences, edit `book.css`.
 
 ---
 
-## 常见问题
+## FAQ
 
 <details>
-<summary><b>扫描 PDF 为什么需要 API Token？</b></summary>
+<summary><b>Why do scanned PDFs need an API token?</b></summary>
 
-扫描 PDF 通常只有页面图片，没有可以直接提取的文字，因此需要 OCR。
+A scanned PDF is a set of page images with no text to extract, so OCR is required.
 
-目前 pdf2epub 使用 MinerU 或 PaddleOCR-VL 进行云端 OCR。
+pdf2epub uses MinerU or PaddleOCR-VL for cloud OCR.
 
-普通电子版 PDF 使用本地提取时不需要 OCR Token。
+Ordinary digital PDFs are extracted locally and need no token.
 
 </details>
 
 <details>
-<summary><b>提示找不到 Pandoc 怎么办？</b></summary>
+<summary><b>It cannot find Pandoc — what now?</b></summary>
 
-Pandoc 是生成 EPUB 的必需组件。
+Pandoc is required to build the EPUB.
 
-最省事的做法是让程序自己装：添加文件时检测不到 Pandoc，程序会弹窗提供「立即下载」，
-自动下载约 43 MB 并安装到位，不需要任何手动操作。
+The easiest route is to let the app handle it: when Pandoc is missing, adding files brings up a dialog offering an in-app download (about 43 MB, fully automatic).
 
-手动安装则先确认已经装好（`winget install pandoc`），然后重新打开 pdf2epub，或者重新开一个终端窗口——刚安装的程序不会自动进入已经在运行的程序的运行环境。也可以把 `pandoc.exe` 直接放进解压目录的 `pandoc/` 文件夹，程序会优先使用这份内置副本。
+For a manual install, make sure it is done (`winget install pandoc`), then reopen pdf2epub or open a new terminal window — a program that is already running does not pick up a newly installed tool. You can also drop `pandoc.exe` into the `pandoc/` folder of the extracted directory; the bundled copy takes priority.
 
-桌面端可以在「03 规范 → 环境检查」里确认是否检测到 Pandoc（显示「内置」标记时说明用的是便携副本）。
+In the desktop app you can check `03 Settings → Environment check` (a `Bundled` badge means the portable copy is in use).
 
-检测不到 Pandoc 时，程序会在提取和 OCR 之前就停下来，不会白白消耗 OCR 额度。
-
-</details>
-
-<details>
-<summary><b>超过 200 页的书可以转换吗？</b></summary>
-
-可以。
-
-当 OCR 后端存在单次任务页数限制时（MinerU 单任务上限为 200 页），pdf2epub 会自动将 PDF 分成多个部分处理，再按照原顺序合并。
-
-因此不需要手动把一本大书拆成多个 PDF。
+When Pandoc is missing, the conversion stops before extraction or OCR, so no OCR quota is spent.
 
 </details>
 
 <details>
-<summary><b>OCR 跑到一半关闭程序怎么办？</b></summary>
+<summary><b>Can it convert books longer than 200 pages?</b></summary>
 
-重新运行同一本书即可。
+Yes.
 
-已经提交到云端的 OCR 任务会保存到：
+When an OCR backend has a per-task page limit (MinerU allows 200 pages per task), pdf2epub splits the PDF into parts automatically and merges them back in order.
+
+There is no need to split a large book into several PDFs by hand.
+
+</details>
+
+<details>
+<summary><b>I closed the program in the middle of OCR — what happens?</b></summary>
+
+Run the same book again.
+
+Submitted cloud tasks are recorded in:
 
 ```text
-work/书名/.ocr_task.json
+work/<title>/.ocr_task.json
 ```
 
-程序会尝试继续处理之前的任务，而不是重新上传整本书。
+The program continues the existing task instead of uploading the book again.
 
-已经完成的分段结果也会保存。
-
-</details>
-
-<details>
-<summary><b>为什么 PDF 里的文字看起来正常，转换后却出现乱码？</b></summary>
-
-部分 PDF 虽然存在文字层，但文字层本身可能已经损坏，或者只是为了搜索而加入的伪文字层。
-
-pdf2epub 会尝试检测这种情况。
-
-如果确认文字层不可用，可以改用 OCR。
-
-也可以强制使用本地提取（`--backend pymupdf`），但这种情况下结果可能仍然不可读。
+Parts that already finished are kept too.
 
 </details>
 
 <details>
-<summary><b>转换后的文字出现很多断行怎么办？</b></summary>
+<summary><b>The text in the PDF looks fine, but the output is garbage. Why?</b></summary>
 
-pdf2epub 默认会尝试合并跨页断行。
+Some PDFs do have a text layer, but it is damaged, or it was only added for searching.
 
-如果某本书的排版比较特殊，可以在桌面端的设置中关闭对应清理规则，也可以使用 `--clean-disable join_lines`。反过来，如果 `config.yaml` 里把某项写成了 `false`，单次运行想临时打开它就用 `--clean-enable join_lines`。
+pdf2epub tries to detect this.
 
-诗歌等需要保留分行结构的内容，目前采用启发式规则进行判断，因此特殊排版仍可能需要手动检查。
+If the text layer really is unusable, switch to OCR.
 
-</details>
-
-<details>
-<summary><b>可以保留图片和公式吗？</b></summary>
-
-可以。图片会进入 EPUB。
-
-公式的处理方式取决于转换后端：
-
-* 本地 PDF 提取：部分公式会作为图片保存
-* OCR 后端：支持识别 LaTeX，并转换为 EPUB 中的 MathML
-
-如果一本书包含大量数学公式，通常更适合使用支持公式识别的 OCR 后端。
+You can also force local extraction (`--backend pymupdf`), but the result may still be unreadable.
 
 </details>
 
 <details>
-<summary><b>转换后的书名和作者不正确怎么办？</b></summary>
+<summary><b>The output has too many line breaks. Can I change that?</b></summary>
 
-如果文件名采用：
+pdf2epub joins lines that were broken across pages by default.
+
+For books with unusual typography you can turn the corresponding cleanup rule off in the desktop settings, or use `--clean-disable join_lines`. Conversely, if `config.yaml` has a rule pinned to `false`, use `--clean-enable join_lines` to turn it on for a single run.
+
+Poetry and other content that must keep its line structure is handled by heuristics, so unusual layouts may still need a manual check.
+
+</details>
+
+<details>
+<summary><b>Are images and formulas kept?</b></summary>
+
+Yes. Images end up in the EPUB.
+
+Formulas depend on the backend:
+
+* local PDF extraction: some formulas are stored as images
+* OCR backends: LaTeX is recognised and converted to MathML in the EPUB
+
+For a book with many formulas, an OCR backend that recognises formulas is usually the better choice.
+
+</details>
+
+<details>
+<summary><b>The title or author is wrong.</b></summary>
+
+Name the file like this:
 
 ```text
-书名 - 作者.pdf
+Title - Author.pdf
 ```
 
-这种格式（短横线两侧要有空格），程序会自动将其作为 EPUB 的标题和作者。
+(a space on both sides of the dash) and the metadata follows the file name.
 
-例如：
+For example:
 
 ```text
-三体 - 刘慈欣.pdf
+Meditations - Marcus Aurelius.pdf
 ```
 
-会生成：
+becomes:
 
 ```text
-标题：三体
-作者：刘慈欣
+title: Meditations
+author: Marcus Aurelius
 ```
 
-文件名不像书名时（扫描仪给的 `扫描0001`、`IMG_2043`、`新建 DOC 文档`），会继续往下找：先是 PDF 自带的文档元数据，再是第 1 页上的卷首字段（`作者：` `译者：` `出版社：`），最后是正文第一个大标题（章名与「前言 / 目录」不算）。每一级都可以在 JSON 事件流（`metadata` 事件）里看到来源，书名出问题时不用猜是哪一级给的值。
+If the file name does not look like a title (`扫描0001`, `IMG_2043`, `新建 DOC 文档`),
+the resolver keeps looking: first the PDF's own document metadata, then the labelled
+front-matter fields on page 1 (`作者：` `译者：` `出版社：`), and finally the first real
+heading in the body (chapter names and "Preface / Contents" do not count). The `metadata`
+event in the JSON event stream records which level each field came from.
 
-另有两条固定规矩：**作者位只放作者本人** —— 扉页上的译者不进作者，而是写进 EPUB 的 `dc:contributor`（角色 `trl`），作者名后的「著 / 编著 / 主编」会被去掉；`出版社：` 写进 `dc:publisher`。
+Two rules are absolute: **the author slot holds only the author** — a translator found on
+the title page never becomes a second `dc:creator`, it goes to `dc:contributor` with the
+`trl` role; and a trailing 「著 / 编著 / 主编」 is stripped. `出版社：` becomes
+`dc:publisher`.
 
 </details>
 
 <details>
-<summary><b>如何重新转换已经转换过的书？</b></summary>
+<summary><b>How do I convert a book again?</b></summary>
 
-使用 `--force`：
+Use `--force`:
 
 ```bash
-uv run ebook-converter "我的书.pdf" -o output --force
+uv run ebook-converter "my-book.pdf" -o output --force
 ```
 
-默认情况下，程序会尽量跳过已经完成的文件。
+By default the program skips files that are already done.
 
 </details>
 
 <details>
-<summary><b>如何检查 EPUB 是否完整？</b></summary>
+<summary><b>How do I check whether the EPUB is complete?</b></summary>
 
-每次转换都会进行基本的 EPUB 检查，包括：
+Every conversion runs a basic EPUB check covering:
 
-* EPUB 容器
-* manifest
-* spine
+* the EPUB container
+* the manifest
+* the spine
 * XHTML
-* 目录
-* 封面
-* 内部链接
+* the table of contents
+* the cover
+* internal links
 * CSS
-* 图片引用
+* image references
 
-检查结果分两级：**致命问题**（结构破损、内容丢失）在任何模式下都会让该文件判失败，
-并把失败产物改名移出输出目录（`<名>.epub.failed`，不会被下一次运行当成「已完成」）；**非致命警告**
-（孤立图片、空章节、样式未引用等）默认只记录，不阻断转换。
+Findings come in two levels: **fatal problems** (broken structure, lost content) fail
+that file in any mode — the failed artefact is renamed to `<name>.epub.failed` so the
+next run cannot mistake it for "already done"; **non-fatal warnings** (orphan images, empty
+chapters, unlinked styles) are recorded but never block the conversion.
 
-重转（`--force`）时若新一轮**构建成功但校验失败**，上一轮那份能读的成品会被还原回
-`output/<名>.epub`（失败产物另存 `.failed`）—— 重转失败的代价不该是「连上一本一起没了」。
-上一轮产物本身就是残缺的（打不开）时不还原：它没有保全价值，也不该被放回成功输出位置。
+When a re-run (`--force`) builds a new EPUB that then fails verification, the previous
+readable artefact is restored to `output/<name>.epub` (the failed one is kept as `.failed`)
+— losing the book you already had is not an acceptable price for a failed re-conversion.
+A previous artefact that was itself broken is *not* restored.
 
-`--strict` 是更严的一档：内容对照的「疑似缩水」（正文/公式/表格/脚注数量减少）也判失败。
+`--strict` is the stricter level: content-comparison warnings (text/formulas/tables/
+footnotes shrinking) also fail the file.
 
 ```bash
-uv run ebook-converter "我的书.pdf" -o output --strict
+uv run ebook-converter "my-book.pdf" -o output --strict
 ```
 
 </details>
 
 ---
 
-## CLI 参数
+## CLI options
 
-完整命令格式：
-
-```text
-ebook-converter <文件或目录>... [-o 输出目录] [选项]
+```
+ebook-converter <file-or-dir>... [-o output-dir] [options]
 ```
 
-| 参数 | 说明 |
+| Option | Description |
 | --- | --- |
-| `--backend {auto,pymupdf,mineru,paddleocr}` | 指定处理后端，默认 `auto` 自动检测 |
-| `-o, --output DIR` | EPUB 输出目录，默认 `output/` |
-| `--work DIR` | 中间文件目录，默认 `work/` |
-| `--retries N` | 单个文件失败后的重试次数，默认 2 |
-| `--force` | 忽略「已完成」，强制重新转换 |
-| `--clean-disable LIST` | 关闭指定的 Markdown 清理规则（逗号分隔，可重复） |
-| `--clean-enable LIST` | 开启指定的 Markdown 清理规则；用于覆盖 `config.yaml` 里写死的 `false`。两边都写同一项时以 `--clean-disable` 为准 |
-| `--strict` | 严格模式：内容对照的「疑似缩水」也判失败（默认只警告）。致命校验错误在任何模式下都会判失败 |
-| `--lang LANG` | 指定 EPUB 语言（如 `zh-CN`、`en`、`ja`），默认按正文自动判断 |
-| `--dry-run` | 只进行转换前检查，不生成文件 |
-| `--json` | 配合 `--dry-run`，以 JSON 输出预检结果 |
-| `--json-events` | 以 JSON Lines 输出阶段事件，供桌面端使用 |
-| `--dump-ir` | 将 Markdown 切分后的 IR 预览写入 `<work>/<书名>/ir/`，不生成 EPUB |
-| `--no-resume` | 不继续之前提交的 OCR 任务 |
-| `--log FILE` | 指定日志文件，默认 `logs/batch-<时间>.log` |
-| `--no-log` | 不写日志文件 |
-| `--verbose, -v` | 输出 DEBUG 日志 |
+| `--backend {auto,pymupdf,mineru,paddleocr}` | Force a backend; the default is `auto` |
+| `-o, --output DIR` | EPUB output directory, default `output/` |
+| `--work DIR` | Intermediate file directory, default `work/` |
+| `--retries N` | Retries per file, default 2 |
+| `--force` | Ignore the "already done" state and convert again |
+| `--clean-disable LIST` | Turn off Markdown cleanup rules (comma separated, repeatable) |
+| `--clean-enable LIST` | Turn cleanup rules back on, overriding a `false` written in `config.yaml`. When a key appears in both lists, `--clean-disable` wins |
+| `--strict` | Strict mode: content-comparison warnings also fail the file (default is warn only). Fatal check errors fail the file in any mode |
+| `--lang LANG` | EPUB language (`zh-CN`, `en`, `ja`, ...); detected from the text by default |
+| `--dry-run` | Preflight only, no files are written |
+| `--json` | With `--dry-run`, print the preflight result as JSON |
+| `--json-events` | Emit stage events as JSON Lines (used by the desktop app) |
+| `--dump-ir` | Write a Markdown-to-IR preview to `<work>/<title>/ir/`; does not build an EPUB |
+| `--no-resume` | Do not reuse a cloud OCR task that was already submitted |
+| `--log FILE` | Log file, default `logs/batch-<timestamp>.log` |
+| `--no-log` | Do not write a log file |
+| `--verbose, -v` | DEBUG logging |
 
-清理规则包括：
+Cleanup rules:
 
-| 规则 | 说明 |
+| Rule | Description |
 | --- | --- |
-| `page_numbers` | 删除独立成行的页码 |
-| `running_heads` | 删除跨页重复的页眉页脚 |
-| `join_lines` | 合并跨页断行（诗歌等分行结构会尽量保留） |
-| `ocr_spaces` | 合并 OCR 拆开的单词 |
-| `cjk_spaces` | 修正中文之间的多余空格 |
-| `dup_headings` | 删除相邻的重复标题 |
-| `headings` | 删除空标题，修正标题层级 |
-| `bold` | 按字体把强调文字标为粗体（默认关闭） |
-| `images` | 检查图片引用是否存在 |
+| `page_numbers` | remove standalone page numbers |
+| `running_heads` | remove running heads repeated across pages |
+| `join_lines` | join lines broken across pages (line structure such as poetry is preserved where possible) |
+| `ocr_spaces` | merge words that OCR split apart |
+| `cjk_spaces` | fix stray spaces inside Chinese text |
+| `dup_headings` | drop duplicate adjacent headings |
+| `headings` | drop empty headings and repair heading levels |
+| `bold` | mark emphasised text as bold based on its font (off by default) |
+| `images` | check that image references exist |
 
-例如关闭断行合并：
+For example, to turn off line joining:
 
 ```bash
 --clean-disable join_lines
 ```
 
-关闭多个规则：
+or several rules at once:
 
 ```bash
 --clean-disable join_lines,cjk_spaces
@@ -727,181 +722,171 @@ ebook-converter <文件或目录>... [-o 输出目录] [选项]
 
 ---
 
-## 已知限制
+## Known limitations
 
-pdf2epub 目前仍然存在一些 PDF 转换本身难以完全解决的问题。
+Some problems come from PDF conversion itself and cannot be solved completely.
 
-### PDF 提取和原始排版不是一回事
+### Extracted text is not the original layout
 
-PDF 保存的是页面排版结果，而不是一本结构化电子书。
+A PDF stores a layout, not a structured book. These may need a manual check:
 
-因此以下内容可能需要人工检查：
+* two-column layouts
+* complex tables
+* unusual headings
+* poetry
+* complex footnotes
+* content spanning pages
+* unusual formulas
+* text inside images
 
-* 双栏排版
-* 复杂表格
-* 特殊标题
-* 诗歌
-* 复杂脚注
-* 跨页内容
-* 特殊公式
-* 图片中的文字
+### Formulas from local extraction
 
-### 本地 PDF 提取的公式
+When PyMuPDF4LLM extracts formulas, some of them are stored as images rather than LaTeX.
 
-PyMuPDF4LLM 提取公式时，部分公式会作为图片保存，而不是 LaTeX。
+Equation numbers can also end up as a separate image from the formula itself.
 
-复杂公式的编号也可能与公式本体分开成为不同图片。
+Books with many formulas are better handled by an OCR backend.
 
-如果一本书包含大量公式，可以优先考虑使用 OCR 后端。
+### Poetry and unusual line breaks
 
-### 诗歌和特殊分行
+Content that must keep its line structure, such as poetry, is recognised by heuristics. Long verses and single-line poems in particular may still need a manual check.
 
-程序会尝试识别诗歌等需要保留换行的内容，但这是基于规则判断的。
+Local extraction also folds line breaks inside a paragraph into spaces; once that information is gone it cannot be recovered, so books that depend on line structure are better handled by an OCR backend.
 
-特别是较长的诗行、单行诗等特殊情况，仍可能需要手动检查。
+### Splitting and mixed layouts
 
-另外，本地提取时段落内部的换行会被折成空格，这类分行信息丢了就找不回来，依赖分行的书更适合走 OCR 后端。
+After MinerU splits a book, tables and paragraphs that cross a boundary can be cut.
 
-### 分段与混合排版
+Books with text pages and scanned pages interleaved are merged by real page number; when there are too many scanned ranges, the program merges some of them to limit the number of cloud tasks, and the page order inside a merged range may differ from the original — the log warns about this.
 
-MinerU 分段之后，跨段边界的表格和段落可能被截断。
+### EPUB checking
 
-文字页和扫描页交错的书（混合 PDF）按真实页码合并；扫描区段过多时，程序会合并部分区段以控制云端任务数量，被合并区段内部的页序可能与原文不一致，日志中会给出警告。
+The project includes checks for the practical problems that affect reading, but EPUB spec compliance has not been verified with EPUBCheck.
 
-### EPUB 检查
+### UI and other
 
-目前项目内置了针对实际阅读问题的 EPUB 检查，但尚未使用 EPUBCheck 完成完整的 EPUB 标准合规验证。
-
-### 界面与其他
-
-* 封面渲染失败时，书库中显示的是占位色块。
-* 转换队列不跨重启保留（最近打开的文件列表会保留）。
+* When cover rendering fails, the library shows a placeholder block.
+* The conversion queue is not kept across restarts (the recent-files list is).
 
 ---
 
-## 项目结构
+## Project layout
 
-如果你准备参与开发，可以从下面这些目录开始：
+If you want to work on the code, these are the folders to start from:
 
 ```text
 src/
-└── pdf2epub/       # 引擎包(独立命名空间,避免与 PyPI 同名包互相覆盖)
-    ├── backends/       # PDF / OCR 后端
-    ├── detector/       # PDF 类型检测
-    ├── clean/          # Markdown 清理(IR 引擎:规则 → Patch → 报告)
-    ├── ir/             # IR(块 / 对齐 / 往返渲染)
-    ├── markdown/       # 清理判定与阈值
-    ├── epub/           # EPUB 生成与检查
-    ├── batch.py        # 批处理编排
-    ├── artifacts.py    # 产物路径 / 撞名 / 失败收尾
-    ├── taskrun.py      # 任务状态 / 重试 / 汇总
-    ├── net.py          # 网络下载保护
+└── pdf2epub/       # engine package (own namespace, so it can't clobber same-named PyPI packages)
+    ├── backends/       # PDF / OCR backends
+    ├── detector/       # PDF type detection
+    ├── clean/          # Markdown cleanup (IR engine: rules → patches → report)
+    ├── ir/             # IR (blocks / alignment / round-trip render)
+    ├── markdown/       # cleanup predicates & thresholds
+    ├── epub/           # EPUB generation and checks
+    ├── batch.py        # batch orchestration
+    ├── artifacts.py    # output paths / name conflicts / failure cleanup
+    ├── taskrun.py      # task state / retries / summary
+    ├── net.py          # guarded downloads
     ├── cli.py          # CLI
-    ├── convert.py      # 转换流程
-    └── paths.py        # 路径与配置
+    ├── convert.py      # conversion flow
+    └── paths.py        # paths and configuration
 
 config/
-├── config.yaml     # 默认配置
-└── book.css        # EPUB 样式
+├── config.yaml     # default configuration
+└── book.css        # EPUB stylesheet
 
-desktop/             # Windows 桌面端
-docs/                # 截图、设计与验收资料
-samples/             # 入库的 PDF / Markdown 测试样本
-scripts/             # 构建、发布、验证与端到端脚本
-tests/               # 自动化测试
+desktop/             # Windows desktop app
+docs/                # screenshots, design notes and acceptance material
+samples/             # versioned PDF / Markdown test samples
+scripts/             # build, release, verification and end-to-end scripts
+tests/               # automated tests
 
-# 以下目录会在运行或构建时生成
-output/              # 转换完成的 EPUB
-work/                # 可用于续跑和人工编辑的中间文件
-logs/                # 运行日志
-dist_release/        # 本地发布包
-build_cli/ dist_cli/ # PyInstaller 临时目录和 CLI 成品
+# Generated locally while running or building
+output/              # completed EPUB files
+work/                # resumable and editable intermediate files
+logs/                # runtime logs
+dist_release/        # local release packages
+build_cli/ dist_cli/ # PyInstaller temporary files and CLI build output
 ```
 
 ---
 
-## 从源码运行
+## Running from source
 
 ### Python / CLI
 
 ```bash
 uv sync
-uv run ebook-converter "我的书.pdf" -o output
+uv run ebook-converter "my-book.pdf" -o output
 ```
 
-### 桌面端
+### Desktop app
 
-桌面端使用：
+The desktop app is built with:
 
 * Tauri 2
 * React 19
 * Tailwind CSS 4
 * Rust
 
-安装依赖：
+Install the dependencies:
 
 ```bash
 cd desktop
 npm install
 ```
 
-开发模式：
+Development mode:
 
 ```bash
 npm run tauri dev
 ```
 
-构建：
+Build:
 
 ```bash
 npx tauri build --no-bundle
 ```
 
-构建桌面端需要：
+Building the desktop app needs:
 
 * Node.js ≥ 20
 * Rust
 * Visual Studio Build Tools
-* Windows C++ 开发环境
+* the Windows C++ toolchain
 
 ---
 
-## 开发
+## Development
 
-运行测试与构建：
-
-```bash
-uv run pytest -q                      # Python 测试
-cd desktop/src-tauri && cargo test    # Rust 测试
-cd desktop && npm run build           # 前端类型检查与构建
-```
-
-测试默认完全离线(不调云端)。需要验证真实云端 OCR(会消耗额度)时显式开启：
+Tests and builds:
 
 ```bash
-PDF2EPUB_LIVE_OCR=1 uv run pytest tests/test_live_ocr_footnotes.py -q
+uv run pytest -q                      # Python tests
+cd desktop/src-tauri && cargo test    # Rust tests
+cd desktop && npm run build           # frontend type check and build
 ```
 
-项目中的设计思路和一些技术取舍可以参考：
+Design notes and the reasoning behind some of the technical choices are in:
 
-[docs/design.md](https://github.com/WanderSu/pdf2epub/blob/main/docs/design.md)
+[docs/design.md](https://github.com/WanderSu/pdf2epub/blob/main/docs/design.md) (Chinese)
 
-> 用完整 URL 而非相对路径：发布包里只带 `README.md`，不带 `docs/`，相对链接在下载包的目录里是断的。
+> Uses an absolute URL rather than a relative path: the release archive ships only `README.md`, not `docs/`, so a relative link would be broken inside the download.
 
 ---
 
-## 反馈问题
+## Reporting issues
 
-如果你在转换过程中遇到问题，建议提交 Issue 时尽量提供：
+If a conversion goes wrong, an issue is easier to act on with:
 
-* 操作系统
-* pdf2epub 版本
-* PDF 类型（电子版 / 扫描版 / 混合）
-* 使用的转换后端
-* 错误日志
-* 出问题的 PDF 类型和排版情况
+* your operating system
+* the pdf2epub version
+* the PDF type (digital / scanned / mixed)
+* the backend used
+* the error log
+* what is wrong with the layout of that PDF
 
-如果问题涉及具体 PDF，最好同时说明是哪一页出现问题。
+If the problem is about a specific PDF, mention which page it appears on.
 
 ---
 
@@ -909,6 +894,6 @@ PDF2EPUB_LIVE_OCR=1 uv run pytest tests/test_live_ocr_footnotes.py -q
 
 [MIT](LICENSE) © 2026 WanderSu
 
-本项目仓库不包含任何书籍内容，仅包含程序代码和测试样本。
+This repository contains no book content, only program code and self-generated test samples.
 
-请确保你拥有所转换书籍的相应使用权。对于受版权保护的内容，请遵守当地法律以及相关服务的使用条款。
+Make sure you are allowed to convert the books you use. For copyrighted material, follow local law and the terms of the services involved.

@@ -821,7 +821,7 @@ def test_iter_sources_skips_artifact_and_env_dirs(tmp_path: Path) -> None:
                  ".venv/lib/手册.md", "node_modules/pkg/README.md",
                  "tests/test_doc.md", "desktop/ui/说明.md",
                  "docs/guide.md", "docs/stages/notes.pdf",
-                 "README.md", "README.en.md", "CHANGELOG.md"):
+                 "README.md", "README.en.md", "README.zh-CN.md", "CHANGELOG.md"):
         f = tmp_path / "books" / junk
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text("junk", encoding="utf-8")
