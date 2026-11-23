@@ -21,7 +21,8 @@ import re
 from pathlib import Path
 from typing import Sequence
 
-from pdf2epub.ir.model import Block, Link
+from pdf2epub.ir.model import Block, Link, page_exempt
+
 #: 锚点长度:取规范化文本的前 N 个字符比较。24 个汉字足以区分同页段落,
 #: 又不会因为段末被脚注标记打断而失配。
 ANCHOR_CHARS = 24
@@ -104,7 +105,8 @@ def align_blocks(editable: Sequence[Block], evidence: Sequence[Block],
     if not evidence:
         # 没有证据层:不产生链接,也不声称页归属。缺失数照实计,便于 P5 发现
         # "某后端根本没给结构化结果"。
-        stats["page_attribution_missing"] = sum(1 for b in blocks if b.page_idx is None)
+        stats["page_attribution_missing"] = sum(
+            1 for b in blocks if b.page_idx is None and not page_exempt(b))
         return tuple(blocks), (), stats
 
     anchors = [block_anchor(b, chars=chars, enforce_min=False) for b in evidence]
@@ -155,7 +157,8 @@ def align_blocks(editable: Sequence[Block], evidence: Sequence[Block],
 
     stats["short_attributed"] = _attribute_short(blocks, evidence, hits, claimed, links)
     stats["interval_attributed"] = _fill_intervals(blocks, claimed)
-    stats["page_attribution_missing"] = sum(1 for b in blocks if b.page_idx is None)
+    stats["page_attribution_missing"] = sum(
+        1 for b in blocks if b.page_idx is None and not page_exempt(b))
     if links:
         # 链接按**块顺序**放出:窗口匹配是第二轮补的,追加在尾部会让
         # ``links_monotonic``(§E.5 不变量 4)读成"顺序乱了"。
