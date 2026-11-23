@@ -8,6 +8,7 @@
 [![Release](https://img.shields.io/github/v/release/WanderSu/pdf2epub?label=release)](https://github.com/WanderSu/pdf2epub/releases)
 [![Stars](https://img.shields.io/github/stars/WanderSu/pdf2epub?label=stars)](https://github.com/WanderSu/pdf2epub)
 [![Platform](https://img.shields.io/badge/platform-Windows-0078D6)](https://github.com/WanderSu/pdf2epub/releases)
+[![CI](https://github.com/WanderSu/pdf2epub/actions/workflows/ci.yml/badge.svg)](https://github.com/WanderSu/pdf2epub/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 **中文** | [English](README.en.md)
@@ -791,7 +792,10 @@ src/
     ├── ir/             # IR(块 / 对齐 / 往返渲染)
     ├── markdown/       # 清理判定与阈值
     ├── epub/           # EPUB 生成与检查
-    ├── batch.py        # 批处理
+    ├── batch.py        # 批处理编排
+    ├── artifacts.py    # 产物路径 / 撞名 / 失败收尾
+    ├── taskrun.py      # 任务状态 / 重试 / 汇总
+    ├── net.py          # 网络下载保护
     ├── cli.py          # CLI
     ├── convert.py      # 转换流程
     └── paths.py        # 路径与配置
