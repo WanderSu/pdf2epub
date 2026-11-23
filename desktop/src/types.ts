@@ -103,6 +103,7 @@ export interface EnvState {
   engine: { status: string; version: string | null; path: string | null };
   mineru_configured: boolean;
   paddle_configured: boolean;
+  ai_configured?: boolean;
   apikey_path: string | null;
   /** 凭证文件权限是否已收紧(null = 还没有凭证文件) */
   apikey_perms_ok: boolean | null;
@@ -181,6 +182,54 @@ export interface SettingsFile {
   clean?: Record<string, boolean>;
   strict?: boolean;
   recent?: RecentEntry[];
+  ai?: AiSettings;
+}
+
+export interface AiSettings {
+  provider: string;
+  api_url: string;
+  model: string;
+}
+
+export type AiChapterStatus = "changed" | "unchanged" | "failed" | "skipped" | "running" | "pending";
+
+/** 一章的校对结果；before_text / after_text 是去标签后的全文，供编辑器式预览。 */
+export interface AiChapter {
+  path: string;
+  title: string;
+  status: AiChapterStatus;
+  note?: string | null;
+  edits: number;
+  missed: number;
+  before_chars: number;
+  after_chars: number;
+  before_text: string;
+  after_text: string;
+}
+
+export interface AiPreview {
+  id: string;
+  summary: string;
+  /** 实际读到的 work/book.md 路径；没有上下文时为 null。 */
+  context?: string | null;
+  model: string;
+  total: number;
+  changed: number;
+  chapters: AiChapter[];
+}
+
+/** `ai-progress` 事件：start 报总章数，chapter 逐章回报（不含全文）。 */
+export interface AiProgress {
+  phase: "start" | "chapter";
+  total: number;
+  index?: number;
+  path?: string;
+  title?: string;
+  status?: AiChapterStatus;
+  edits?: number;
+  before_chars?: number;
+  after_chars?: number;
+  note?: string | null;
 }
 
 /** 渲染前就读好的设置:文件内容 + 清理开关的基线(引擎那侧的口径)。 */

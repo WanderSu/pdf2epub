@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -28,6 +28,55 @@ impl Default for CliConfig {
 #[derive(Default)]
 pub struct RunningTasks {
     pub procs: Mutex<HashMap<String, u32>>,
+}
+
+/// AI 预览只保存在内存中，确认前绝不触碰原 EPUB；应用重启后预览自然失效。
+#[derive(Default)]
+pub struct AiPreviews {
+    entries: Mutex<HashMap<String, AiPreview>>,
+}
+
+#[derive(Clone)]
+struct AiPreview {
+    source: String,
+    files: Vec<AiFile>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct AiFile {
+    path: String,
+    content: String,
+}
+
+#[derive(serde::Serialize)]
+struct AiPreviewResult {
+    id: String,
+    summary: String,
+    /// 实际读到的 work 上下文文件；没有则为 null，前端会如实告知用户。
+    context: Option<String>,
+    /// 实际使用的模型名：界面与另存标记都要如实显示这次是谁校的。
+    model: String,
+    /// 章数统计（含跳过与失败），界面顶栏直接显示，不再让用户自己数。
+    total: usize,
+    changed: usize,
+    chapters: Vec<AiChapter>,
+}
+
+/// 一章的校对结果。status: changed / unchanged / failed / skipped。
+#[derive(serde::Serialize, Clone)]
+struct AiChapter {
+    path: String,
+    title: String,
+    status: String,
+    note: Option<String>,
+    /// 实际落地的替换条数与没能唯一命中的条数。
+    edits: usize,
+    missed: usize,
+    before_chars: usize,
+    after_chars: usize,
+    /// 去标签后的**全文**（编辑器式预览左右栏），不是摘录。
+    before_text: String,
+    after_text: String,
 }
 
 /// 探测 ebook-converter 可执行文件,优先级:
@@ -619,6 +668,16 @@ struct SettingsFile {
     clean: BTreeMap<String, bool>,
     strict: Option<bool>,
     recent: Vec<RecentEntry>,
+    ai: Option<AiSettings>,
+}
+
+/// 只保存可公开的连接参数；API Key 一律在 apikey.json 的 AI 项中单独保存。
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
+#[serde(default)]
+struct AiSettings {
+    provider: String,
+    api_url: String,
+    model: String,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
@@ -947,6 +1006,114 @@ fn epub_metadata(path: &str) -> (String, String) {
         extract_tag(&obuf, "dc:title").unwrap_or_default(),
         extract_tag(&obuf, "dc:creator").unwrap_or_default(),
     )
+}
+
+/// EPUB 内嵌封面。书库缩略图不应该依赖文件名或网络地址：封面是包内资源，
+/// 因此从 OPF manifest 找到后以 data URL 返回给 WebView。
+///
+/// 同时兼容 EPUB3 的 `properties="cover-image"` 与 EPUB2 的
+/// `<meta name="cover" content="item-id">` 约定。读取失败只返回 None，调用方
+/// 会继续显示文字书脊；一本损坏的书不应让整个书目无法加载。
+#[derive(serde::Serialize)]
+struct EpubCover {
+    data_url: String,
+}
+
+fn xml_attr(tag: &str, name: &str) -> Option<String> {
+    for quote in ['\"', '\''] {
+        let needle = format!("{name}={quote}");
+        if let Some(start) = tag.find(&needle) {
+            let rest = &tag[start + needle.len()..];
+            if let Some(end) = rest.find(quote) {
+                return Some(rest[..end].to_string());
+            }
+        }
+    }
+    None
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    for chunk in bytes.chunks(3) {
+        let a = chunk[0];
+        let b = *chunk.get(1).unwrap_or(&0);
+        let c = *chunk.get(2).unwrap_or(&0);
+        out.push(TABLE[(a >> 2) as usize] as char);
+        out.push(TABLE[((a & 0b11) << 4 | (b >> 4)) as usize] as char);
+        out.push(if chunk.len() > 1 { TABLE[((b & 0b1111) << 2 | (c >> 6)) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 2 { TABLE[(c & 0b111111) as usize] as char } else { '=' });
+    }
+    out
+}
+
+fn cover_mime(href: &str, declared: Option<String>) -> Option<String> {
+    let declared = declared.unwrap_or_default();
+    if declared.starts_with("image/") {
+        return Some(declared);
+    }
+    match Path::new(href).extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
+        Some("jpg") | Some("jpeg") => Some("image/jpeg".into()),
+        Some("png") => Some("image/png".into()),
+        Some("gif") => Some("image/gif".into()),
+        Some("webp") => Some("image/webp".into()),
+        Some("svg") => Some("image/svg+xml".into()),
+        _ => None,
+    }
+}
+
+#[tauri::command]
+fn epub_cover(path: String) -> Option<EpubCover> {
+    // 对缩略图设上限，避免恶意或异常 EPUB 把整个书库页面撑爆。
+    const MAX_COVER_BYTES: u64 = 8 * 1024 * 1024;
+    let file = std::fs::File::open(path).ok()?;
+    let mut zip = zip::ZipArchive::new(file).ok()?;
+    let mut container = String::new();
+    zip.by_name("META-INF/container.xml").ok()?.take(65536).read_to_string(&mut container).ok()?;
+    let opf = extract_attr(&container, "full-path")?.trim_start_matches('/').to_string();
+    let mut opf_text = String::new();
+    zip.by_name(&opf).ok()?.take(512 * 1024).read_to_string(&mut opf_text).ok()?;
+
+    let legacy_cover_id = opf_text.find("<meta").and_then(|mut pos| loop {
+        let rest = &opf_text[pos..];
+        let end = rest.find('>')?;
+        let tag = &rest[..=end];
+        if xml_attr(tag, "name").as_deref() == Some("cover") {
+            break xml_attr(tag, "content");
+        }
+        pos += end + 1;
+        pos += opf_text[pos..].find("<meta")?;
+    });
+    let mut pos = 0;
+    let mut selected: Option<(String, Option<String>)> = None;
+    while let Some(offset) = opf_text[pos..].find("<item") {
+        pos += offset;
+        let rest = &opf_text[pos..];
+        let Some(end) = rest.find('>') else { break };
+        let tag = &rest[..=end];
+        let id = xml_attr(tag, "id");
+        let properties = xml_attr(tag, "properties").unwrap_or_default();
+        let is_cover = properties.split_whitespace().any(|v| v == "cover-image")
+            || id.as_deref() == Some("cover-image")
+            || id.as_deref() == legacy_cover_id.as_deref();
+        if is_cover {
+            if let Some(href) = xml_attr(tag, "href") {
+                selected = Some((href, xml_attr(tag, "media-type")));
+                break;
+            }
+        }
+        pos += end + 1;
+    }
+    let (href, media_type) = selected?;
+    let opf_dir = Path::new(&opf).parent().unwrap_or_else(|| Path::new(""));
+    let entry = opf_dir.join(&href).to_string_lossy().replace('\\', "/");
+    let mime = cover_mime(&href, media_type)?;
+    let image = zip.by_name(&entry).ok()?;
+    if image.size() > MAX_COVER_BYTES { return None; }
+    let mut bytes = Vec::with_capacity(image.size() as usize);
+    image.take(MAX_COVER_BYTES + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > MAX_COVER_BYTES { return None; }
+    Some(EpubCover { data_url: format!("data:{mime};base64,{}", base64_encode(&bytes)) })
 }
 
 /// 转换完成/文件变动后更新单条记录(EPUB 元数据优先,失败回退文件名解析)。
@@ -1333,7 +1500,7 @@ fn set_cli_path(app: AppHandle, path: String) -> Result<(), String> {
 // ---------- 凭证写入(设置页) ----------
 
 /// 允许写入 apikey.json 的服务名(与 Python 侧 load_api_key 的键一致)。
-const APIKEY_SERVICES: [&str; 2] = ["MinerU", "PaddleOCR-VL"];
+const APIKEY_SERVICES: [&str; 3] = ["MinerU", "PaddleOCR-VL", "AI"];
 
 /// apikey.json 的候选目录:运行时 cwd → 壳 exe 目录 → CLI 目录及其上级
 /// (dev 形态 CLI 在 <root>/.venv/Scripts/,其上两级是项目根)。
@@ -1507,6 +1674,853 @@ fn save_apikey(app: AppHandle, service: String, token: String) -> Result<String,
     Ok(target.to_string_lossy().into_owned())
 }
 
+fn ai_key(app: &AppHandle) -> Result<String, String> {
+    let cli = app.state::<CliConfig>().cli_path.lock().unwrap().clone();
+    let target = apikey_target(Some(&cli));
+    let text = std::fs::read_to_string(&target).map_err(|_| "尚未配置 AI API Key".to_string())?;
+    let obj: serde_json::Value = serde_json::from_str(&text).map_err(|_| "AI 凭证文件无法读取".to_string())?;
+    obj.get("AI").and_then(|v| v.as_str()).filter(|v| !v.trim().is_empty())
+        .map(str::to_owned).ok_or_else(|| "尚未配置 AI API Key".to_string())
+}
+
+fn ai_chat_url(api_url: &str) -> Result<String, String> {
+    let base = api_url.trim().trim_end_matches('/');
+    if base.is_empty() || !(base.starts_with("https://") || base.starts_with("http://")) {
+        return Err("API 地址必须以 http:// 或 https:// 开头".into());
+    }
+    Ok(if base.ends_with("/chat/completions") { base.to_string() } else { format!("{base}/chat/completions") })
+}
+
+fn ai_models_url(api_url: &str) -> Result<String, String> {
+    let chat = ai_chat_url(api_url)?;
+    Ok(chat.strip_suffix("/chat/completions").unwrap_or(&chat).to_string() + "/models")
+}
+
+/// 请求必须带超时：模型服务不响应时，没有超时会让「生成预览」永久卡住，
+/// 用户只能杀掉整个应用。读取给 5 分钟（长章节推理），连接只给 10 秒。
+fn ai_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(10))
+        .timeout_read(std::time::Duration::from_secs(300))
+        .timeout_write(std::time::Duration::from_secs(60))
+        .build()
+}
+
+/// 按字节预算截断 UTF-8，绝不切在字符中间。
+/// 中文 `book.md` 的 160 KB 边界几乎必然落在多字节字符内部，直接切片会 panic。
+fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// 找与这本 EPUB 对应的 work/book.md：先看 EPUB 旁及上级目录
+/// (引擎常见布局 `work/<书名>/out/xxx.epub` → `work/<书名>/book.md`)，
+/// 再退回 `work_roots()/<书名>/book.md`。找不到时返回空上下文，不阻断优化。
+fn ai_work_context(epub_path: &Path) -> (String, Option<String>) {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(mut dir) = epub_path.parent().map(Path::to_path_buf) {
+        for _ in 0..3 {
+            candidates.push(dir.join("book.md"));
+            match dir.parent() {
+                Some(p) => dir = p.to_path_buf(),
+                None => break,
+            }
+        }
+    }
+    let stem = epub_path.file_stem().and_then(|s| s.to_str()).unwrap_or("book");
+    let work_name = sanitize_work_name(stem);
+    for root in work_roots() {
+        candidates.push(root.join(&work_name).join("book.md"));
+    }
+    for p in &candidates {
+        if let Ok(text) = std::fs::read_to_string(p) {
+            return (truncate_utf8(&text, 160_000).to_string(), Some(p.display().to_string()));
+        }
+    }
+    (String::new(), None)
+}
+
+/// 连接测试只访问 models，不会把书籍内容送出，也不会产生模型推理费用。
+#[tauri::command]
+async fn ai_test_connection(app: AppHandle, api_url: String) -> Result<String, String> {
+    let key = ai_key(&app)?;
+    let url = ai_models_url(&api_url)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        ai_agent().get(&url).set("Authorization", &format!("Bearer {key}"))
+            .set("Accept", "application/json").call()
+            .map(|r| format!("连接成功 (HTTP {})", r.status()))
+            .map_err(|e| match e {
+                ureq::Error::Status(code, _) => format!("连接被服务端拒绝 (HTTP {code})，请检查地址或密钥"),
+                _ => format!("无法连接 AI 服务: {e}"),
+            })
+    }).await.map_err(|e| format!("连接测试异常: {e}"))?
+}
+
+fn extract_ai_json(text: &str) -> Option<&str> {
+    let trimmed = text.trim();
+    if trimmed.starts_with('{') { return Some(trimmed); }
+    let fenced = trimmed.strip_prefix("```json").or_else(|| trimmed.strip_prefix("```"))?;
+    fenced.strip_suffix("```").map(str::trim)
+}
+
+/// AI 返回的是**整章替换内容**，模型只吐半截时写回去就是静默丢内容。
+/// 这里挡住三类危险输出：结构不闭合、正文被大幅删减、体积异常。
+fn valid_xhtml_replacement(original: &str, replacement: &str) -> bool {
+    let keep_structure = !original.contains("<html")
+        || (replacement.contains("<html") && replacement.contains("</html>"));
+    let keep_body = !original.contains("<body")
+        || (replacement.contains("<body") && replacement.contains("</body>"));
+    // 允许统一格式带来的正常压缩，但不接受正文缩到原来一半以下。
+    let not_gutted = replacement.trim().len() * 2 >= original.trim().len();
+    keep_structure && keep_body && not_gutted
+}
+
+// ---------- AI 校对（逐章 · 精确替换） ----------
+
+/// 段落级块标签：遇到它们就断行，预览全文才不会挤成一整段。
+const AI_BLOCK_TAGS: &[&str] = &[
+    "p", "div", "br", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote",
+    "section", "article", "tr", "figure", "figcaption", "td", "th", "pre",
+];
+
+fn ai_unescape(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+}
+
+fn ai_collapse_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// 剥标签，保留块级边界（每个单元格/段落一行）。预览与标题提取共用。
+fn xhtml_text(xhtml: &str) -> String {
+    let mut out = String::new();
+    let mut in_tag = false;
+    let mut tag = String::new();
+    for ch in xhtml.chars() {
+        match ch {
+            '<' => {
+                in_tag = true;
+                tag.clear();
+            }
+            '>' => {
+                in_tag = false;
+                let name = tag
+                    .trim()
+                    .trim_start_matches('/')
+                    .split(|c: char| c.is_whitespace() || c == '/')
+                    .next()
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if AI_BLOCK_TAGS.contains(&name.as_str()) && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
+            _ if in_tag => tag.push(ch),
+            c if c.is_whitespace() => {
+                if !out.ends_with(' ') && !out.ends_with('\n') {
+                    out.push(' ');
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    let mut lines: Vec<&str> = Vec::new();
+    for line in out.lines() {
+        let l = line.trim();
+        if l.is_empty() {
+            if lines.last().map(|s| s.is_empty()).unwrap_or(false) {
+                continue;
+            }
+            lines.push("");
+        } else {
+            lines.push(l);
+        }
+    }
+    ai_unescape(lines.join("\n").trim())
+}
+
+#[cfg(test)]
+fn xhtml_text_excerpt(xhtml: &str, max_bytes: usize) -> String {
+    truncate_utf8(&xhtml_text(xhtml), max_bytes).to_string()
+}
+
+/// 结构文件不交给模型：目录、封面、扉页被改写只会让包坏掉。
+fn ai_is_structural(name: &str) -> bool {
+    let base = name.rsplit('/').next().unwrap_or(name).to_ascii_lowercase();
+    matches!(
+        base.as_str(),
+        "nav.xhtml" | "cover.xhtml" | "title_page.xhtml" | "toc.xhtml" | "copyright.xhtml"
+    )
+}
+
+/// 从 nav.xhtml 读「包内路径 → 目录名」。目录名比文件名和首行标题都更接近读者看到的样子。
+fn ai_nav_titles(nav: Option<&str>) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let Some(nav) = nav else { return map };
+    let mut rest = nav;
+    while let Some(pos) = rest.find("<a ") {
+        rest = &rest[pos + 3..];
+        let Some(href_at) = rest.find("href=\"") else { break };
+        let after = &rest[href_at + 6..];
+        let Some(href_end) = after.find('"') else { break };
+        let href = &after[..href_end];
+        let tail = &after[href_end..];
+        let Some(gt) = tail.find('>') else { break };
+        let label_html = &tail[gt + 1..];
+        let Some(close) = label_html.find("</a>") else { break };
+        let label = ai_collapse_ws(&xhtml_text(&label_html[..close]));
+        let path = href.split('#').next().unwrap_or("").trim_start_matches("./");
+        if !path.is_empty() && !label.is_empty() {
+            map.insert(path.to_string(), label);
+        }
+        rest = &label_html[close + 4..];
+    }
+    map
+}
+
+/// 没有 nav 条目时的兜底：首个 h1~h3 → `<title>` → 文件名。
+fn ai_heading_title(content: &str) -> Option<String> {
+    let lower = content.to_ascii_lowercase();
+    for tag in ["h1", "h2", "h3", "title"] {
+        let open = format!("<{tag}");
+        let close = format!("</{tag}>");
+        if let Some(s) = lower.find(&open) {
+            let rest = &content[s..];
+            if let Some(gt) = rest.find('>') {
+                let inner = &rest[gt + 1..];
+                if let Some(end) = inner.to_ascii_lowercase().find(&close) {
+                    let title = ai_collapse_ws(&xhtml_text(&inner[..end]));
+                    if !title.is_empty() {
+                        return Some(title);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn ai_title_for(titles: &HashMap<String, String>, path: &str, content: &str) -> String {
+    if let Some(t) = titles.get(path) {
+        return t.clone();
+    }
+    let base = path.rsplit('/').next().unwrap_or(path);
+    for (k, v) in titles {
+        let kb = k.rsplit('/').next().unwrap_or(k);
+        if kb == base {
+            return v.clone();
+        }
+    }
+    ai_heading_title(content).unwrap_or_else(|| {
+        base.trim_end_matches(".xhtml")
+            .trim_end_matches(".html")
+            .to_string()
+    })
+}
+
+/// 模型返回的一处改动：原文片段 → 替换片段。
+#[derive(serde::Deserialize, Clone)]
+struct AiEdit {
+    find: String,
+    replace: String,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct AiChapterReply {
+    #[serde(default)]
+    edits: Vec<AiEdit>,
+}
+
+/// XML 良构性：模型最容易在「拆段 / 合并段」时少写一个 `</p>`，产物在阅读器里
+/// 整章拒渲染（结构校验只会说「不是良构 XHTML」，用户已经拿到坏书）。
+/// 每条替换落地后都重新解析一次，坏了只丢这一条，而不是整章。
+fn is_well_formed(xhtml: &str) -> bool {
+    roxmltree::Document::parse(strip_doctype(xhtml).as_ref()).is_ok()
+}
+
+/// roxmltree 不解析 DTD（直接报 "XML with DTD detected"），而 pandoc 的 XHTML 每份都带
+/// `<!DOCTYPE html>` —— 不剥掉的话每章都会被判「结构被破坏」。内部子集 `[...]` 也一并去掉。
+fn strip_doctype(xhtml: &str) -> std::borrow::Cow<'_, str> {
+    let Some(i) = xhtml.find("<!DOCTYPE").or_else(|| xhtml.find("<!doctype")) else {
+        return std::borrow::Cow::Borrowed(xhtml);
+    };
+    let rest = &xhtml[i..];
+    // 只有出现在第一个 '>' 之前的 '[' 才是内部子集；正文里的 "[韩] …" 之类不能当子集，
+    // 否则会一路找不到 "]>”，DOCTYPE 原样留下、每章都被判「结构被破坏」。
+    let gt = rest.find('>');
+    let end = match (rest.find('['), gt) {
+        (Some(open), Some(gt)) if open < gt => rest[open..].find("]>").map(|e| open + e + 2),
+        _ => gt.map(|g| g + 1),
+    };
+    match end {
+        Some(end) => std::borrow::Cow::Owned(format!("{}{}", &xhtml[..i], &xhtml[i + end..])),
+        None => std::borrow::Cow::Borrowed(xhtml),
+    }
+}
+
+/// 逐条落地替换。`find` 必须**唯一命中**：0 次说明模型记错了原文，多次则改哪一处都
+/// 可能错 —— 两种情况都跳过并把数目报给用户，绝不猜位置。
+struct AppliedEdits {
+    content: String,
+    applied: usize,
+    missed: usize,
+    /// 语法上能改，但改完标签不再配对 —— 丢弃并计数。
+    broke: usize,
+}
+
+fn apply_ai_edits(original: &str, edits: &[AiEdit]) -> AppliedEdits {
+    let mut content = original.to_string();
+    let (mut applied, mut missed, mut broke) = (0usize, 0usize, 0usize);
+    for e in edits {
+        if e.find.trim().is_empty() {
+            missed += 1;
+            continue;
+        }
+        if content.matches(&e.find).count() == 1 {
+            let candidate = content.replacen(&e.find, &e.replace, 1);
+            if is_well_formed(&candidate) {
+                content = candidate;
+                applied += 1;
+            } else {
+                broke += 1;
+            }
+        } else {
+            missed += 1;
+        }
+    }
+    AppliedEdits { content, applied, missed, broke }
+}
+
+/// 输出被 `max_tokens` 截断时，JSON 尾部是半截对象。按括号配平扫描把**完整**的
+/// edits 对象逐个救出来：救回多少条就落多少条，剩下的记一笔「截断」，
+/// 而不是把整章丢弃（旧实现就是整章丢弃，用户看到的是「格式无效」）。
+fn salvage_edits(text: &str) -> Vec<AiEdit> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < chars.len() {
+        if chars[i] != '{' {
+            i += 1;
+            continue;
+        }
+        let mut depth = 0i32;
+        let mut in_str = false;
+        let mut esc = false;
+        let mut j = i;
+        let mut closed = false;
+        while j < chars.len() {
+            let c = chars[j];
+            if in_str {
+                if esc {
+                    esc = false;
+                } else if c == '\\' {
+                    esc = true;
+                } else if c == '"' {
+                    in_str = false;
+                }
+            } else {
+                match c {
+                    '"' => in_str = true,
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            closed = true;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            j += 1;
+        }
+        if closed {
+            let slice: String = chars[i..=j].iter().collect();
+            if let Ok(e) = serde_json::from_str::<AiEdit>(&slice) {
+                out.push(e);
+                i = j + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// 解析一章的模型输出。返回 (改动, 是否走了截断救援)。
+fn parse_ai_edits(text: &str) -> (Vec<AiEdit>, bool) {
+    let candidate = extract_ai_json(text).unwrap_or(text);
+    if let Ok(reply) = serde_json::from_str::<AiChapterReply>(candidate) {
+        return (reply.edits, false);
+    }
+    (salvage_edits(candidate), true)
+}
+
+fn ai_book_context(work: &str, epub_path: &Path) -> String {
+    let stem = epub_path.file_stem().and_then(|s| s.to_str()).unwrap_or("book");
+    let head = truncate_utf8(work, 3_000).trim();
+    if head.is_empty() {
+        format!("书名：{stem}")
+    } else {
+        format!("书名：{stem}\n书籍正文开头（只用来理解文风与术语，不要照着改这一章）：\n{head}")
+    }
+}
+
+fn ai_chapter_prompt(book: &str, doc: &AiFile) -> String {
+    format!(
+        "你是 EPUB 校对编辑器。只修正这一章的 OCR 错误、错别字、多余空格与错误断行、\
+明显的标题层级错误。不得改写文风，不得删减或增补内容，不得改动标签、属性、id、class、\
+图片、链接、脚注锚点与数学公式。\n\
+返回方式：给出精确替换列表，不要整章重写。find 必须逐字出现在原文中且只出现一次；\
+find 尽量短（10–80 字）并逐字复制原文，空格与换行都要和原文一致，不要自行重排；需要跨标签时 find 可以带标签，但也必须与原文完全一致。replace 是替换后的片段。改动必须保持 XML 标签配对：拆段时每一段都要自带 <p>…</p>，绝不能留下未闭合的标签。\n\
+输出严格 JSON（不要 Markdown 代码块）：{{\"edits\":[{{\"find\":\"原文片段\",\"replace\":\"改后片段\"}}]}}；\
+没有可改的就输出 {{\"edits\":[]}}。\n\n{}\n\n待校对文件：{}\n{}",
+        book, doc.path, doc.content
+    )
+}
+
+/// 一次对话调用。`max_tokens` 显式给出：不给的话部分服务商默认只有几百 token，
+/// 输出被截断后错误却表现为「JSON 格式无效」，根因被藏起来。
+fn ai_send(
+    agent: &ureq::Agent,
+    url: &str,
+    key: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, (u16, String)> {
+    match agent
+        .post(url)
+        .set("Authorization", &format!("Bearer {key}"))
+        .set("Content-Type", "application/json")
+        .send_json(body.clone())
+    {
+        Ok(r) => r
+            .into_json::<serde_json::Value>()
+            .map_err(|e| (0, format!("AI 响应不是 JSON: {e}"))),
+        Err(ureq::Error::Status(code, resp)) => {
+            let text = resp.into_string().unwrap_or_default();
+            let snippet: String = text.trim().chars().take(200).collect();
+            Err((code, snippet))
+        }
+        Err(e) => Err((0, format!("AI 请求失败: {e}"))),
+    }
+}
+
+/// 返回 (正文, finish_reason)。finish_reason == "length" 就是被截断的确定证据。
+fn ai_chat(
+    agent: &ureq::Agent,
+    url: &str,
+    key: &str,
+    model: &str,
+    prompt: &str,
+    max_tokens: u32,
+) -> Result<(String, Option<String>), String> {
+    let mut body = serde_json::json!({
+        "model": model,
+        "temperature": 0.1,
+        "max_tokens": max_tokens,
+        "stream": false,
+        "response_format": { "type": "json_object" },
+        "messages": [
+            { "role": "system", "content": "You are an EPUB proofreader. Reply with one JSON object, no prose." },
+            { "role": "user", "content": prompt }
+        ]
+    });
+    let mut response = match ai_send(agent, url, key, &body) {
+        Ok(v) => v,
+        // 有些兼容网关不认 response_format，400 时退回普通模式再试一次。
+        Err((400, _)) => {
+            if let Some(obj) = body.as_object_mut() {
+                obj.remove("response_format");
+            }
+            ai_send(agent, url, key, &body).map_err(|(code, msg)| {
+                if code == 0 { msg } else { format!("AI 请求被拒绝 (HTTP {code}): {msg}") }
+            })?
+        }
+        Err((code, msg)) => {
+            return Err(if code == 0 { msg } else { format!("AI 请求被拒绝 (HTTP {code}): {msg}") });
+        }
+    };
+    let choice = response
+        .pointer_mut("/choices/0")
+        .map(|c| c.take())
+        .ok_or("AI 响应中没有结果，请检查模型名称")?;
+    let content = choice
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let finish = choice
+        .get("finish_reason")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    if content.trim().is_empty() {
+        return Err("AI 没有返回文本结果，换个模型或稍后重试".into());
+    }
+    Ok((content, finish))
+}
+
+/// 逐章校对：一章一次请求，失败只影响这一章。
+fn process_ai_chapter(
+    agent: &ureq::Agent,
+    url: &str,
+    key: &str,
+    model: &str,
+    book: &str,
+    doc: &AiFile,
+    titles: &HashMap<String, String>,
+) -> (AiChapter, Option<AiFile>) {
+    let title = ai_title_for(titles, &doc.path, &doc.content);
+    let before_text = xhtml_text(&doc.content);
+    let mut chapter = AiChapter {
+        path: doc.path.clone(),
+        title,
+        status: "failed".into(),
+        note: None,
+        edits: 0,
+        missed: 0,
+        before_chars: before_text.chars().count(),
+        after_chars: before_text.chars().count(),
+        before_text: before_text.clone(),
+        after_text: before_text,
+    };
+    let prompt = ai_chapter_prompt(book, doc);
+    let (content, finish) = match ai_chat(agent, url, key, model, &prompt, 8192) {
+        Ok(v) => v,
+        Err(e) => {
+            chapter.note = Some(e);
+            return (chapter, None);
+        }
+    };
+    let truncated = finish.as_deref() == Some("length");
+    let (edits, salvaged) = parse_ai_edits(&content);
+    if edits.is_empty() {
+        let looks_json = content.trim_start().starts_with('{');
+        chapter.note = if truncated || salvaged {
+            Some("模型输出被截断（达到输出上限），本章拿不到完整改动".into())
+        } else if looks_json {
+            None
+        } else {
+            Some("模型没有返回约定的 JSON，本章已跳过".into())
+        };
+        chapter.status = if chapter.note.is_some() { "failed".into() } else { "unchanged".into() };
+        return (chapter, None);
+    }
+    let applied = apply_ai_edits(&doc.content, &edits);
+    let mut notes: Vec<String> = Vec::new();
+    if truncated || salvaged {
+        notes.push("输出被截断，只应用了完整的那部分改动".into());
+    }
+    if applied.missed > 0 {
+        notes.push(format!("{} 处改动没能在原文中唯一命中，已跳过", applied.missed));
+    }
+    if applied.broke > 0 {
+        notes.push(format!("{} 处改动会破坏标签配对，已丢弃", applied.broke));
+    }
+    if !is_well_formed(&applied.content) || !valid_xhtml_replacement(&doc.content, &applied.content) {
+        chapter.note = Some("AI 的改动破坏了章节结构，已整章拒绝以免内容丢失".into());
+        chapter.status = "failed".into();
+        return (chapter, None);
+    }
+    chapter.edits = applied.applied;
+    chapter.missed = applied.missed;
+    chapter.after_chars = xhtml_text(&applied.content).chars().count();
+    chapter.after_text = xhtml_text(&applied.content);
+    chapter.status = if applied.applied == 0 { "unchanged".into() } else { "changed".into() };
+    chapter.note = if notes.is_empty() { None } else { Some(notes.join("；")) };
+    let file = if applied.applied > 0 {
+        Some(AiFile { path: doc.path.clone(), content: applied.content })
+    } else {
+        None
+    };
+    (chapter, file)
+}
+
+/// 逐章校对整本 EPUB：每章一次请求（3 路并发），进度通过 `ai-progress` 事件推给界面。
+/// 预览只存内存，确认前不写任何 EPUB；失败与跳过按章记录，不让一处失败拖垮整本。
+#[tauri::command]
+async fn ai_optimize(
+    app: AppHandle,
+    epub: String,
+    api_url: String,
+    model: String,
+) -> Result<AiPreviewResult, String> {
+    let key = ai_key(&app)?;
+    let url = ai_chat_url(&api_url)?;
+    if model.trim().is_empty() {
+        return Err("请先填写 AI 模型名称".into());
+    }
+    let epub_path = PathBuf::from(&epub);
+    let source_file = std::fs::File::open(&epub_path).map_err(|e| format!("无法打开 EPUB: {e}"))?;
+    let mut zip = zip::ZipArchive::new(source_file).map_err(|e| format!("EPUB 不是有效 ZIP: {e}"))?;
+    let mut docs: Vec<AiFile> = Vec::new();
+    let mut nav: Option<String> = None;
+    let mut skipped: Vec<(String, String)> = Vec::new();
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i).map_err(|e| e.to_string())?;
+        let name = entry.name().to_string();
+        if !(name.ends_with(".xhtml") || name.ends_with(".html") || name.ends_with(".htm")) {
+            continue;
+        }
+        let is_nav = name
+            .rsplit('/')
+            .next()
+            .map(|b| b.eq_ignore_ascii_case("nav.xhtml"))
+            .unwrap_or(false);
+        // 单章超过 512 KB 时输入本身就顶到上下文上限，跳过并如实告诉用户。
+        if !is_nav && entry.size() > 512 * 1024 {
+            skipped.push((name, "章节超过 512 KB，超出单次上下文，已跳过".into()));
+            continue;
+        }
+        let mut content = String::new();
+        entry
+            .read_to_string(&mut content)
+            .map_err(|_| format!("章节不是 UTF-8: {name}"))?;
+        if content.is_empty() {
+            continue;
+        }
+        if is_nav || content.contains("epub:type=\"nav\"") {
+            nav = Some(content);
+            continue;
+        }
+        if ai_is_structural(&name) {
+            continue;
+        }
+        // 封面/扉页这类只有几十个字的文件交给模型没有收益，只会多花额度。
+        if xhtml_text(&content).chars().count() < 120 {
+            skipped.push((name, "正文过短（封面/扉页类），不送校对".into()));
+            continue;
+        }
+        docs.push(AiFile { path: name, content });
+    }
+    if docs.is_empty() {
+        return Err("EPUB 中没有可校对的正文章节".into());
+    }
+    let (work, context_path) = ai_work_context(&epub_path);
+    let book = ai_book_context(&work, &epub_path);
+    let titles = ai_nav_titles(nav.as_deref());
+    let total = docs.len();
+
+    let app_handle = app.clone();
+    let url_for_task = url.clone();
+    let key_for_task = key.clone();
+    let model_for_task = model.clone();
+    let (mut chapters, files) = tauri::async_runtime::spawn_blocking(move || {
+        let agent = ai_agent();
+        let queue: Mutex<std::collections::VecDeque<(usize, AiFile)>> =
+            Mutex::new(docs.into_iter().enumerate().collect());
+        let slots: Mutex<Vec<Option<(AiChapter, Option<AiFile>)>>> =
+            Mutex::new((0..total).map(|_| None).collect());
+        let _ = app_handle.emit("ai-progress", serde_json::json!({ "phase": "start", "total": total }));
+        std::thread::scope(|scope| {
+            for _ in 0..3.min(total) {
+                scope.spawn(|| loop {
+                    let job = queue.lock().unwrap().pop_front();
+                    let Some((idx, doc)) = job else { break };
+                    let (chapter, file) = process_ai_chapter(
+                        &agent,
+                        &url_for_task,
+                        &key_for_task,
+                        &model_for_task,
+                        &book,
+                        &doc,
+                        &titles,
+                    );
+                    let _ = app_handle.emit(
+                        "ai-progress",
+                        serde_json::json!({
+                            "phase": "chapter",
+                            "index": idx + 1,
+                            "total": total,
+                            "path": chapter.path,
+                            "title": chapter.title,
+                            "status": chapter.status,
+                            "edits": chapter.edits,
+                            "before_chars": chapter.before_chars,
+                            "after_chars": chapter.after_chars,
+                            "note": chapter.note,
+                        }),
+                    );
+                    slots.lock().unwrap()[idx] = Some((chapter, file));
+                });
+            }
+        });
+        let mut chapters: Vec<AiChapter> = Vec::new();
+        let mut files: Vec<AiFile> = Vec::new();
+        for slot in slots.into_inner().unwrap().into_iter().flatten() {
+            if let Some(f) = slot.1 {
+                files.push(f);
+            }
+            chapters.push(slot.0);
+        }
+        (chapters, files)
+    })
+    .await
+    .map_err(|e| format!("AI 优化中断: {e}"))?;
+
+    for (path, note) in skipped {
+        chapters.push(AiChapter {
+            title: path.rsplit('/').next().unwrap_or(&path).to_string(),
+            path,
+            status: "skipped".into(),
+            note: Some(note),
+            edits: 0,
+            missed: 0,
+            before_chars: 0,
+            after_chars: 0,
+            before_text: String::new(),
+            after_text: String::new(),
+        });
+    }
+    let changed = chapters.iter().filter(|c| c.status == "changed").count();
+    let failed = chapters.iter().filter(|c| c.status == "failed").count();
+    let unchanged = chapters.iter().filter(|c| c.status == "unchanged").count();
+    let skipped_n = chapters.iter().filter(|c| c.status == "skipped").count();
+    let mut summary = format!("逐章校对完成：{changed} 章有改动，{unchanged} 章无需改动");
+    if failed > 0 {
+        summary.push_str(&format!("，{failed} 章失败"));
+    }
+    if skipped_n > 0 {
+        summary.push_str(&format!("，{skipped_n} 章跳过"));
+    }
+    if changed == 0 && failed > 0 {
+        summary.push_str("；可以换个模型或缩短章节后重试，原文件未改动");
+    }
+    let model_used = model.clone();
+    let id = format!("{}-{}", now_secs(), std::process::id());
+    app.state::<AiPreviews>()
+        .entries
+        .lock()
+        .unwrap()
+        .insert(id.clone(), AiPreview { source: epub, files });
+    Ok(AiPreviewResult {
+        id,
+        summary,
+        context: context_path,
+        model: model_used,
+        total: chapters.len(),
+        changed,
+        chapters,
+    })
+}
+
+/// 给优化产物打上 AI 标记：`dc:contributor` 是标准元素，阅读器与 Calibre 都能看到。
+/// OPF 没声明 dc 命名空间时不插（否则会写出非法 XML）。
+fn inject_ai_marker(opf: &str) -> String {
+    if opf.contains("pdf2epub-ai") || !opf.contains("xmlns:dc") {
+        return opf.to_string();
+    }
+    let marker = "<dc:contributor id=\"pdf2epub-ai\">AI 优化（pdf2epub）</dc:contributor>";
+    let out = match opf.find("</metadata>") {
+        Some(pos) => {
+            let mut out = String::with_capacity(opf.len() + marker.len() + 8);
+            out.push_str(opf[..pos].trim_end_matches([' ', '\t', '\r', '\n']));
+            out.push('\n');
+            out.push_str("    ");
+            out.push_str(marker);
+            out.push('\n');
+            out.push_str("</metadata>");
+            out.push_str(&opf[pos + "</metadata>".len()..]);
+            out
+        }
+        None => opf.to_string(),
+    };
+    // 插入后仍须是良构 XML：OPF 声明了别的命名空间前缀时，宁可放弃标记也不能写坏元数据。
+    if !is_well_formed(&out) {
+        return opf.to_string();
+    }
+    out
+}
+
+/// 把预览写成**新的** EPUB：逐条复制原包，替换命中的 XHTML，其余原样拷贝。
+/// mimetype 保持第一个条目且 Stored（EPUB 规范要求），条目顺序不变。
+fn write_ai_epub(source: &Path, output: &Path, files: &[AiFile]) -> Result<(), String> {
+    if source == output {
+        return Err("拒绝覆盖原 EPUB".into());
+    }
+    let input = std::fs::File::open(source).map_err(|e| format!("无法读取原 EPUB: {e}"))?;
+    let mut zip = zip::ZipArchive::new(input).map_err(|e| e.to_string())?;
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let temp = output.with_extension("epub.tmp");
+    let out = std::fs::File::create(&temp).map_err(|e| e.to_string())?;
+    let mut writer = zip::ZipWriter::new(out);
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i).map_err(|e| e.to_string())?;
+        let name = entry.name().to_string();
+        let options = zip::write::SimpleFileOptions::default().compression_method(
+            if name == "mimetype" {
+                zip::CompressionMethod::Stored
+            } else {
+                zip::CompressionMethod::Deflated
+            },
+        );
+        writer.start_file(&name, options).map_err(|e| e.to_string())?;
+        if let Some(f) = files.iter().find(|f| f.path == name) {
+            writer.write_all(f.content.as_bytes()).map_err(|e| e.to_string())?;
+        } else if name.ends_with(".opf") {
+            let mut opf = String::new();
+            entry.read_to_string(&mut opf).map_err(|e| e.to_string())?;
+            writer
+                .write_all(inject_ai_marker(&opf).as_bytes())
+                .map_err(|e| e.to_string())?;
+        } else {
+            std::io::copy(&mut entry, &mut writer).map_err(|e| e.to_string())?;
+        }
+    }
+    writer.finish().map_err(|e| e.to_string())?;
+    std::fs::rename(&temp, output).map_err(|e| format!("无法保存优化版: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn ai_apply_preview(app: AppHandle, preview_id: String) -> Result<String, String> {
+    // 先克隆再写盘：写盘失败时预览仍在内存里，用户不必重新跑一次模型。
+    let preview = app
+        .state::<AiPreviews>()
+        .entries
+        .lock()
+        .unwrap()
+        .get(&preview_id)
+        .cloned()
+        .ok_or("优化预览已失效，请重新生成")?;
+    if preview.files.is_empty() {
+        return Err("这次预览没有任何改动，无需另存".into());
+    }
+    let source = PathBuf::from(&preview.source);
+    let parent = source.parent().ok_or("EPUB 路径无效")?;
+    let stem = source.file_stem().and_then(|s| s.to_str()).unwrap_or("book");
+    let suffix = if stem.contains("-AI优化") { "-AI优化" } else { "-AI优化" };
+    let base = stem.trim_end_matches("-AI优化").to_string();
+    let mut output = parent.join(format!("{base}{suffix}.epub"));
+    for n in 2..1000 {
+        if !output.exists() {
+            break;
+        }
+        output = parent.join(format!("{base}{suffix}-{n}.epub"));
+    }
+    write_ai_epub(&source, &output, &preview.files)?;
+    app.state::<AiPreviews>()
+        .entries
+        .lock()
+        .unwrap()
+        .remove(&preview_id);
+    upsert_library(&output.to_string_lossy(), None);
+    Ok(output.to_string_lossy().into_owned())
+}
+
 // ---------- 环境检查(设置页) ----------
 
 #[derive(serde::Serialize)]
@@ -1523,6 +2537,7 @@ struct EnvCheckResult {
     engine: EnvItem,
     mineru_configured: bool,
     paddle_configured: bool,
+    ai_configured: bool,
     /// apikey.json 的实际位置(用户可在设置页看到凭证写到哪)
     apikey_path: Option<String>,
     /// 凭证文件权限是否已收紧(None = 还没有凭证文件;Some(false) = 收紧失败)
@@ -1862,32 +2877,22 @@ fn detect_pandoc() -> EnvItem {
     }
 }
 
-/// 读取 apikey.json 中两个凭证键是否存在且非空(不返回值本身)。
-fn detect_apikey() -> (bool, bool) {
-    let mut bases: Vec<PathBuf> = Vec::new();
-    if let Ok(c) = std::env::current_dir() {
-        bases.push(c);
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(d) = exe.parent() {
-            bases.push(d.to_path_buf());
-        }
-    }
-    for base in bases {
-        let f = base.join("apikey.json");
-        let Ok(text) = std::fs::read_to_string(&f) else { continue };
-        let Ok(data) = serde_json::from_str::<serde_json::Value>(&text) else {
-            continue;
-        };
-        let has = |k: &str| {
-            data.get(k)
-                .and_then(|v| v.as_str())
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false)
-        };
-        return (has("MinerU"), has("PaddleOCR-VL"));
-    }
-    (false, false)
+/// 读取 apikey.json 中三个凭证键是否存在且非空(不返回值本身)。
+/// 必须和 save_apikey / ai_key 用同一套定位规则 —— 否则会出现「密钥已保存，
+/// 但设置页永远显示 MISSING」(两者曾分别查 cwd/exe 与 CLI 推导出的项目根)。
+fn detect_apikey(cli_path: Option<&str>) -> (bool, bool, bool) {
+    let f = apikey_target(cli_path);
+    let Ok(text) = std::fs::read_to_string(&f) else { return (false, false, false) };
+    let Ok(data) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return (false, false, false);
+    };
+    let has = |k: &str| {
+        data.get(k)
+            .and_then(|v| v.as_str())
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+    };
+    (has("MinerU"), has("PaddleOCR-VL"), has("AI"))
 }
 
 /// 环境检查: Pandoc / 转换引擎 / 凭证状态(设置页 ENVIRONMENT CHECK)。
@@ -1919,7 +2924,7 @@ fn check_env(app: AppHandle) -> EnvCheckResult {
         }
     };
     let pandoc = detect_pandoc();
-    let (mineru_configured, paddle_configured) = detect_apikey();
+    let (mineru_configured, paddle_configured, ai_configured) = detect_apikey(Some(&cli));
     let apikey = apikey_target(Some(&cli));
     let has_apikey = apikey.is_file();
     let apikey_path = if has_apikey {
@@ -1938,6 +2943,7 @@ fn check_env(app: AppHandle) -> EnvCheckResult {
         engine,
         mineru_configured,
         paddle_configured,
+        ai_configured,
         apikey_path,
         apikey_perms_ok,
     }
@@ -1953,6 +2959,7 @@ pub fn run() {
         .manage(CliConfig::default())
         .manage(RunningTasks::default())
         .manage(PreflightCache::default())
+        .manage(AiPreviews::default())
         .invoke_handler(tauri::generate_handler![
             convert_file,
             preflight,
@@ -1961,7 +2968,11 @@ pub fn run() {
             check_env,
             install_pandoc,
             save_apikey,
+            ai_test_connection,
+            ai_optimize,
+            ai_apply_preview,
             library_sync,
+            epub_cover,
             library_set_meta,
             library_delete,
             delete_book_output,
@@ -2109,6 +3120,16 @@ mod tests {
         let entries: Vec<LibraryEntry> = serde_json::from_str(old).expect("旧库必须可解析");
         assert_eq!(entries.len(), 1);
         assert!(entries[0].kind.is_none() && entries[0].backend.is_none() && entries[0].pages.is_none());
+    }
+
+    #[test]
+    fn cover_helpers_support_epub2_and_binary_data() {
+        assert_eq!(xml_attr(r#"<item id='cover' href="cover.jpg"/>"#, "id").as_deref(), Some("cover"));
+        assert_eq!(xml_attr(r#"<item id='cover' href="cover.jpg"/>"#, "href").as_deref(), Some("cover.jpg"));
+        assert_eq!(base64_encode(&[0, 1, 2]), "AAEC");
+        assert_eq!(base64_encode(&[0]), "AA==");
+        assert_eq!(cover_mime("images/cover.jpg", None).as_deref(), Some("image/jpeg"));
+        assert_eq!(cover_mime("cover.bin", Some("image/png".into())).as_deref(), Some("image/png"));
     }
 
     #[test]
@@ -2442,5 +3463,196 @@ mod tests {
         assert_ne!(base, preflight_cache_key("cli", None, &[("c:/a.pdf".into(), 101, 5)]));
         assert_ne!(base, preflight_cache_key("cli", None, &[("c:/a.pdf".into(), 100, 6)]));
         assert_ne!(base, preflight_cache_key("other-engine", None, &[("c:/a.pdf".into(), 100, 5)]));
+    }
+
+    // ---------- AI 优化 ----------
+
+    #[test]
+    fn truncate_utf8_never_splits_a_character() {
+        let text = "中文".repeat(100_000);
+        let cut = truncate_utf8(&text, 160_000);
+        assert!(cut.len() <= 160_000);
+        assert!(cut.is_char_boundary(cut.len()));
+        assert_eq!(truncate_utf8("中", 1), "");
+        assert_eq!(truncate_utf8("中", 2), "");
+        assert_eq!(truncate_utf8("中", 3), "中");
+        assert_eq!(truncate_utf8("abc", 99), "abc");
+    }
+
+    #[test]
+    fn ai_urls_accept_base_and_full_endpoint() {
+        assert_eq!(ai_chat_url("https://api.openai.com/v1/").unwrap(),
+                   "https://api.openai.com/v1/chat/completions");
+        assert_eq!(ai_chat_url(" https://x/v1/chat/completions ").unwrap(),
+                   "https://x/v1/chat/completions");
+        assert_eq!(ai_models_url("https://x/v1").unwrap(), "https://x/v1/models");
+        assert!(ai_chat_url("ftp://x").is_err());
+        assert!(ai_chat_url("").is_err());
+    }
+
+    #[test]
+    fn ai_rejects_truncated_xhtml() {
+        let original = "<html xmlns=\"http://www.w3.org/1999/xhtml\"><body><p>第一章很长很长的内容</p></body></html>";
+        assert!(valid_xhtml_replacement(original, &original.replace("第一章", "第 1 章")));
+        // 模型只吐半截：没有 </html>，写回去就是静默丢掉后半本
+        assert!(!valid_xhtml_replacement(original, "<html><body><p>片段</p>"));
+        // 正文被大幅删减
+        assert!(!valid_xhtml_replacement(original, "<html><body></body></html>"));
+        // 非完整文档片段不做结构断言，只做体积检查
+        assert!(valid_xhtml_replacement("<div>片段</div>", "<div>片段二</div>"));
+    }
+
+    #[test]
+    fn xhtml_excerpt_strips_tags_and_stays_utf8_safe() {
+        let x = "<html><body><p>第一章  内容</p><p>中文测试</p></body></html>";
+        let got = xhtml_text_excerpt(x, 12);
+        assert!(!got.contains('<'));
+        assert!(got.is_char_boundary(got.len()));
+        assert!(got.starts_with("第一章"));
+        assert!(got.len() <= 12);
+    }
+
+    #[test]
+    fn apply_edits_skips_ambiguous_and_missing_finds() {
+        let applied = apply_ai_edits("<p>甲 乙</p>",
+                                     &[AiEdit { find: "甲 乙".into(), replace: "甲乙".into() }]);
+        assert_eq!((applied.applied, applied.missed), (1, 0));
+        assert!(applied.content.contains("甲乙"));
+        // 出现两次：改哪一处都可能是错的，整条跳过
+        let twice = apply_ai_edits("<p>x</p>",
+                                   &[AiEdit { find: "x".into(), replace: "y".into() }]);
+        assert_eq!((twice.applied, twice.missed), (1, 0));
+        let twice = apply_ai_edits("<p>x x</p>",
+                                   &[AiEdit { find: "x".into(), replace: "y".into() }]);
+        assert_eq!((twice.applied, twice.missed), (0, 1));
+        // 原文里没有：模型记错了，跳过
+        let missing = apply_ai_edits("<p>abc</p>",
+                                     &[AiEdit { find: "z".into(), replace: "y".into() }]);
+        assert_eq!((missing.applied, missing.missed), (0, 1));
+    }
+
+    #[test]
+    fn well_formed_tolerates_pandoc_doctype() {
+        // pandoc 的每份 XHTML 都带 DOCTYPE，而 roxmltree 不解析 DTD：
+        // 不先剥掉，正常章节会被一律判成「结构被破坏」。
+        let doc = concat!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+            "<!DOCTYPE html>",
+            "<html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:epub=\"http://www.idpf.org/2007/ops\">",
+            "<head><title>t</title></head><body><p>正文</p></body></html>"
+        );
+        assert!(is_well_formed(doc));
+        assert!(!is_well_formed(&doc.replace("</p>", "")));
+        assert!(is_well_formed("<!DOCTYPE html SYSTEM \"about:legacy-compat\"><p>x</p>"));
+        // 实测踩过：正文里的 "[韩] 崔仁勋" 让 DOCTYPE 剥除失效，整章被误判
+        let with_brackets = concat!(
+            "<?xml version=\"1.0\"?><!DOCTYPE html>",
+            "<html xmlns=\"http://www.w3.org/1999/xhtml\"><body>",
+            "<p>[韩] 崔仁勋 著</p><p>Ⅳ. ①灰… ②张…</p></body></html>"
+        );
+        assert!(is_well_formed(with_brackets));
+    }
+
+    #[test]
+    fn apply_edits_drops_the_one_that_unbalances_tags() {
+        // 实测踩过的坑：模型把一句对话拆成两段，却漏掉前一段的 </p>
+        let original = "<html><body><p>“写得很好嘛！” 后面还有一句</p><p>下一段。</p></body></html>";
+        let bad = AiEdit {
+            find: "“写得很好嘛！” 后面还有一句</p>".into(),
+            replace: "“写得很好嘛！”\n<p>后面还有一句".into(),
+        };
+        let good = AiEdit { find: "下一段。".into(), replace: "下一段！".into() };
+        let applied = apply_ai_edits(original, &[bad, good]);
+        assert_eq!((applied.applied, applied.broke), (1, 1));
+        assert!(applied.content.contains("下一段！"));
+        assert!(applied.content.contains("后面还有一句</p>"));
+        assert!(is_well_formed(&applied.content));
+    }
+
+    #[test]
+    fn salvage_edits_keeps_complete_objects_from_cut_output() {
+        // 被 max_tokens 截断：前两条完整、最后一条半截 —— 救回前两条而不是整章丢弃
+        let cut = "{\"edits\":[{\"find\":\"a\",\"replace\":\"b\"},{\"find\":\"c\",\"replace\":\"d\"},{\"find\":\"e\",\"repl";
+        let edits = salvage_edits(cut);
+        assert_eq!(edits.len(), 2);
+        assert_eq!(edits[0].find, "a");
+        assert_eq!(edits[1].replace, "d");
+        let (parsed, salvaged) = parse_ai_edits("{\"edits\":[{\"find\":\"a\",\"replace\":\"b\"}]}");
+        assert_eq!(parsed.len(), 1);
+        assert!(!salvaged);
+        let (fenced, _) = parse_ai_edits("```json\n{\"edits\":[]}\n```");
+        assert!(fenced.is_empty());
+        // 完全不是 JSON 时不能靠救援伪造改动
+        assert!(salvage_edits("模型跑偏了，这不是 JSON").is_empty());
+    }
+
+    #[test]
+    fn ai_marker_is_added_once_and_only_when_namespace_exists() {
+        let opf = "<?xml version=\"1.0\"?><package xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><metadata><dc:title>T</dc:title></metadata><manifest/></package>";
+        let once = inject_ai_marker(opf);
+        assert!(once.contains("pdf2epub-ai"));
+        assert!(once.contains("</metadata>"));
+        assert_eq!(inject_ai_marker(&once), once);
+        let bare = "<package><metadata><dc:title>x</dc:title></metadata></package>";
+        assert_eq!(inject_ai_marker(bare), bare);
+    }
+
+    #[test]
+    fn xhtml_text_keeps_paragraph_breaks() {
+        let got = xhtml_text("<html><body><h1>第一章</h1><p>第一段。</p><p>第二段。</p></body></html>");
+        assert_eq!(got, "第一章\n第一段。\n第二段。");
+        assert_eq!(xhtml_text("<p>a &amp; b</p>"), "a & b");
+    }
+
+    #[test]
+    fn nav_titles_map_href_to_label() {
+        let nav = "<nav epub:type=\"toc\"><ol><li><a href=\"text/ch1.xhtml#a-b\">第一章 起</a></li><li><a href=\"text/ch2.xhtml\">第二章</a></li></ol></nav>";
+        let titles = ai_nav_titles(Some(nav));
+        assert_eq!(titles.get("text/ch1.xhtml").map(String::as_str), Some("第一章 起"));
+        assert_eq!(ai_title_for(&titles, "EPUB/text/ch2.xhtml", "<p>x</p>"), "第二章");
+        // 没有 nav 条目时退回章节内首个标题
+        assert_eq!(ai_title_for(&HashMap::new(), "EPUB/text/ch9.xhtml", "<h2>第九章</h2>"), "第九章");
+    }
+
+    #[test]
+    fn write_ai_epub_keeps_original_and_mimetype_stored() {
+        let base = std::env::temp_dir().join(format!("pdf2epub-ai-{}-{}", now_secs(), std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let source = base.join("book.epub");
+        {
+            let f = std::fs::File::create(&source).unwrap();
+            let mut w = zip::ZipWriter::new(f);
+            w.start_file("mimetype", zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored)).unwrap();
+            w.write_all(b"application/epub+zip").unwrap();
+            w.start_file("OEBPS/ch1.xhtml", zip::write::SimpleFileOptions::default()).unwrap();
+            w.write_all(b"<html><body><p>old</p></body></html>").unwrap();
+            w.start_file("OEBPS/style.css", zip::write::SimpleFileOptions::default()).unwrap();
+            w.write_all(b"p{margin:0}").unwrap();
+            w.finish().unwrap();
+        }
+        let output = base.join("book-AI.epub");
+        let files = vec![AiFile {
+            path: "OEBPS/ch1.xhtml".into(),
+            content: "<html><body><p>new</p></body></html>".into(),
+        }];
+        write_ai_epub(&source, &output, &files).unwrap();
+
+        assert!(source.is_file(), "原 EPUB 必须保留");
+        let mut z = zip::ZipArchive::new(std::fs::File::open(&output).unwrap()).unwrap();
+        {
+            let mime = z.by_index(0).unwrap();
+            assert_eq!(mime.name(), "mimetype");
+            assert_eq!(mime.compression(), zip::CompressionMethod::Stored);
+        }
+        let mut chapter = String::new();
+        z.by_name("OEBPS/ch1.xhtml").unwrap().read_to_string(&mut chapter).unwrap();
+        assert!(chapter.contains("new"));
+        let mut css = String::new();
+        z.by_name("OEBPS/style.css").unwrap().read_to_string(&mut css).unwrap();
+        assert_eq!(css, "p{margin:0}", "未改动的条目必须原样保留");
+        // 写回原路径必须被拒绝
+        assert!(write_ai_epub(&source, &source, &files).is_err());
+        std::fs::remove_dir_all(&base).ok();
     }
 }
