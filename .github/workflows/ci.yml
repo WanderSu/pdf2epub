@@ -11,6 +11,11 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Windows runner 的管道默认 cp1252:脚本/引擎打印中文会抛 UnicodeEncodeError
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: utf-8
+
 jobs:
   engine:
     name: 引擎与前端(Ubuntu)
@@ -29,11 +34,16 @@ jobs:
       - name: 安装 Python 依赖(锁文件)
         run: uv sync --locked
 
-      # 部分用例要 pandoc 才能跑;缺了会被静默 skip,所以先装上
-      - name: 安装 pandoc 与中文字体
+      # pandoc 必须与开发环境同版本:apt 里那份 3.1.x 生成的脚注回链与封面 meta
+      # 与 3.6+ 不同,会让正常产物被判失败(实测 doc-backlink / meta name=cover)
+      - name: 安装 pandoc 3.14 与中文字体
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pandoc fonts-noto-cjk
+          sudo apt-get install -y --no-install-recommends fonts-noto-cjk
+          curl -fsSL -o /tmp/pandoc.deb \
+            https://github.com/jgm/pandoc/releases/download/3.14/pandoc-3.14-1-amd64.deb
+          sudo dpkg -i /tmp/pandoc.deb
+          pandoc --version | head -1
 
       # 只检查 pyproject 的 [tool.ruff] include 里那批路径(新增 + 核心模块):
       # 存量代码按模块逐步并入,不在一次提交里格式化整个历史仓库
@@ -84,6 +94,18 @@ jobs:
 
       - name: 安装 Python 依赖(锁文件)
         run: uv sync --locked
+
+      # runner 自带的 pandoc 版本不可控,发布形态 smoke test 需要引擎找得到它;
+      # 与 Linux 侧固定同一版本,避免"CI 绿、本机红"的假象
+      - name: 安装 pandoc 3.14
+        shell: pwsh
+        run: |
+          $zip = "$env:RUNNER_TEMP\pandoc.zip"
+          Invoke-WebRequest -Uri "https://github.com/jgm/pandoc/releases/download/3.14/pandoc-3.14-windows-x86_64.zip" -OutFile $zip
+          Expand-Archive $zip -DestinationPath "$env:RUNNER_TEMP\pandoc" -Force
+          $bin = Get-ChildItem "$env:RUNNER_TEMP\pandoc" -Recurse -Filter pandoc.exe | Select-Object -First 1
+          $bin.Directory.FullName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & $bin.FullName --version | Select-Object -First 1
 
       # 7 处版本号同源(pyproject / uv.lock / tauri.conf / Cargo.toml / types.ts / README×2)
       - name: 版本号一致性
