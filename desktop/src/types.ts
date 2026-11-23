@@ -104,6 +104,8 @@ export interface EnvState {
   mineru_configured: boolean;
   paddle_configured: boolean;
   apikey_path: string | null;
+  /** 凭证文件权限是否已收紧(null = 还没有凭证文件) */
+  apikey_perms_ok: boolean | null;
 }
 
 /** CLI `--dry-run --json` 的单个文件计划(印前检查的原始数据) */
