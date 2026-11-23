@@ -1,19 +1,22 @@
 # Security Policy
 
-## Reporting
+> 中文版：[SECURITY.zh-CN.md](SECURITY.zh-CN.md)
 
-**Do not open a public issue.** Use GitHub's private security advisory
-(`Security` → `Report a vulnerability`) or contact the maintainer directly.
+## Reporting a vulnerability
 
-Include the affected version, reproduction steps, and impact. **Do not attach real
-tokens, real books, or logs containing personal information** — strip credentials and
-paths first.
+General questions and feature requests are welcome as public issues, and PRs are welcome too.
 
-Expect a reply within three working days; a fix and a release follow once confirmed.
+Please include the affected version, reproduction steps and potential impact where you can. **Do not attach real tokens, real book files, or logs containing personal information** — remove credentials and personal paths before sharing logs.
 
-## In scope
+## Maintenance and response
 
-Reported issues are handled as security matters when they involve:
+This project is maintained by a single developer, with limited and irregular time. Issues, PRs and security reports are reviewed on a best-effort basis: replies may be delayed, and there is no guarantee that every issue gets an answer or that every PR is reviewed or merged. No fix or release timeline is promised.
+
+Security reports are assessed and handled on a best-effort basis as well. If a vulnerability is confirmed, the fix and release are scheduled as maintenance time and the nature of the issue allow. Please reproduce on the latest release before reporting.
+
+## Scope
+
+The following are in scope for security reports and are assessed and handled on a best-effort basis:
 
 - **Credentials**: how `apikey.json` is written and permissioned, environment-variable
   precedence, tokens appearing in logs/exceptions/events, credentials leaking into
