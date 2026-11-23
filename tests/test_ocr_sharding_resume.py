@@ -801,7 +801,9 @@ def test_hybrid_render_stays_far_under_the_cloud_size_limit(tmp_path) -> None:
 def test_http_status_decides_whether_a_retry_is_worthwhile(status: int, retryable: bool) -> None:
     """认证/参数/配额类错误不重试(扫描书每重试一次就多扣一次额度);5xx/408 才重试。"""
     with pytest.raises(MinerUError) as excinfo:
-        MinerUAdapter._parse(FakeResponse(status_code=status, payload={"msg": "boom"}))
+        adapter = MinerUAdapter.__new__(MinerUAdapter)   # 只测状态码分类,不走构造
+        adapter.token = "unit-test-token"
+        adapter._parse(FakeResponse(status_code=status, payload={"msg": "boom"}))
 
     assert is_retryable(excinfo.value) is retryable
 

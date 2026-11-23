@@ -34,6 +34,7 @@ import time
 from pathlib import Path
 
 import requests
+from pdf2epub.paths import redact_secret
 from pdf2epub.net import (
     DEFAULT_TIMEOUT,
     MAX_IMAGE_BYTES,
@@ -411,12 +412,15 @@ class PaddleOCRAdapter(Backend):
             )
         if resp.status_code != 200:
             raise PaddleOCRError(
-                f"提交失败 HTTP {resp.status_code}: {resp.text[:300]}",
+                redact_secret(f"提交失败 HTTP {resp.status_code}: {resp.text[:300]}", self.token),
                 retryable=resp.status_code not in NON_RETRYABLE_HTTP,
             )
         job_id = resp.json().get("data", {}).get("jobId")
         if not job_id:
-            raise PaddleOCRError(f"提交响应异常: {resp.text[:300]}", retryable=False)
+            raise PaddleOCRError(
+                redact_secret(f"提交响应异常: {resp.text[:300]}", self.token),
+                retryable=False,
+            )
         return job_id
 
     def _poll(self, job_id: str) -> dict:
@@ -426,7 +430,7 @@ class PaddleOCRAdapter(Backend):
             resp = requests.get(f"{JOBS_URL}/{job_id}", headers=self._headers, timeout=DEFAULT_TIMEOUT)
             if resp.status_code != 200:
                 raise PaddleOCRError(
-                    f"查询失败 HTTP {resp.status_code}: {resp.text[:300]}",
+                    redact_secret(f"查询失败 HTTP {resp.status_code}: {resp.text[:300]}", self.token),
                     retryable=resp.status_code not in NON_RETRYABLE_HTTP,
                 )
             data = resp.json().get("data", {})

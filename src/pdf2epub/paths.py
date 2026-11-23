@@ -154,8 +154,70 @@ def tighten_api_key_permissions(target: Path | str) -> bool:
     return _tighten_posix(p)
 
 
+def _windows_permissions_ok(target: Path) -> bool:
+    """Windows:用 icacls 复核 —— 不应再有任何继承条目(I),且当前用户仍有权限。
+
+    `/inheritance:r` 之后 ACL 里只该剩下显式条目;若还能读到 `(I)` 行,说明收紧
+    没生效(文件在只读介质、策略拦截,或 icacls 不可用)。解析失败一律按"未确认"
+    处理,交给调用方告警,而不是假装成功。
+    """
+    user = os.environ.get("USERNAME", "").strip()
+    if not user:
+        return False
+    creation_flags = 0x08000000  # CREATE_NO_WINDOW
+    try:
+        done = subprocess.run(
+            ["icacls", str(target)],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            creationflags=creation_flags,
+            check=False,
+        )
+    except (OSError, ValueError):
+        return False
+    if done.returncode != 0:
+        return False
+    out = done.stdout or ""
+    if "(I)" in out:
+        return False
+    return user.lower() in out.lower()
+
+
+def verify_api_key_permissions(target: Path | str) -> bool:
+    """复核凭证文件是否已是"仅当前用户可读写"。
+
+    与 `tighten_api_key_permissions` 的分工:那个是"尽力收紧",这个是"收紧之后
+    是否真的生效" —— 便携版在只读介质、组策略限制、icacls 缺失时都可能失败,
+    读凭证的程序应当把失败说出来,而不是静默按最宽松的权限继续。
+    """
+    p = Path(target)
+    if not p.is_file():
+        return False
+    if sys.platform == "win32":
+        return _windows_permissions_ok(p)
+    try:
+        mode = stat.S_IMODE(p.stat().st_mode)
+    except OSError:
+        return False
+    return not (mode & ~API_KEY_MODE)
+
+
+def redact_secret(text: str, *secrets: str) -> str:
+    """把凭证值从任意文本里抹掉(日志、异常消息、事件正文共用)。
+
+    只处理长度 ≥8 的值:太短的值(测试用的 "t" 之类)替换会误伤正常文本,
+    而真实 Token 远长于 8 位。
+    """
+    out = text
+    for value in secrets:
+        if value and len(value) >= 8:
+            out = out.replace(value, "***")
+    return out
+
+
 def _auto_harden(target: Path) -> None:
-    """读取前顺手加固:每次运行只会触发一次。"""
+    """读取前顺手加固:每次运行只会触发一次;收紧后再复核一次。"""
     if not perms_lock_enabled():
         return
     key = str(target)
@@ -163,6 +225,16 @@ def _auto_harden(target: Path) -> None:
         return
     _HARDENED.add(key)
     tighten_api_key_permissions(target)
+    if verify_api_key_permissions(target):
+        return
+    message = (f"凭证文件权限未能收紧到「仅当前用户可读写」: {target};"
+               f" 若该文件被其他账户读取,请手动检查(Windows 用 icacls,其他平台 chmod 600)")
+    print(f"[paths] ⚠ {message}", file=sys.stderr)
+    try:
+        from pdf2epub import events
+        events.emit("warning", code="apikey_permissions", message=message)
+    except Exception:  # noqa: BLE001 - 告警通道不可用时不能反过来影响读凭证
+        pass
 
 
 def api_key_file() -> Path | None:
