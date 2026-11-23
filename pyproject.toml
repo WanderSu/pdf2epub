@@ -42,11 +42,14 @@ line-length = 120
 include = [
     "src/pdf2epub/net.py",
     "src/pdf2epub/paths.py",
+    "src/pdf2epub/artifacts.py",
     "src/pdf2epub/backends/*.py",
     "tests/test_net.py",
     "tests/test_safe_zip.py",
     "tests/test_mineru_zip_guard.py",
     "tests/test_credentials.py",
+    "tests/test_artifacts.py",
+    "tests/test_error_categories.py",
 ]
 
 [tool.ruff.lint]
