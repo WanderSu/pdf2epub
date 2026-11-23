@@ -45,6 +45,7 @@ include = [
     "src/pdf2epub/artifacts.py",
     "src/pdf2epub/backends/*.py",
     "tests/test_mineru_parts.py",
+    "tests/test_mineru_http.py",
     "tests/test_mineru_package.py",
     "tests/test_net.py",
     "tests/test_safe_zip.py",
