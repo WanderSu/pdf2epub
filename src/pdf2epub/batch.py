@@ -412,9 +412,11 @@ def _fail(result: TaskResult, source: Path, error: Exception, *, code: str,
         result.error += f"(失败产物已移到 {quarantined.name},不会被当成已完成)"
     if restore_previous_output(out_epub, backup):
         result.error += f"(已恢复上一轮的成品 {out_epub.name})"
+    category = getattr(error, "category", None)
     events.emit("error", code=events.error_code(error, default=code), message=str(error),
-                file=source.name)
-    logger.error("失败: %s → %s", source.name, result.error)
+                file=source.name, category=category)
+    logger.error("失败: %s → %s(分类: %s)", source.name, result.error,
+                 category or events.error_code(error, default=code))
     return result
 
 
@@ -565,6 +567,9 @@ def process_one(
                 break
             except Exception as e:  # noqa: BLE001 - 批处理需兜住所有失败
                 last_error = e
+                # 兜底分支也要留栈:否则只有一句 str(e),排查时不知道是哪个环节抛的。
+                # 用 debug 级别 —— 可重试的失败会打很多次,info 日志不该被栈刷满。
+                logger.debug("第 %d 次尝试异常堆栈", attempt, exc_info=True)
                 # 后端会明确标注「确定性失败」(认证/参数/配额/输入文件错误/云端任务判死):
                 # 这类错误重试改变不了结果,扫描书还会重复上传、重复消耗额度
                 if not is_retryable(e):

@@ -73,6 +73,19 @@ STATE_LABELS = {
 NON_RETRYABLE_HTTP = {400, 401, 403, 404, 405, 409, 413, 422, 429}
 
 
+def _category_for_status(status: int) -> str:
+    """HTTP 状态码 → 粗分类(只用于展示;要不要重试仍看 ``retryable``)。"""
+    if status in (401, 403):
+        return "auth"
+    if status == 429:
+        return "quota"
+    if status in (400, 404, 405, 409, 413, 422):
+        return "param"
+    if status >= 500:
+        return "network"
+    return "unknown"
+
+
 class MinerUError(BackendError):
     """MinerU API 错误。
 
@@ -82,8 +95,8 @@ class MinerUError(BackendError):
     """
 
     def __init__(self, message: str, *, err_msg: str | None = None,
-                 retryable: bool | None = None) -> None:
-        super().__init__(message, retryable=retryable)
+                 retryable: bool | None = None, category: str | None = None) -> None:
+        super().__init__(message, retryable=retryable, category=category)
         self.err_msg = message if err_msg is None else err_msg
 
 
@@ -119,6 +132,7 @@ class MinerUAdapter(Backend):
             raise MinerUError(
                 "缺少 MinerU API Token:请设置环境变量 MINERU_API_TOKEN 或项目根目录 apikey.json",
                 retryable=False,     # 认证缺失重试多少次都一样
+                category="auth",
             )
         self.base_url = base_url.rstrip("/")
         self.model_version = model_version
@@ -154,6 +168,7 @@ class MinerUAdapter(Backend):
             raise MinerUError(
                 redact_secret(f"HTTP {resp.status_code}: {resp.text[:300]}", self.token),
                 retryable=resp.status_code not in NON_RETRYABLE_HTTP,
+                category=_category_for_status(resp.status_code),
             )
         data = resp.json()
         if data.get("code") != 0:
@@ -163,6 +178,7 @@ class MinerUAdapter(Backend):
                     f"API 错误 code={data.get('code')} msg={data.get('msg')}", self.token
                 ),
                 retryable=False,
+                category="param",
             )
         return data
 
@@ -171,7 +187,8 @@ class MinerUAdapter(Backend):
         pdf_path = Path(pdf_path)
         work_dir = Path(work_dir)
         if not pdf_path.exists():
-            raise MinerUError(f"文件不存在: {pdf_path}", retryable=False)
+            raise MinerUError(f"文件不存在: {pdf_path}", retryable=False,
+                              category="input")
 
         try:
             result = self._convert_inner(pdf_path, work_dir, variant=VARIANT_ORIGINAL)
@@ -276,7 +293,7 @@ class MinerUAdapter(Backend):
                 f"云端 OCR 未完成({kind}):段 {labels} 仍缺结果"
                 f"{' —— ' + detail if detail else ''}"
                 f";重跑只会重试缺的段,已完成的段会直接复用",
-                err_msg=detail or "incomplete", retryable=False,
+                err_msg=detail or "incomplete", retryable=False, category="cloud",
             )
 
         result = self._merge_parts(work_dir, parts, sharded, store, total_pages,
@@ -401,7 +418,8 @@ class MinerUAdapter(Backend):
             with pymupdf.open(pdf_path) as doc:
                 return doc.page_count
         except Exception as e:  # noqa: BLE001 - 页数读不出则交给上传阶段报错
-            raise MinerUError(f"无法读取 PDF 页数: {pdf_path} ({e})", retryable=False) from e
+            raise MinerUError(f"无法读取 PDF 页数: {pdf_path} ({e})", retryable=False,
+                              category="input") from e
 
     def _build_page_ranges(self, total_pages: int) -> list[str]:
         """按 max_pages_per_task 生成 1-indexed 页码范围。
@@ -483,6 +501,7 @@ class MinerUAdapter(Backend):
                         f"文件上传失败 HTTP {resp.status_code}: {resp.text[:200]}", self.token
                     ),
                     retryable=resp.status_code not in NON_RETRYABLE_HTTP,
+                    category=_category_for_status(resp.status_code),
                 )
         print(f"[mineru] 上传成功: {pdf_path.name} (×{len(file_urls)})")
         return batch_id
@@ -578,7 +597,8 @@ class MinerUAdapter(Backend):
             items = None
             time.sleep(self.poll_interval)
         # 超时是可重试的:批次 id 还在缓存里,重跑继续等这一批,不会重新上传
-        raise MinerUError(f"轮询超时({self.timeout}s), batch_id={batch_id}, 未完成: {remaining}")
+        raise MinerUError(f"轮询超时({self.timeout}s), batch_id={batch_id}, 未完成: {remaining}",
+                          category="network")
 
     def _store_item(self, store: PartStore, params_fp: str, variant: str,
                     part: OcrPart | None, item: dict, work_dir: Path) -> None:
@@ -600,13 +620,15 @@ class MinerUAdapter(Backend):
                 safe_extract(tmp_zip, extract_tmp, wanted=_wanted_member)
             except UnsafeArchiveError as e:
                 raise MinerUError(
-                    f"结果包不可信(段 {part.part_id}): {e}", retryable=False
+                    f"结果包不可信(段 {part.part_id}): {e}", retryable=False,
+                    category="cloud",
                 ) from e
 
             # 找到 full.md(MinerU 标准输出)
             md_candidates = sorted(extract_tmp.rglob("full.md"))
             if not md_candidates:
-                raise MinerUError(f"结果包中未找到 full.md (段 {part.part_id})", retryable=False)
+                raise MinerUError(f"结果包中未找到 full.md (段 {part.part_id})",
+                                  retryable=False, category="cloud")
             full_md = md_candidates[0]
             # 结构化结果一并落盘:`full.md` **不含** page_footnote(discarded blocks),
             # 合并阶段要靠它把页脚脚注补回来。老缓存里没有这个文件也不报错 —— 只是
