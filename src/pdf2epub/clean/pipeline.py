@@ -56,6 +56,11 @@ class CleanOutcome:
     ir_after: BookIR
     report: CleanReport
     issues: tuple[str, ...] = ()
+    #: 标题裁决**之前**的正文(写回判据用它)。``md_before`` 是裁决之后的快照,
+    #: 两者相等只能说明「规则没改字」,不代表磁盘上的文件已经是裁决后的样子 ——
+    #: 只补/降标题、没有一条 Patch 的那一轮,用 ``md_before`` 判会得出「不用写回」,
+    #: 于是裁决结果被丢在内存里(产物里依旧是旧的标题层级)。
+    md_input: str = ""
 
     @property
     def changed(self) -> bool:
@@ -184,6 +189,7 @@ def clean_text(md: str, *, backend: str = UNKNOWN, source: str = "",
     options = options or CleanOptions()
     started_at = int(clock())          # 整段清理的起点(含 IR 构造)
     md, notice = normalize_newlines(md)
+    md_input = md
     issues: list[str] = []
     if notice:
         issues.append(notice)
@@ -240,7 +246,8 @@ def clean_text(md: str, *, backend: str = UNKNOWN, source: str = "",
                            options=options.to_dict(), rule_ids=rule_ids,
                            started_at=started_at, finished_at=int(clock()))
     outcome = CleanOutcome(md_before=md, md_after=md_after, ir_before=ir,
-                           ir_after=ir_after, report=merged, issues=merged.issues)
+                           ir_after=ir_after, report=merged, issues=merged.issues,
+                           md_input=md_input)
     if write_reports_to is not None:
         write_artifacts(outcome, write_reports_to)
     return outcome
@@ -290,7 +297,9 @@ def clean_book_md(book_md: str | Path, *, backend: str = UNKNOWN,
         title_hint=title_hint,
         write_reports_to=path.parent if write_reports else None, clock=clock,
     )
-    if outcome.changed:
+    # 写回判据用**磁盘上的原文**(md_input)而不是 md_before:标题裁决不产生 Patch,
+    # 只补/降标题的一轮里 md_before == md_after,按 changed 判会把结果丢掉。
+    if outcome.md_after != (outcome.md_input or outcome.md_before):
         try:
             path.write_text(outcome.md_after, encoding="utf-8")
         except OSError as exc:
