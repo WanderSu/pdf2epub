@@ -1,72 +1,78 @@
-# 参与开发
+# Contributing
 
-感谢你愿意改进 pdf2epub。这份文档只讲「怎么搭环境、怎么改、怎么提交、怎么发布」,
-设计与取舍见 `docs/design.md`。
+Thanks for helping improve pdf2epub. This file covers environment setup, how to make
+changes, how to commit, and how releases happen. Design decisions live in
+`docs/design.md`.
 
-## 环境
+## Requirements
 
-| 组件 | 版本 | 用途 |
+| Component | Version | Purpose |
 |---|---|---|
-| Python | 3.12+ | 引擎 |
-| [uv](https://docs.astral.sh/uv/) | 最新 | 依赖与虚拟环境 |
-| Node.js | 20+ | 桌面端前端 |
-| Rust | stable | 桌面壳(Tauri 2) |
-| pandoc | 3.x | Markdown → EPUB;缺失时相关用例会被跳过 |
+| Python | 3.12+ | Engine |
+| [uv](https://docs.astral.sh/uv/) | latest | Dependencies and virtualenv |
+| Node.js | 20+ | Desktop frontend |
+| Rust | stable | Desktop shell (Tauri 2) |
+| pandoc | 3.x | Markdown → EPUB; tests that need it are skipped when missing |
 
-云端 OCR(MinerU / PaddleOCR-VL)只在显式开启时才跑;离线开发不需要凭证。
+Cloud OCR (MinerU / PaddleOCR-VL) only runs when explicitly enabled. Offline
+development needs no credentials.
 
-## 安装依赖
+## Install dependencies
 
-依赖一律按锁文件安装,不要用无锁更新:
+Always install from the lockfiles — never do an unlocked update:
 
 ```bash
 uv sync --locked
 cd desktop && npm ci
 ```
 
-凭证只放在项目根的 `apikey.json`(已 gitignore)或环境变量
-`MINERU_API_TOKEN` / `PADDLEOCR_TOKEN`,**任何情况下都不要提交、粘贴或写进日志**。
+Credentials belong in `apikey.json` at the project root (git-ignored) or in the
+`MINERU_API_TOKEN` / `PADDLEOCR_TOKEN` environment variables. **Never commit, paste,
+or log them.**
 
-## 测试
+## Tests
 
 ```bash
-uv run pytest -q                    # 全量离线测试
-uvx ruff check                      # 静态检查(pyproject 的 include 名单)
+uv run pytest -q                    # full offline suite
+uvx ruff check                      # static checks (paths listed in pyproject)
 cd desktop && npm run check         # tsc + eslint + vitest
 cd desktop/src-tauri && cargo test --locked
 ```
 
-真实云端 OCR 消耗额度,默认不跑;需要时显式开启:
+Real cloud OCR costs credits and is skipped by default; enable it explicitly:
 
 ```bash
 PDF2EPUB_LIVE_OCR=1 uv run pytest -q tests/test_live_ocr_footnotes.py
 ```
 
-新增网络、缓存、解压相关逻辑时,**必须补异常、超时、重试与体积上限的用例** ——
-这些路径出了问题不会报错,只会静默产出坏书或重复扣费。
+Any change to networking, caching, or archive handling **must** come with tests for
+failure modes, timeouts, retries, and size limits — these paths fail silently: a bad
+build or a double charge, not an exception.
 
-## 提交约定
+## Commits
 
-- **一个提交只做一件事**:能独立描述、能单独跑过相关用例。多件事混在一个提交里
-  会被要求重拆。
-- 改动前先跑相关用例,改动后先跑最小集、再跑全量。
-- 提交说明写清 **风险 / 测试 / 回滚方式**;测试数字要来自真实运行。
-- 不删除已有的缓存兼容逻辑,不降低 EPUB 校验严格度,不改变文件名、工作目录与
-  产物恢复语义。
-- 不要提交:真实 Token、PDF/EPUB 样本、`work/`、`output/`、`logs/`、用户数据。
+- **One topic per commit**: independently describable, with the relevant tests passing
+  on its own. Mixing several changes into one commit gets sent back for a split.
+- Run the relevant tests before and after the change; smallest set first, then full.
+- State **risk / tests / rollback** in the message; quote real test numbers.
+- Do not remove existing cache-compatibility logic, do not weaken EPUB validation, and
+  do not change file names, working directories, or artifact-recovery semantics.
+- Never commit real tokens, PDF/EPUB samples, `work/`, `output/`, `logs/`, or user data.
 
-## 分支与发布
+## Branching and releases
 
-`main` 受保护:禁止 force-push 与删除,合并前必须 CI 通过(引擎/前端/Rust 与
-Windows 发布形态两条流水线)。
+`main` is protected: force-pushes and deletion are blocked, and a change may only be
+merged once CI is green (engine/frontend/Rust on Linux, plus the Windows release-shape
+pipeline).
 
-发布是维护者的手工步骤,**不放在 CI 里自动执行**:
+Releases are a maintainer-run, manual step — **never automated in CI**:
 
 ```bash
-uv run python scripts/bump_version.py <版本>
-uv run python scripts/build_release.py <版本>
-uv run python scripts/check_release.py dist_release/<版本>
-gh release create v<版本> <zip> --notes-file <notes>
+uv run python scripts/bump_version.py <version>
+uv run python scripts/build_release.py <version>
+uv run python scripts/check_release.py dist_release/<version>
+gh release create v<version> <zip> --notes-file <notes>
 ```
 
-发布前确认 zip 里没有 `apikey.json`、`work/`、`output/`、`logs/` 与本机路径。
+Before publishing, confirm the archive contains no `apikey.json`, `work/`, `output/`,
+`logs/`, or local paths.

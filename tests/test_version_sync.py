@@ -21,7 +21,7 @@ SAMPLE = {
     "desktop/src-tauri/Cargo.toml": '[package]\nname = "desktop"\nversion = "0.2.3"\nedition = "2021"\n',
     "desktop/src/types.ts": 'export const APP_VERSION = "v0.2.3";\n',
     "README.md": "下载 `pdf2epub-v0.2.3-win-x64.zip` 并解压。\n",
-    "README.en.md": "Grab `pdf2epub-v0.2.3-win-x64.zip` from Releases.\n",
+    "README.zh-CN.md": "下载 `pdf2epub-v0.2.3-win-x64.zip` 并解压。\n",
 }
 
 

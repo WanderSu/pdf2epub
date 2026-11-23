@@ -14,7 +14,7 @@
 查找,见 src/pdf2epub/paths.py)。
 
 **版本守卫**:各处版本号(pyproject / uv.lock / tauri.conf.json / Cargo.toml /
-types.ts / README.md / README.en.md,见 bump_version.TARGETS)必须与传入版本一致,
+types.ts / README.md / README.zh-CN.md,见 bump_version.TARGETS)必须与传入版本一致,
 否则拒绝打包 —— 防止「界面写着 v0.5.0、实际是旧版本的产物」。
 """
 from __future__ import annotations

@@ -1,34 +1,40 @@
-# 安全策略
+# Security Policy
 
-## 报告问题
+## Reporting
 
-**不要开公开 issue。** 请用 GitHub 的私有安全公告
-(`Security` → `Report a vulnerability`),或直接联系维护者。
+**Do not open a public issue.** Use GitHub's private security advisory
+(`Security` → `Report a vulnerability`) or contact the maintainer directly.
 
-请在报告里写清:受影响版本、复现步骤、影响范围。**不要附真实 Token、真实书籍
-文件或含个人信息的日志**;需要日志时先删除凭证与路径。
+Include the affected version, reproduction steps, and impact. **Do not attach real
+tokens, real books, or logs containing personal information** — strip credentials and
+paths first.
 
-一般 3 个工作日内回复,确认后修复并发布。
+Expect a reply within three working days; a fix and a release follow once confirmed.
 
-## 处理范围
+## In scope
 
-以下问题属于安全范畴,会优先修:
+Reported issues are handled as security matters when they involve:
 
-- **凭证**:`apikey.json` 的写出与权限、环境变量优先级、日志/异常/事件里出现
-  Token、凭证进入缓存或快照。
-- **云端结果包解压**:路径穿越、绝对路径、符号链接、解压炸弹(条目数 / 单文件 /
-  总大小)。
-- **网络下载**:缺少超时、无大小上限、失败留下半成品被当成有效结果。
-- 依赖漏洞(请在报告中给出 CVE 与受影响版本)。
+- **Credentials**: how `apikey.json` is written and permissioned, environment-variable
+  precedence, tokens appearing in logs/exceptions/events, credentials leaking into
+  caches or snapshots.
+- **Unpacking cloud result archives**: path traversal, absolute paths, symlinks,
+  decompression bombs (entry count / single file / total size).
+- **Network downloads**: missing timeouts, unbounded size, failed downloads leaving a
+  half-written file that later counts as a valid result.
+- Dependency vulnerabilities (include the CVE and affected version).
 
-## 已知的设计取舍
+## Known trade-offs by design
 
-- **云端 OCR 会把 PDF 上传给服务商**。这是功能本身,不是漏洞;不需要 OCR 时
-  请用本地后端(`--backend pymupdf`)。
-- **凭证文件是明文**。权限收紧到「仅当前用户可读写」,但同账户下的其他程序仍可
-  读取 —— 这类"同账户信任"问题不在修复范围内。
-- **发布包自检只验证结构与可运行性**,不验证内容正确性。
+- **Cloud OCR uploads the PDF to a third-party service.** That is the feature, not a
+  vulnerability; use the local backend (`--backend pymupdf`) when OCR is not needed.
+- **The credential file is plain text.** Permissions are tightened to "current user
+  only", but other programs running as the same account can still read it — that
+  same-account trust model is out of scope.
+- **The release self-check verifies structure and runnability**, not content
+  correctness.
 
-## 支持的版本
+## Supported versions
 
-只维护最新发布版本;旧版本的问题请先升级再复现。
+Only the latest release is maintained. Reproduce on the latest version before
+reporting.
