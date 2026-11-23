@@ -46,7 +46,7 @@ from .base import (
     rendered_variant,
 )
 from pdf2epub.page_result import page_marker_from_range
-from pdf2epub.paths import load_api_key
+from pdf2epub.paths import load_api_key, redact_secret
 from pdf2epub.net import MAX_ZIP_BYTES, DEFAULT_TIMEOUT, download_to
 from pdf2epub.markdown.footnotes import load_content_list, reconstruct_footnotes
 from .safe_zip import UnsafeArchiveError, safe_extract
@@ -145,18 +145,20 @@ class MinerUAdapter(Backend):
         resp = requests.get(f"{self.base_url}{path}", headers=self._headers, timeout=DEFAULT_TIMEOUT)
         return self._parse(resp)
 
-    @staticmethod
-    def _parse(resp: requests.Response) -> dict:
+    def _parse(self, resp: requests.Response) -> dict:
+        # 消息可能被写进日志/事件/界面:所有来自云端或本地拼装的文本都先抹掉自身 Token
         if resp.status_code != 200:
             raise MinerUError(
-                f"HTTP {resp.status_code}: {resp.text[:300]}",
+                redact_secret(f"HTTP {resp.status_code}: {resp.text[:300]}", self.token),
                 retryable=resp.status_code not in NON_RETRYABLE_HTTP,
             )
         data = resp.json()
         if data.get("code") != 0:
             # API 层判定的错误(参数/配额/权限):重试无意义
             raise MinerUError(
-                f"API 错误 code={data.get('code')} msg={data.get('msg')}",
+                redact_secret(
+                    f"API 错误 code={data.get('code')} msg={data.get('msg')}", self.token
+                ),
                 retryable=False,
             )
         return data
@@ -474,7 +476,9 @@ class MinerUAdapter(Backend):
                 resp = requests.put(url, data=f, timeout=DEFAULT_TIMEOUT)
             if resp.status_code not in (200, 201):
                 raise MinerUError(
-                    f"文件上传失败 HTTP {resp.status_code}: {resp.text[:200]}",
+                    redact_secret(
+                        f"文件上传失败 HTTP {resp.status_code}: {resp.text[:200]}", self.token
+                    ),
                     retryable=resp.status_code not in NON_RETRYABLE_HTTP,
                 )
         print(f"[mineru] 上传成功: {pdf_path.name} (×{len(file_urls)})")
