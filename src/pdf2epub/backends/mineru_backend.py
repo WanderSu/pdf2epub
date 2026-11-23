@@ -22,7 +22,6 @@
 """
 from __future__ import annotations
 
-import filecmp
 import os
 import shutil
 import time
@@ -35,7 +34,6 @@ import pdf2epub.events as events
 from pdf2epub.markdown.footnotes import load_content_list, reconstruct_footnotes
 from pdf2epub.net import DEFAULT_TIMEOUT as HTTP_TIMEOUT
 from pdf2epub.net import MAX_ZIP_BYTES, download_to
-from pdf2epub.page_result import page_marker_from_range
 from pdf2epub.paths import load_api_key, redact_secret
 
 from .base import (
@@ -52,7 +50,15 @@ from .base import (
     params_fingerprint,
     rendered_variant,
 )
-from .safe_zip import UnsafeArchiveError, safe_extract
+from .mineru_package import (
+    CONTENT_LIST_FILE,
+    content_list_files,
+    copy_part_images,
+    extract_package,
+    part_marker,
+)
+from .mineru_parts import build_page_ranges, plan_parts, target_name
+from .safe_zip import UnsafeArchiveError
 
 DEFAULT_BASE_URL = "https://mineru.net/api/v4"
 DEFAULT_TIMEOUT = 600      # 轮询总超时(秒)
@@ -302,22 +308,13 @@ class MinerUAdapter(Backend):
         return result
 
     def _plan_parts(self, total_pages: int) -> list[OcrPart]:
-        """本文件会按哪些段提交:超过单任务上限时按 page_ranges 分段,否则整本一段。
-
-        段标识(part_id / page_range)在**跨批次**上稳定 —— 补提交某一段时它的缓存
-        位置与合并位置都不变,这是「只补缺失段」能成立的前提。
-        """
-        ranges = self._build_page_ranges(total_pages) or [f"1-{total_pages}"]
-        sharded = len(ranges) > 1
-        return [
-            OcrPart(idx=i, part_id=rng, page_range=rng if sharded else None)
-            for i, rng in enumerate(ranges, start=1)
-        ]
+        """本文件会按哪些段提交(实现见 :mod:`mineru_parts`,跨批次稳定)。"""
+        return plan_parts(total_pages, self.max_pages_per_task)
 
     @staticmethod
     def _target(part: OcrPart, pdf_path: Path, sharded: bool) -> str:
         """轮询匹配键:分片用 data_id(part-N),整本单任务用文件名(与提交接口一致)。"""
-        return f"part-{part.idx}" if sharded else pdf_path.name
+        return target_name(part, pdf_path.name, sharded)
 
     def _cached_target(self, cached: dict, part: OcrPart, pdf_path: Path, sharded: bool) -> str:
         """缓存里的批次覆盖了哪一段(优先读落盘的段元信息;旧格式按 data_id 推)。"""
@@ -422,19 +419,8 @@ class MinerUAdapter(Backend):
                               category="input") from e
 
     def _build_page_ranges(self, total_pages: int) -> list[str]:
-        """按 max_pages_per_task 生成 1-indexed 页码范围。
-
-        302 页 → ["1-200", "201-302"];≤ 上限时返回 [] 表示无需分片。
-        """
-        if total_pages <= self.max_pages_per_task:
-            return []
-        ranges: list[str] = []
-        start = 1
-        while start <= total_pages:
-            end = min(start + self.max_pages_per_task - 1, total_pages)
-            ranges.append(f"{start}-{end}")
-            start = end + 1
-        return ranges
+        """按 max_pages_per_task 生成 1-indexed 页码范围(预检与提交共用同一份计算)。"""
+        return build_page_ranges(total_pages, self.max_pages_per_task)
 
     @staticmethod
     def _render_to_image_pdf(pdf_path: Path, work_dir: Path, dpi: int = 150, jpg_quality: int = 85) -> Path:
@@ -617,7 +603,7 @@ class MinerUAdapter(Backend):
             # 不直接 extractall:结果包来自云端,只解出需要的条目,并拒绝路径穿越、
             # 符号链接与超限体积(见 safe_zip)。
             try:
-                safe_extract(tmp_zip, extract_tmp, wanted=_wanted_member)
+                extract_package(tmp_zip, extract_tmp)
             except UnsafeArchiveError as e:
                 raise MinerUError(
                     f"结果包不可信(段 {part.part_id}): {e}", retryable=False,
@@ -637,7 +623,7 @@ class MinerUAdapter(Backend):
                 part.part_id, params_fp,
                 full_md.read_text(encoding="utf-8", errors="replace"),
                 images_src=full_md.parent / "images",
-                extra_files=_content_list_files(extract_tmp),
+                extra_files=content_list_files(extract_tmp),
                 page_range=part.page_range, variant=variant,
             )
             print(f"[mineru] 段 {part.part_id} 结果已落盘(重跑不再重复 OCR)")
@@ -667,13 +653,13 @@ class MinerUAdapter(Backend):
             md_text, stats, next_id = _reconstruct_part_footnotes(store, part, md_text, next_id)
             for key in totals:
                 totals[key] += int(stats.get(key, 0))
-            md_text, n = _copy_part_images(
+            md_text, n = copy_part_images(
                 store.images_dir(part.part_id), images_abs, md_text, prefix=f"p{part.idx}_"
             )
             img_count += n
             body = md_text.strip()
             if sharded:
-                body = f"{_part_marker(part.page_range, part.idx)}\n{body}"
+                body = f"{part_marker(part.page_range, part.idx)}\n{body}"
             parts_md.append(body)
 
         merged = normalize_image_refs("\n\n".join(parts_md), images_abs)
@@ -714,37 +700,6 @@ def _item_key(item: dict) -> str:
     return item.get("data_id") or item.get("file_name") or ""
 
 
-# ---------- 结构化结果 → 脚注重建 ----------
-
-#: 结果包里真正要落盘的条目:`full.md`、`images/` 下的图片、结构化 JSON。
-#: 其余(layout.json、model.json、原始 PDF 等)一律不解压 —— 既省磁盘,也缩小攻击面。
-_WANTED_SUFFIXES = ("_content_list.json", "_content_list_v2.json")
-
-
-def _wanted_member(name: str) -> bool:
-    base = name.rsplit("/", 1)[-1]
-    if base == "full.md":
-        return True
-    if name.startswith("images/") or "/images/" in name:
-        return True
-    return base.endswith(_WANTED_SUFFIXES)
-
-
-#: 段缓存里附带的 MinerU 结构化结果文件名(结果包里的 `*_content_list.json`)。
-#: `full.md` **不含** `page_footnote`(它属于 discarded blocks,markdown 渲染只走
-#: 正文块),所以脚注只能靠结构化结果补 —— 见 `markdown.footnotes`。
-CONTENT_LIST_FILE = "content_list.json"
-
-
-def _content_list_files(extract_dir: Path) -> dict[str, Path]:
-    """结果包里要随段一起缓存的结构化结果(v1 `*_content_list.json` 优先,退回 v2)。"""
-    for pattern in ("*_content_list.json", "*_content_list_v2.json"):
-        candidates = sorted(extract_dir.rglob(pattern))
-        if candidates:
-            return {CONTENT_LIST_FILE: candidates[0]}
-    return {}
-
-
 def _reconstruct_part_footnotes(store: PartStore, part: OcrPart, md_text: str,
                                 next_id: int) -> tuple[str, dict, int]:
     """用段缓存里的结构化结果重建脚注(没有结构化结果就原样返回)。
@@ -763,38 +718,3 @@ def _reconstruct_part_footnotes(store: PartStore, part: OcrPart, md_text: str,
         return md_text, {}, next_id
     result = reconstruct_footnotes(md_text, load_content_list(path), next_id=next_id)
     return result.md, result.stats, result.next_id
-
-
-def _copy_part_images(src_dir: Path, dst_dir: Path, md: str, *, prefix: str) -> tuple[str, int]:
-    """把某段的图片并入统一 images/,并保持「同一输入 → 同一文件名」。
-
-    三种情形:
-      - 目标不存在 → 直接复制,引用不变
-      - 目标已存在且内容相同 → 什么都不做(重跑复用同一张图,产物稳定、不产生垃圾文件)
-      - 目标已存在但内容不同(跨段重名) → 加段前缀并同步改引用
-    """
-    if not src_dir.is_dir():
-        return md, 0
-    count = 0
-    for img in sorted(src_dir.iterdir()):
-        if not img.is_file():
-            continue
-        target = dst_dir / img.name
-        if target.exists():
-            if filecmp.cmp(img, target, shallow=False):
-                count += 1
-                continue
-            new_name = f"{prefix}{img.name}"
-            shutil.copy2(img, dst_dir / new_name)
-            md = md.replace(f"images/{img.name}", f"images/{new_name}")
-        else:
-            shutil.copy2(img, target)
-        count += 1
-    return md, count
-
-
-def _part_marker(page_range: str | None, idx: int) -> str:
-    """分片段落的页码注释:优先用提交时的真实 page_range,缺失时退化为段序标记。"""
-    if page_range:
-        return page_marker_from_range(page_range)
-    return f"<!-- page-group {idx} -->"
