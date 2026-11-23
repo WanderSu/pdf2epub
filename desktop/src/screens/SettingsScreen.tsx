@@ -297,6 +297,11 @@ export function SettingsScreen({
                 </span>
               </div>
             ))}
+            {env?.apikey_perms_ok === false && (
+              <p className={`text-[12px] text-[var(--danger)] mt-2 ${lang === "zh" ? "cjk" : ""}`}>
+                {t.apikeyPermsWarn}
+              </p>
+            )}
             {env && env.pandoc.status !== "ok" && (
               <div className="my-2 border-l-[3px] border-[var(--danger)] pl-4 py-2">
                 <p className={`text-[13px] text-[var(--foreground)] mb-2 ${lang === "zh" ? "cjk" : ""}`}>{t.pandocMissing}</p>

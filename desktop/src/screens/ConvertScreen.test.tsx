@@ -196,6 +196,7 @@ describe("导入复核表", () => {
           mineru_configured: false,
           paddle_configured: true,
           apikey_path: null,
+          apikey_perms_ok: null,
         }}
         review={{ rows: [{ id: "r1", name: "a.pdf", path: "C:/books/a.pdf", known: false }] }}
       />,

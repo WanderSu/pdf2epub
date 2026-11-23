@@ -1445,6 +1445,41 @@ fn harden_apikey_permissions(target: &std::path::Path) {
     }
 }
 
+/// 复核凭证文件权限是否真的收紧到「仅当前用户可读写」。
+///
+/// `harden_apikey_permissions` 只是执行;只读介质、组策略、icacls 不可用时它可能
+/// 悄悄失败。这里读回结果:Windows 用 icacls 确认不再有继承条目(I)且当前用户
+/// 仍在授权列表;其他平台看权限位。判为「未确认」时返回 false,由调用方告警 ——
+/// 不假装成功。
+#[cfg(windows)]
+fn verify_apikey_permissions(target: &std::path::Path) -> bool {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let user = std::env::var("USERNAME").unwrap_or_default().trim().to_lowercase();
+    if user.is_empty() {
+        return false;
+    }
+    let out = match std::process::Command::new("icacls")
+        .arg(target.to_string_lossy().to_string())
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return false,
+    };
+    let text = String::from_utf8_lossy(&out.stdout).to_lowercase();
+    !text.contains("(i)") && text.contains(&user)
+}
+
+#[cfg(not(windows))]
+fn verify_apikey_permissions(target: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    match std::fs::metadata(target) {
+        Ok(md) => md.permissions().mode() & 0o077 == 0,
+        Err(_) => false,
+    }
+}
+
 /// 保存/清除凭证(设置页):写入 apikey.json 并返回实际写入路径。
 /// 空 token = 删除该键;凭证值不回显、不写日志。
 #[tauri::command]
@@ -1461,6 +1496,14 @@ fn save_apikey(app: AppHandle, service: String, token: String) -> Result<String,
     }
     std::fs::write(&target, merged).map_err(|e| format!("写入失败 {}: {e}", target.display()))?;
     harden_apikey_permissions(&target);
+    // 收紧之后必须复核:失败不拦保存(凭证确实写进去了),但要留下可查的告警 ——
+    // 引擎下次读取时也会 emit 一条 warning
+    if !verify_apikey_permissions(&target) {
+        eprintln!(
+            "[pdf2epub] 警告:凭证已写入,但权限未能收紧到仅当前用户可读写: {} (其他账户可能读取该文件)",
+            target.display()
+        );
+    }
     Ok(target.to_string_lossy().into_owned())
 }
 
@@ -1482,6 +1525,8 @@ struct EnvCheckResult {
     paddle_configured: bool,
     /// apikey.json 的实际位置(用户可在设置页看到凭证写到哪)
     apikey_path: Option<String>,
+    /// 凭证文件权限是否已收紧(None = 还没有凭证文件;Some(false) = 收紧失败)
+    apikey_perms_ok: Option<bool>,
 }
 
 /// 随包内置 pandoc 的候选位置(安装根的 pandoc/ 子目录;新旧布局都查)。
@@ -1876,8 +1921,15 @@ fn check_env(app: AppHandle) -> EnvCheckResult {
     let pandoc = detect_pandoc();
     let (mineru_configured, paddle_configured) = detect_apikey();
     let apikey = apikey_target(Some(&cli));
-    let apikey_path = if apikey.is_file() {
+    let has_apikey = apikey.is_file();
+    let apikey_path = if has_apikey {
         Some(apikey.to_string_lossy().into_owned())
+    } else {
+        None
+    };
+    // 权限只在真的有凭证文件时判断:None = 还没配,不该报红
+    let apikey_perms_ok = if has_apikey {
+        Some(verify_apikey_permissions(&apikey))
     } else {
         None
     };
@@ -1887,6 +1939,7 @@ fn check_env(app: AppHandle) -> EnvCheckResult {
         mineru_configured,
         paddle_configured,
         apikey_path,
+        apikey_perms_ok,
     }
 }
 
@@ -1925,6 +1978,18 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apikey_permissions_are_verified_after_hardening() {
+        // 收紧之后复核必须为真;校验函数本身不能只看"文件存在"
+        let dir = std::env::temp_dir().join(format!("pdf2epub-perm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("apikey.json");
+        std::fs::write(&file, "{}").unwrap();
+        harden_apikey_permissions(&file);
+        assert!(verify_apikey_permissions(&file));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn output_name_keeps_spaces() {
