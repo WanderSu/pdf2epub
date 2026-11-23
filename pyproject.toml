@@ -52,6 +52,7 @@ include = [
     "tests/test_credentials.py",
     "tests/test_artifacts.py",
     "tests/test_error_categories.py",
+    "tests/test_console_encoding.py",
 ]
 
 [tool.ruff.lint]
