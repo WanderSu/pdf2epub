@@ -169,6 +169,17 @@ class Provenance:
             object.__setattr__(self, "bbox", box)   # type: ignore[arg-type]
 
 
+#: 不需要页归属的块角色:页码注释自带页号、分隔线不承载内容。
+#: 三处统计(对齐 stats / ``BookIR.page_attribution_missing`` / 页账审计)共用这一份 ——
+#: 各写一份时同一本书会出现「对齐说 0、报告说 4」。
+PAGE_EXEMPT_ROLES = frozenset({"page_marker", "horizontal_rule"})
+
+
+def page_exempt(block: "Block") -> bool:
+    """这个块是否豁免页归属(自带页号 / 不承载内容)。"""
+    return str(block.extra.get("role") or "") in PAGE_EXEMPT_ROLES
+
+
 @dataclass(frozen=True)
 class Block:
     """一个 IR 块。``text`` 是**原文**,``md_span`` 是它在 book.md 中的区间。"""
@@ -302,7 +313,8 @@ class BookIR:
         证据块不需要页归属吗?需要,但它由后端直接给出,拿不到就是后端没给,
         计在这里没有意义 —— 所以只统计 Layer1。
         """
-        return sum(1 for b in self.blocks if b.editable and b.page_idx is None)
+        return sum(1 for b in self.blocks
+                   if b.editable and b.page_idx is None and not page_exempt(b))
 
     @property
     def page_attribution_required(self) -> int:

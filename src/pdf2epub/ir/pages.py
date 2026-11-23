@@ -41,7 +41,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Iterable
 
-from pdf2epub.ir.model import UNKNOWN, BookIR, IRError
+from pdf2epub.ir.model import UNKNOWN, BookIR, IRError, page_exempt
 #: 严重级别。``error`` 会传给严格模式抛异常,``warning``/``info`` 只记录。
 SEVERITIES: tuple[str, ...] = ("error", "warning", "info")
 
@@ -51,8 +51,6 @@ ISSUE_CODES: tuple[str, ...] = (
     "missing_attribution", "uncovered_page",
 )
 
-#: 不需要从证据层继承页号的块:页码注释自带页号,分隔线不承载内容
-_EXEMPT_ROLES = frozenset({"page_marker", "horizontal_rule"})
 
 #: 证据层里只是**页面装饰**的类型:它们证明"这一页存在",不证明"这一页有内容"
 _DECORATION_KINDS = frozenset({"page_number", "header", "footer"})
@@ -72,11 +70,8 @@ class PageAuditError(IRError):
 
 
 def _exempt(block) -> bool:
-    """这个块是否豁免页归属(自带页号 / 不承载内容)。"""
-    role = str(block.extra.get("role") or "")
-    if role in _EXEMPT_ROLES:
-        return True
-    return False
+    """这个块是否豁免页归属(自带页号 / 不承载内容)。判据与统计口径同 ``ir.model``。"""
+    return page_exempt(block)
 
 
 @dataclass(frozen=True)

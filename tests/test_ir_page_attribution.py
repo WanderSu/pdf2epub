@@ -135,6 +135,26 @@ def test_page_markers_and_rules_are_exempt() -> None:
     assert report.missing == 0
 
 
+def test_marker_exemption_is_shared_with_ir_stats() -> None:
+    """页账说「豁免」的块,``BookIR.page_attribution_missing`` 也不能算成缺页。
+
+    判据各写一份时,同一本书会出现「对齐说 0、报告说 4」的账 —— 任何带页码注释的
+    书都永远停在 ``partial``,对齐失败也就再也看不出来了。
+    """
+    md = ("这是第一段用于测试的正文内容,长度足够对齐。\n"
+          "\n<!-- page 2 -->\n"
+          "\n---\n"
+          "\n这是第二段用于测试的正文内容,长度足够对齐。\n")
+    ir = _build(md, evidence=[
+        {"type": "text", "text": "这是第一段用于测试的正文内容,长度足够对齐。",
+         "page_idx": 0},
+        {"type": "text", "text": "这是第二段用于测试的正文内容,长度足够对齐。",
+         "page_idx": 1},
+    ])
+    assert ir.page_attribution_missing == 0
+    assert ir.meta.backend_evidence["page_attribution"] == "complete"
+
+
 # ---------------------------------------------------------------- 硬错误
 
 def test_page_beyond_total_pages_is_a_hard_error() -> None:
