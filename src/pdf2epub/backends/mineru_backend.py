@@ -26,7 +26,6 @@ import filecmp
 import os
 import shutil
 import time
-import zipfile
 from pathlib import Path
 
 import requests
@@ -49,6 +48,7 @@ from .base import (
 from pdf2epub.page_result import page_marker_from_range
 from pdf2epub.paths import load_api_key
 from pdf2epub.markdown.footnotes import load_content_list, reconstruct_footnotes
+from .safe_zip import UnsafeArchiveError, safe_extract
 import pdf2epub.events as events
 DEFAULT_BASE_URL = "https://mineru.net/api/v4"
 DEFAULT_TIMEOUT = 600      # 轮询总超时(秒)
@@ -587,8 +587,14 @@ class MinerUAdapter(Backend):
                     for chunk in resp.iter_content(chunk_size=1 << 16):
                         f.write(chunk)
             extract_tmp.mkdir(parents=True, exist_ok=True)
-            with zipfile.ZipFile(tmp_zip) as zf:
-                zf.extractall(extract_tmp)
+            # 不直接 extractall:结果包来自云端,只解出需要的条目,并拒绝路径穿越、
+            # 符号链接与超限体积(见 safe_zip)。
+            try:
+                safe_extract(tmp_zip, extract_tmp, wanted=_wanted_member)
+            except UnsafeArchiveError as e:
+                raise MinerUError(
+                    f"结果包不可信(段 {part.part_id}): {e}", retryable=False
+                ) from e
 
             # 找到 full.md(MinerU 标准输出)
             md_candidates = sorted(extract_tmp.rglob("full.md"))
@@ -680,6 +686,20 @@ def _item_key(item: dict) -> str:
 
 
 # ---------- 结构化结果 → 脚注重建 ----------
+
+#: 结果包里真正要落盘的条目:`full.md`、`images/` 下的图片、结构化 JSON。
+#: 其余(layout.json、model.json、原始 PDF 等)一律不解压 —— 既省磁盘,也缩小攻击面。
+_WANTED_SUFFIXES = ("_content_list.json", "_content_list_v2.json")
+
+
+def _wanted_member(name: str) -> bool:
+    base = name.rsplit("/", 1)[-1]
+    if base == "full.md":
+        return True
+    if name.startswith("images/") or "/images/" in name:
+        return True
+    return base.endswith(_WANTED_SUFFIXES)
+
 
 #: 段缓存里附带的 MinerU 结构化结果文件名(结果包里的 `*_content_list.json`)。
 #: `full.md` **不含** `page_footnote`(它属于 discarded blocks,markdown 渲染只走
