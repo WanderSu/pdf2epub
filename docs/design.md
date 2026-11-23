@@ -183,6 +183,8 @@ src/
   pdf2epub/       # 引擎包(独立命名空间:平铺安装会与 PyPI 的 markdown 等同名包互相覆盖)
     detector/       # PDF 类型检测（含伪文字层识别）
     backends/       # base（抽象）/ pymupdf / mineru / paddleocr
+                    # mineru 另有：safe_zip（受限解压）/ mineru_http（协议层）
+                    #              mineru_parts（分段计划）/ mineru_package（结果包）
     clean/          # IR 清理引擎（options / rules / engine / patch / report / pipeline）
     ir/             # IR 模型、解析、对齐、存储与渲染
     markdown/       # textrules（判定与阈值）/ bold（强调字体 → 粗体）
@@ -190,7 +192,10 @@ src/
     page_result.py  # 页单元：页码、排序、页码注释、扫描区段规划
     events.py       # 阶段事件流（--json-events）
     convert.py      # 自动路由（text / scanned / hybrid）
-    batch.py        # 批处理（重试 / 跳过 / 断点续跑）
+    batch.py        # 批处理编排（跳过 / 断点续跑 / 失败收尾）
+    artifacts.py    # 产物路径与撞名判定、失败产物隔离、上一轮成品保全
+    taskrun.py      # 任务状态、重试决策与批量汇总
+    net.py          # 网络下载保护（超时 / 体积上限 / 原子落盘）
     dryrun.py       # 印前检查
     lang_detect.py  # dc:language 检测
     cli.py          # ebook-converter 入口

@@ -7,6 +7,7 @@ It handles digital PDFs, scanned PDFs, mixed PDFs, and existing Markdown files. 
 [![Release](https://img.shields.io/github/v/release/WanderSu/pdf2epub?label=release)](https://github.com/WanderSu/pdf2epub/releases)
 [![Stars](https://img.shields.io/github/stars/WanderSu/pdf2epub?label=stars)](https://github.com/WanderSu/pdf2epub)
 [![Platform](https://img.shields.io/badge/platform-Windows-0078D6)](https://github.com/WanderSu/pdf2epub/releases)
+[![CI](https://github.com/WanderSu/pdf2epub/actions/workflows/ci.yml/badge.svg)](https://github.com/WanderSu/pdf2epub/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 [中文](README.md) | **English**
@@ -782,7 +783,10 @@ src/
     ├── ir/             # IR (blocks / alignment / round-trip render)
     ├── markdown/       # cleanup predicates & thresholds
     ├── epub/           # EPUB generation and checks
-    ├── batch.py        # batch processing
+    ├── batch.py        # batch orchestration
+    ├── artifacts.py    # output paths / name conflicts / failure cleanup
+    ├── taskrun.py      # task state / retries / summary
+    ├── net.py          # guarded downloads
     ├── cli.py          # CLI
     ├── convert.py      # conversion flow
     └── paths.py        # paths and configuration
