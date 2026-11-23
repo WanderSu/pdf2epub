@@ -3,8 +3,18 @@ name: CI
 on:
   push:
     branches: [main]
+    # 纯文档/截图改动不跑流水线:它们不影响引擎与打包,跑一遍只是排队
+    # (改了代码顺带改文档时仍在触发范围内)
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE"
   pull_request:
     branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE"
   workflow_dispatch:
 
 concurrency:
