@@ -1,0 +1,81 @@
+name: Bug 报告
+description: 转换失败、产物异常或界面问题
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前请先确认不是配置问题:换本地后端(`--backend pymupdf`)是否仍复现、
+        是否已是最新版本。
+
+        **不要粘贴真实 Token、整本书或含个人信息的日志。** 需要贴日志时先删掉
+        `apikey.json` 内容与文件路径。
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: 界面左下角显示,或桌面端「设置 → 关于」
+      placeholder: 0.5.6
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 系统
+      options:
+        - Windows 10
+        - Windows 11
+        - macOS
+        - Linux
+    validations:
+      required: true
+
+  - type: dropdown
+    id: backend
+    attributes:
+      label: 后端
+      options:
+        - 自动(auto)
+        - MinerU(云端)
+        - PaddleOCR-VL(云端)
+        - PyMuPDF(本地)
+        - 不确定
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 尽量给出能让别人复现的最短路径
+      placeholder: |
+        1. 拖入某某类型的 PDF(扫描版/双栏/含脚注…)
+        2. 选某后端
+        3. 输出里出现……
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望结果 / 实际结果
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志(已删除凭证与个人信息)
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 确认
+      options:
+        - label: 日志与附件中不含真实 Token、整本书或个人信息
+          required: true
