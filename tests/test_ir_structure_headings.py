@@ -288,10 +288,37 @@ def test_toc_authors_are_not_chapters() -> None:
 
 
 def test_bare_numbers_and_salutations_are_not_chapters() -> None:
-    """裸编号(「六」)、纯标点(「=」)、以冒号收尾的称呼行都不是章。"""
+    """裸编号(「六」「六.」)、纯标点(「=」)、以冒号收尾的称呼行都不是章。"""
     md, _ = _run_author_toc()
-    for fake in ("## 六", "# 六", "# =", "## 負責同志："):
-        assert fake not in md
+    heads = [ln for ln in md.split("\n") if ln.startswith("#")]
+    assert not [h for h in heads if h.lstrip("#").strip() in {"六", "六.", "=", "負責同志："}]
+
+
+def test_toc_entry_already_present_as_heading_is_not_reported_missing() -> None:
+    """目录条目在正文里本来就是标题:不能报「找不到落点」(误报会让人以为丢章)。"""
+    md_in = """\
+沉船礁……齐平 3
+两个班长……王世阁 34
+"鉄笔御史"……王杏元 166
+
+# 沉船礁
+
+正文开头足够长,可以当作锚点用,不是标题。
+
+# 两个班长
+
+第二篇正文同样足够长,可以当作锚点用,不是标题。
+
+# “鉄笔御史”
+
+第三篇正文也足够长,可以当作锚点用,不是标题。
+"""
+    ev = parse_evidence(_evidence(("text", "与标题无关的一条正文", 0)),
+                        backend="mineru", part_id="book")
+    md, notes = restore_headings(md_in, ev)
+    assert not any("找不到落点" in n for n in notes)
+    heads = [ln for ln in md.split("\n") if ln.startswith("#")]
+    assert "# “鉄笔御史”" in heads, "正文里已经是标题的章被降级了"
 
 
 def test_toc_is_authority_for_non_listed_headings() -> None:

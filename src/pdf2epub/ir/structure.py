@@ -91,8 +91,9 @@ _TOC_LEADER_RE = re.compile(r"[ \t]*(?:[/／]|\.{2,}|…+|·{2,})[ \t]*")
 #: 目录条目行尾的页码
 _TOC_PAGE_RE = re.compile(r"(?P<page>[0-9]{1,4})[ \t]*$")
 
-#: 裸编号:整行只有一个数字或一个中文数字(短文里的「一」「二」「六」,不是章名)
-_BARE_NUMBER_RE = re.compile(r"^[0-9〇零一二三四五六七八九十百千]{1,3}$")
+#: 裸编号:整行只有一个数字或一个中文数字(短文里的「一」「二」「六」,不是章名)。
+#: 允许带一个尾随标点 —— OCR 常把它排成「六.」「二、」,而它仍然是节内编号。
+_BARE_NUMBER_RE = re.compile(r"^[0-9〇零一二三四五六七八九十百千]{1,3}[.、．,，]?$")
 
 #: 全角标点折叠成 ASCII:目录页与正文常常一份全角一份半角(``附录：`` vs ``附录:``)
 _PUNCT_FOLD = str.maketrans({
@@ -646,6 +647,10 @@ def restore_headings(md: str, evidence: Sequence[Block], *,
                     lines[j] = m.group(2).strip()
             existing.discard(entry.key)
         if pos is None:
+            if entry.key in existing:
+                # 正文里已经是同名标题(证据层没给落点、但后端标的标题是对的):
+                # 层级与位置由下面的去重/层级归一负责,这里不能报「找不到落点」
+                continue
             if len(_norm(entry.text)) < _PROMOTE_MIN_CHARS:
                 missing.append(entry.text)
                 continue
