@@ -321,6 +321,9 @@ FOOTNOTE_ID_RE = re.compile(r'\bid="([^"]+)"')
 FOOTNOTE_NUM_RE = re.compile(r'<span class="footnote-num">')
 #: 脚注块里的第一个段落:序号插在它里面,否则会单独占一行
 FOOTNOTE_FIRST_P_RE = re.compile(r"<p\b[^>]*>")
+# 同一个 XHTML 文档内 XML id 必须唯一。OCR/拼接内容偶尔会带两个 ``# Footnotes``
+# 标题，Pandoc 会把它们都写成 ``id=\"footnotes\"``，epubcheck 因而拒绝该章节。
+XHTML_ID_ATTR_RE = re.compile(r'(\bid=")(.*?)(")')
 
 
 def _rewrite_footnotes(text: str) -> tuple[str, int]:
@@ -425,6 +428,43 @@ def add_footnote_marks(epub_path: str | Path) -> int:
             return data, 0
         text, n = _rewrite_footnotes(data.decode("utf-8", errors="replace"))
         return text.encode("utf-8"), n
+
+    return _rewrite_zip(Path(epub_path), transform)
+
+
+def dedupe_xhtml_ids(epub_path: str | Path) -> int:
+    """给单个 XHTML 内重复的 ``id`` 加稳定后缀，返回修复数量。
+
+    这是 EPUB/XML 的硬约束，不是排版偏好。保留第一次出现的 id（所有既有锚点
+    ``#footnotes`` 仍指向原目标），仅把后续冲突改为 ``footnotes-2``、
+    ``footnotes-3``。若该后缀已经存在会继续递增，所以不会制造新的冲突。
+    """
+    def transform(name: str, data: bytes) -> tuple[bytes, int]:
+        if not name.endswith((".xhtml", ".html", ".htm")) or b'id="' not in data:
+            return data, 0
+        text = data.decode("utf-8", errors="replace")
+        # 候选后缀不能撞上「稍后才出现」的既有 id；先扫完整篇再开始改。
+        reserved = {m.group(2) for m in XHTML_ID_ATTR_RE.finditer(text)}
+        seen: set[str] = set()
+        changed = 0
+
+        def fix(match: re.Match[str]) -> str:
+            nonlocal changed
+            prefix, value, suffix = match.groups()
+            if value not in seen:
+                seen.add(value)
+                return match.group(0)
+            index = 2
+            candidate = f"{value}-{index}"
+            while candidate in reserved or candidate in seen:
+                index += 1
+                candidate = f"{value}-{index}"
+            seen.add(candidate)
+            changed += 1
+            return f"{prefix}{candidate}{suffix}"
+
+        text = XHTML_ID_ATTR_RE.sub(fix, text)
+        return text.encode("utf-8"), changed
 
     return _rewrite_zip(Path(epub_path), transform)
 
@@ -716,6 +756,9 @@ def build_epub(
                       else "Table of Contents")
         # 脚注回链:pandoc 的 epub3 writer 不写 doc-backlink,产物侧补上(没有脚注就不动文件)
         add_footnote_marks(part)
+        # XML/EPUB 不允许同一 XHTML 里出现重复 id。尤其是多个「Footnotes」标题会
+        # 生成重复的 #footnotes，先修复再交给校验器，避免严格模式把整本书判失败。
+        dedupe_xhtml_ids(part)
         # 译者:pandoc 没有 translator → dc:contributor 的映射,产物侧补(见 add_contributor)
         if translator:
             add_contributor(part, translator)

@@ -443,6 +443,26 @@ def test_epub_without_footnotes_is_left_alone(tmp_path: Path) -> None:
     assert epub.read_bytes() == before
 
 
+def test_duplicate_xhtml_ids_are_made_unique_without_moving_first_anchor(tmp_path: Path) -> None:
+    """两个 OCR/Markdown 片段都叫 Footnotes 时，EPUB 的 XML id 仍必须唯一。"""
+    import zipfile
+
+    from pdf2epub.epub.pandoc import dedupe_xhtml_ids
+    epub = tmp_path / "duplicate-id.epub"
+    with zipfile.ZipFile(epub, "w") as zf:
+        zf.writestr("mimetype", b"application/epub+zip", compress_type=zipfile.ZIP_STORED)
+        zf.writestr("OEBPS/ch.xhtml", (
+            '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            '<section id="footnotes">one</section><section id="footnotes">two</section>'
+            '<p id="footnotes-2">three</p></body></html>'
+        ))
+
+    assert dedupe_xhtml_ids(epub) == 1
+    xhtml = _epub_xhtml(epub)
+    assert xhtml.count('id="footnotes"') == 1
+    assert 'id="footnotes-3"' in xhtml  # -2 已被占用，不能再制造冲突
+
+
 def test_footnote_numbers_match_the_in_text_markers(tmp_path: Path) -> None:
     """脚注块的序号必须与正文标注一致;按章分文件时每章各自从 1 开始。
 
