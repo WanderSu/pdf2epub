@@ -28,6 +28,9 @@ class FakeResp:
         self.status_code = status_code
         self._payload = payload or {}
         self.text = text or json.dumps(self._payload, ensure_ascii=False)
+        # requests.Response 的流式接口:下载层会读 headers / iter_content,
+        # 并把它当上下文管理器用(真实响应支持)
+        self.headers: dict[str, str] = {}
 
     def json(self) -> dict:
         return self._payload
@@ -35,6 +38,17 @@ class FakeResp:
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
             raise AssertionError(f"HTTP {self.status_code}")
+
+    def iter_content(self, chunk_size: int = 1 << 16):
+        data = self.text.encode("utf-8")
+        for i in range(0, len(data), chunk_size):
+            yield data[i : i + chunk_size]
+
+    def __enter__(self) -> "FakeResp":
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        return False
 
 
 class FakePaddle:
