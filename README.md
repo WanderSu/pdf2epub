@@ -172,6 +172,17 @@ One failing file does not affect the others, and the batch supports:
 - resuming after an interruption
 - checking whether an existing output file is complete
 
+### AI proofreading (optional)
+
+Any finished EPUB can be proofread from the Library screen with "AI OPTIMIZE": a model fixes typos, OCR mistakes and spurious line breaks, chapter by chapter.
+
+- One request per chapter, and the model answers with a list of exact replacements instead of rewriting the chapter — a long book cannot lose content to a truncated answer.
+- Every replacement must match the source exactly once; the chapter is re-checked as XML afterwards, and any replacement that unbalances tags is dropped.
+- Results open in a workbench first: book details and the chapter list (status and edit count per chapter) on the left, the full text on the right, switchable between original and proofread.
+- Confirming saves a new `<name>-AI优化.epub`; the original is never overwritten. The output carries an AI marker in `content.opf` and the library shows an AI badge.
+
+You need an OpenAI-compatible endpoint (OpenAI, DeepSeek, DashScope, Zhipu, Moonshot, OpenRouter or your own gateway); set URL, model and key under Settings → AI optimization. The key stays in the local `apikey.json` and is never shown back; the chapters being proofread are sent to that service.
+
 ---
 
 ## Installation
@@ -299,7 +310,7 @@ build the EPUB
 check the EPUB
 ```
 
-Once it finishes, the EPUB is in the output directory configured in settings.
+Once it finishes, the EPUB is in the output directory configured in settings. To proofread it, open the Library screen and choose AI OPTIMIZE on the book's row.
 
 ---
 
@@ -767,6 +778,13 @@ The project includes checks for the practical problems that affect reading, but 
 
 * When cover rendering fails, the library shows a placeholder block.
 * The conversion queue is not kept across restarts (the recent-files list is).
+
+### AI proofreading
+
+* Text-level corrections per chapter only: chapters, images and styles are not restructured.
+* A chapter larger than 512 KB is skipped (over the single-request context); the chapter row says why.
+* A replacement that does not match the source exactly once is skipped, and the workbench reports how many were not applied.
+* Quality depends on the model you pick; results differ noticeably between models.
 
 ---
 
