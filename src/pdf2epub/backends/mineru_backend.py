@@ -47,6 +47,7 @@ from .base import (
 )
 from pdf2epub.page_result import page_marker_from_range
 from pdf2epub.paths import load_api_key
+from pdf2epub.net import MAX_ZIP_BYTES, DEFAULT_TIMEOUT, download_to
 from pdf2epub.markdown.footnotes import load_content_list, reconstruct_footnotes
 from .safe_zip import UnsafeArchiveError, safe_extract
 import pdf2epub.events as events
@@ -136,11 +137,12 @@ class MinerUAdapter(Backend):
         }
 
     def _post_json(self, path: str, payload: dict) -> dict:
-        resp = requests.post(f"{self.base_url}{path}", headers=self._headers, json=payload, timeout=60)
+        resp = requests.post(f"{self.base_url}{path}", headers=self._headers, json=payload,
+                             timeout=DEFAULT_TIMEOUT)
         return self._parse(resp)
 
     def _get_json(self, path: str) -> dict:
-        resp = requests.get(f"{self.base_url}{path}", headers=self._headers, timeout=60)
+        resp = requests.get(f"{self.base_url}{path}", headers=self._headers, timeout=DEFAULT_TIMEOUT)
         return self._parse(resp)
 
     @staticmethod
@@ -469,7 +471,7 @@ class MinerUAdapter(Backend):
         # PUT 上传(官方要求不设置 Content-Type);分片时同一文件上传到每个条目 URL
         for url in file_urls:
             with open(pdf_path, "rb") as f:
-                resp = requests.put(url, data=f, timeout=300)
+                resp = requests.put(url, data=f, timeout=DEFAULT_TIMEOUT)
             if resp.status_code not in (200, 201):
                 raise MinerUError(
                     f"文件上传失败 HTTP {resp.status_code}: {resp.text[:200]}",
@@ -581,11 +583,9 @@ class MinerUAdapter(Backend):
         tmp_zip = work_dir / f"_mineru_{slug}.zip"
         extract_tmp = work_dir / f"_mineru_extract_{slug}"
         try:
-            with requests.get(item["full_zip_url"], stream=True, timeout=300) as resp:
-                resp.raise_for_status()
-                with open(tmp_zip, "wb") as f:
-                    for chunk in resp.iter_content(chunk_size=1 << 16):
-                        f.write(chunk)
+            # 统一下载保护:两段超时 + 体积上限 + 失败不留半份文件(见 pdf2epub.net)
+            download_to(item["full_zip_url"], tmp_zip, max_bytes=MAX_ZIP_BYTES,
+                        session=requests)
             extract_tmp.mkdir(parents=True, exist_ok=True)
             # 不直接 extractall:结果包来自云端,只解出需要的条目,并拒绝路径穿越、
             # 符号链接与超限体积(见 safe_zip)。

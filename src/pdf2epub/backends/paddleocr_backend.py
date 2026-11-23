@@ -34,6 +34,14 @@ import time
 from pathlib import Path
 
 import requests
+from pdf2epub.net import (
+    DEFAULT_TIMEOUT,
+    MAX_IMAGE_BYTES,
+    MAX_JSON_BYTES,
+    DownloadError,
+    download_to,
+    read_bytes,
+)
 
 from .base import (
     Backend,
@@ -365,7 +373,7 @@ class PaddleOCRAdapter(Backend):
         会让已提交的任务被重新上传、重新计费。
         """
         try:
-            resp = requests.get(f"{JOBS_URL}/{job_id}", headers=self._headers, timeout=60)
+            resp = requests.get(f"{JOBS_URL}/{job_id}", headers=self._headers, timeout=DEFAULT_TIMEOUT)
         except requests.RequestException as e:
             raise PaddleOCRError(f"续跑探测失败({e}),保留缓存稍后重试") from e
         if resp.status_code != 200:
@@ -415,7 +423,7 @@ class PaddleOCRAdapter(Backend):
         """轮询任务状态,返回 data 字典(含 resultUrl)。"""
         start = time.time()
         while time.time() - start < self.timeout:
-            resp = requests.get(f"{JOBS_URL}/{job_id}", headers=self._headers, timeout=60)
+            resp = requests.get(f"{JOBS_URL}/{job_id}", headers=self._headers, timeout=DEFAULT_TIMEOUT)
             if resp.status_code != 200:
                 raise PaddleOCRError(
                     f"查询失败 HTTP {resp.status_code}: {resp.text[:300]}",
@@ -451,8 +459,9 @@ class PaddleOCRAdapter(Backend):
         if not jsonl_url:
             raise PaddleOCRError("结果中缺少 jsonUrl")
 
-        resp = requests.get(jsonl_url, timeout=300)
-        resp.raise_for_status()
+        # 统一下载保护:两段超时 + 体积上限(见 pdf2epub.net)
+        payload = read_bytes(jsonl_url, max_bytes=MAX_JSON_BYTES, session=requests)
+        text = payload.decode("utf-8", errors="replace")
 
         work_dir.mkdir(parents=True, exist_ok=True)
         images_abs = work_dir / "images"
@@ -470,7 +479,7 @@ class PaddleOCRAdapter(Backend):
         blocks: list[dict] = []                         # 归一化结构化块(脚注数据源)
         page_idx = 0
         parsed_lines = 0                                # 成功解析的 JSONL 行数(空结果判定用)
-        for line in resp.text.splitlines():
+        for line in text.splitlines():
             line = line.strip()
             if not line:
                 continue
@@ -496,12 +505,11 @@ class PaddleOCRAdapter(Backend):
                     target = images_abs / name
                     target.parent.mkdir(parents=True, exist_ok=True)
                     try:
-                        img_resp = requests.get(url, timeout=120)
-                        img_resp.raise_for_status()
-                        target.write_bytes(img_resp.content)
+                        # 单张图上限 + 失败不留半份(临时文件在 download_to 内清理)
+                        download_to(url, target, max_bytes=MAX_IMAGE_BYTES, session=requests)
                         url_to_rel[url] = f"images/{name}"
                         img_count += 1
-                    except requests.RequestException as e:
+                    except (requests.RequestException, DownloadError) as e:
                         print(f"[paddleocr] 图片下载失败 {url[:80]}: {e}")
                 # markdown 中 URL 引用 → 本地相对路径
                 for url, rel in url_to_rel.items():
@@ -532,7 +540,7 @@ class PaddleOCRAdapter(Backend):
         # 抛错则不入缓存,重跑会继续轮询同一个 jobId(不重新上传、不重新计费)。
         if parsed_lines == 0:
             raise PaddleOCRError(
-                f"云端结果无法解析(返回 {len(resp.text)} 字节,没有一行是合法 JSON,"
+                f"云端结果无法解析(返回 {len(payload)} 字节,没有一行是合法 JSON,"
                 f"jobId={job_id}):可能是结果地址失效或代理返回了错误页;"
                 f"本次结果不写入缓存,重跑会继续取同一个任务",
                 retryable=True,
