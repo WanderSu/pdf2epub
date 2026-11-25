@@ -19,7 +19,7 @@ import {
   baseName,
   baseValue,
   diffCleanOpts,
-  fmtDate,
+  libDate,
   formatSize,
   mergeCleanOpts,
   normPath,
@@ -879,7 +879,8 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
       bytes: b.size,
       // 页数/类型/后端优先取库里的持久值(重启后仍在),会话内再用实时值纠正
       pages: s?.pages || b.pages || 0,
-      date: b.mtime ? fmtDate(b.mtime * 1000) : "",
+      // 日期 = 转换/入库那天,**不是文件 mtime**:后者被外部工具碰一下就变
+      date: libDate(b.converted_at, b.added_at),
       type: s?.type ?? ((b.kind ?? undefined) as FileType | undefined),
       backend: s?.backend ?? ((b.backend ?? undefined) as Backend | undefined),
       epub: b.path,

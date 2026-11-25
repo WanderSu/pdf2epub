@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  normPath, formatSize, fmtDate, fmtMonthDay, baseName,
+  normPath, formatSize, fmtDate, fmtMonthDay, libDate, baseName,
   backendFromPlan, parseTypeFromLine,
   clearLegacySettings, diffCleanOpts, mergeCleanOpts, readLegacySettings,
 } from "./format";
@@ -26,6 +26,25 @@ describe("formatSize", () => {
   it("大于等于 1MB 用 MB 保留一位", () => {
     expect(formatSize(1.5 * 1024 * 1024)).toBe("1.5 MB");
     expect(formatSize(1024 * 1024)).toBe("1.0 MB");
+  });
+});
+
+describe("libDate", () => {
+  const at = (y: number, m: number, d: number) =>
+    Math.floor(new Date(y, m - 1, d, 12, 0).getTime() / 1000);
+
+  it("优先用转换时间,不看文件 mtime", () => {
+    expect(libDate(at(2026, 11, 23), at(2026, 11, 21))).toBe("2026-11-23");
+  });
+
+  it("旧记录没有 converted_at 时退回入库时间", () => {
+    expect(libDate(undefined, at(2026, 11, 21))).toBe("2026-11-21");
+    expect(libDate(null, at(2026, 11, 21))).toBe("2026-11-21");
+  });
+
+  it("两个都没有就留空,不显示 1970", () => {
+    expect(libDate(undefined, undefined)).toBe("");
+    expect(libDate(0, 0)).toBe("");
   });
 });
 
