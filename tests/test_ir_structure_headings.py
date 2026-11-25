@@ -612,3 +612,60 @@ def test_footnote_star_is_stripped_from_promoted_title() -> None:
     md, _ = restore_headings(md_in, ev)
     assert "# 为什么要读陈映真？" in md
     assert "# 为什么要读陈映真？\\*" not in md
+
+
+def test_variant_chapters_adopted_among_many_sections() -> None:
+    """真实短篇集:目录印简体、正文 OCR 成繁体异体,窗口里还夹着多个 L2 小节。
+
+    旧判据「前后目录条目之间恰好剩一个标题」被 3–6 个小节挤掉,两个真章标题
+    一直挂在上一篇底下。证据层把章标题标成 text_level=1、章内小节标成 2,
+    窗口里 L1 唯一才认 —— 既有强信号,也不靠猜。
+    """
+    md_in = """\
+目次
+
+机场上的故事……官伟勋 68
+巡线工……刘安琪 86
+路考……张天民 102
+骏马飞驰……王慧芹 121
+王林林……黄树芳 137
+
+# 机场上的故事
+
+## 2
+
+## 3
+
+## 巡 綫 工
+
+## 4
+
+## 5
+
+# 路 考
+
+## 6
+
+## 駿馬飞馳
+
+# 王林林
+"""
+
+    def blk(text: str, page: int, level: int) -> dict:
+        return {"type": "text", "text": text, "page_idx": page,
+                "bbox": [400, 310, 650, 340], "text_level": level}
+
+    rows = [
+        blk("机场上的故事", 70, 1), blk("巡 綫 工", 88, 1),
+        blk("路 考", 104, 1), blk("駿馬飞馳", 123, 1), blk("王林林", 139, 1),
+        blk("2", 75, 2), blk("3", 77, 2), blk("4", 90, 2),
+        blk("5", 92, 2), blk("6", 110, 2),
+    ]
+    md, notes = _run(md_in, rows)
+    heads = [ln for ln in md.split("\n") if ln.startswith("#")]
+    assert "# 巡 綫 工" in heads and "# 駿馬飞馳" in heads
+    assert "## 2" in heads and "## 6" in heads, "章内小节不该被一起提升"
+    assert (md.index("# 机场上的故事") < md.index("# 巡 綫 工")
+            < md.index("# 路 考") < md.index("# 駿馬飞馳")
+            < md.index("# 王林林"))
+    assert any("补认 2" in n for n in notes)

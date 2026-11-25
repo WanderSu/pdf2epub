@@ -532,7 +532,8 @@ def _toc_titles(lines: Sequence[str]) -> tuple[dict[str, _Title], set[str]]:
 
 
 def _adopt_gap_headings(lines: list[str], toc: dict[str, _Title],
-                        toc_keys: set[str], struct_keys: set[str]) -> dict[str, str]:
+                        toc_keys: set[str], struct_keys: set[str],
+                        chapter_level_keys: set[str] | None = None) -> dict[str, str]:
     """按**目录顺序**补认「字形变了但位置对得上」的章标题,返回补认到的目录键。
 
     为什么需要:OCR 会把同一本书排成繁简/异体两套字(目录印「巡线工」「骏马飞驰」
@@ -541,6 +542,11 @@ def _adopt_gap_headings(lines: list[str], toc: dict[str, _Title],
 
     判据只有位置:目录顺序 = 阅读顺序。目录里前后两条都找到了落点,中间**恰好**只
     剩一个标题时,它就是这条目录对应的章;剩 0 个或 2 个以上都不猜。
+
+    ``chapter_level_keys`` 是证据层明确标了 ``text_level=1`` 的标题(署名已由目录
+    作者栏排除)。真实短篇集里每章夹着 3–6 个 ``text_level=2`` 小节,「窗口里恰好
+    一个标题」几乎不成立;但**章级信号在窗口里是唯一的**,先把候选收敛到这些强信号
+    再数。强信号 2 个以上仍不猜;整本书没有 L1 信息时退回原判据,不影响旧夹具。
     """
     order = list(toc)
     pos_of: dict[str, int] = {}
@@ -568,6 +574,15 @@ def _adopt_gap_headings(lines: list[str], toc: dict[str, _Title],
             if other in toc_keys or other in struct_keys:
                 continue
             cands.append(pos)
+        if chapter_level_keys:
+            # 章内小节(text_level=2)会挤爆窗口,但章级信号只有一个:先只数 L1。
+            strong = [p for p in cands
+                      if _title_key(_HEADING_RE.match(lines[p]).group(2))
+                      in chapter_level_keys]
+            if len(strong) > 1:
+                continue                    # 两个以上章级候选,仍然不猜
+            if len(strong) == 1:
+                cands = strong
         if len(cands) != 1:
             continue
         text = _HEADING_RE.match(lines[cands[0]]).group(2).strip()
@@ -1041,7 +1056,16 @@ def restore_headings(md: str, evidence: Sequence[Block], *,
     if toc_authoritative:
         # 字形变了但位置对得上的章标题(繁简/异体),按目录顺序补认;必须在**降级之后**
         # 跑:只有真标题(署名/裸编号已被降成正文)才剩下,窗口里才可能「恰好一个」。
-        adopted = _adopt_gap_headings(lines, toc, toc_keys, struct_keys)
+        # 章级强信号:后端把章标题标成 text_level=1、章内小节标成 2。署名也常被
+        # 标成 1(实测一本短篇集 26 个 L1 里有 6 个是作者名),用目录作者栏排掉。
+        chapter_level_keys = {
+            _title_key(b.text) for b in evidence
+            if (b.kind == "heading" and b.prov.text_level == 1 and b.text.strip()
+                and not _byline_like(b.text, toc_authors)
+                and _title_key(b.text) not in toc_authors)
+        }
+        adopted = _adopt_gap_headings(lines, toc, toc_keys, struct_keys,
+                                      chapter_level_keys)
         for body_key in adopted.values():
             text = next((ln.lstrip("#").strip() for ln in lines
                          if (m := _HEADING_RE.match(ln))
