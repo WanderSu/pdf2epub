@@ -462,6 +462,76 @@ def reconstruct_footnotes(md_text: str, blocks: Sequence[dict], *, next_id: int 
                              next_id=next_id, stats=stats)
 
 
+#: 页尾定位时要排除的装饰块(MinerU 把它们排到页末,不能拿它们当页尾正文)
+_DECORATION_TYPES = frozenset({"page_number", "header", "footer", "page_footnote",
+                               "page_break", "discarded", "page_group"})
+
+
+def _layout_page_ends(md: str, blocks: Sequence[dict]) -> dict[int, int]:
+    """用结构化结果的 bbox 找「每页最后一条正文」的段末偏移。
+
+    为什么不能只靠文本对齐:``_anchor_key`` 要求锚点 ≥8 字,而一页的末尾常常是一句
+    很短的舞台说明(``(沉默。)`` 只有 5 字)、署名或对话 —— 它们不参与对齐,于是按
+    "最后一个成功对齐的块"算出的页尾会落在它们**之前**。实测一本小说集:页脚注
+    ``\\* 人间版全集…`` 被插到了 ``(沉默。)`` 前面,正文顺序整个颠倒。
+
+    判据全部来自结构化结果:同一页里 ``type`` 不是装饰类、bbox 上沿最大的块,就是
+    排版上这一页的最后一条正文。短块在 md 里用**整行相等**定位(不能用"包含",否则
+    别处重复出现的 ``(沉默。)`` 会配错),并把搜索限定在该页的对齐区间内。
+
+    找不到就返回空 —— 调用方退回原有的文本对齐结果,不会因此把脚注挪到更错的地方。
+    """
+    norm_md, index_map = _normalized(md)
+    last: dict[int, tuple[float, str]] = {}
+    first_pos: dict[int, int] = {}
+    for block in blocks:
+        if not isinstance(block, dict) or block.get("type") in _DECORATION_TYPES:
+            continue
+        page = block.get("page_idx")
+        if not isinstance(page, int):
+            continue
+        text = re.sub(r"\s+", "", _block_text(block))
+        if not text:
+            continue
+        box = block.get("bbox")
+        y = float(box[1]) if isinstance(box, (list, tuple)) and len(box) >= 2 else 0.0
+        if page not in last or y > last[page][0]:
+            last[page] = (y, text)
+        key = _anchor_key(block)
+        if key and page not in first_pos:
+            pos = norm_md.find(key)
+            if pos >= 0:
+                first_pos[page] = index_map[pos]
+
+    lines = md.splitlines(keepends=True)
+    offsets: list[int] = []
+    cursor = 0
+    for line in lines:
+        offsets.append(cursor)
+        cursor += len(line)
+    ordered = sorted(first_pos)
+    bounds: dict[int, tuple[int, int]] = {}
+    for i, page in enumerate(ordered):
+        hi = first_pos[ordered[i + 1]] if i + 1 < len(ordered) else len(md)
+        bounds[page] = (first_pos[page], hi)
+
+    out: dict[int, int] = {}
+    for page, (_y, text) in last.items():
+        if page not in bounds:
+            continue
+        lo, hi = bounds[page]
+        best: int | None = None
+        for idx, line in enumerate(lines):
+            if not (lo <= offsets[idx] < hi):
+                continue
+            content = line.rstrip("\r\n")
+            if re.sub(r"\s+", "", content) == text:
+                best = offsets[idx] + len(content)
+        if best is not None:
+            out[page] = _paragraph_end(md, best)
+    return out
+
+
 def _page_anchors(md: str, blocks: Sequence[dict], notes: Sequence[StructuredFootnote]
                   ) -> dict[tuple, int]:
     """每条脚注要插回的位置:它所在页最后一块内容的段落末尾(对不齐则文末)。
@@ -502,7 +572,11 @@ def _page_anchors(md: str, blocks: Sequence[dict], notes: Sequence[StructuredFoo
         if isinstance(page, int):
             last_page = page
         spans[page] = _paragraph_end(md, index_map[cursor - 1])
+    # bbox 给出的页尾优先:它认得出「对齐跳过的短块」(舞台说明/署名),脚注因此
+    # 落在这一页最后一条正文**之后**,而不是插在它前面。
+    layout = _layout_page_ends(md, blocks)
     anchors: dict[tuple, int] = {}
     for note in notes:
-        anchors[(note.page_idx, note.marker, note.text)] = spans.get(note.page_idx, len(md))
+        key = (note.page_idx, note.marker, note.text)
+        anchors[key] = layout.get(note.page_idx, spans.get(note.page_idx, len(md)))
     return anchors

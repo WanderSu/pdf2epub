@@ -714,6 +714,20 @@ def test_running_heads_spares_poetry_refrain() -> None:
     assert "每个人被迫着发出最后的吼声" in out
 
 
+def test_running_heads_spares_parenthesized_stage_directions() -> None:
+    """括号括起的署名/舞台说明是正文,不是页眉装饰。
+
+    实测一本小说集里 ``(签名)`` 在 5 封信末各出现一次:短、不带句末标点、重复
+    ≥3 次,完全命中页眉候选,于是 5 处署名被整行删掉。半角 ``)`` 不在 END_PUNCT
+    里(那里只收了全角 ``）``),必须单独挡住。
+    """
+    md = ("第一封信。\n\n(签名)\n\n第二封信。\n\n(签名)\n\n"
+          "第三封信。\n\n(签名)\n\n(沉默。)\n")
+    out = only(md, running_heads=True)
+    assert out.count("(签名)") == 3
+    assert "(沉默。)" in out
+
+
 def test_join_lines_keeps_hard_break() -> None:
     """行尾恰好两个空格是 Markdown 硬换行,``join_lines`` 重建行时不能吃掉。"""
     md = "第一行文字  \n这是第二行,有句号。\n"

@@ -305,3 +305,31 @@ def test_structured_footnotes_reach_the_epub_as_native_footnotes(tmp_path: Path)
     assert 'href="#fn1"' in xhtml and "fnref" in xhtml   # 引用侧落着 fnref 锚点
     assert xhtml.count("doc-backlink") >= 2              # 脚注侧回链(pandoc 不写,产物侧补)
     assert "甲的注释" in xhtml and "乙的注释" in xhtml
+
+
+# ---------------------------------------------------------------- bbox 页末定位(顺序回归)
+
+def test_unmatched_note_falls_after_short_last_line_of_page() -> None:
+    """页尾是一条短舞台说明时,未配对脚注必须落在它**之后**。
+
+    ``_anchor_key`` 要求 ≥8 字,``(沉默。)`` 只有 5 字,不参与文本对齐 —— 旧逻辑
+    把「最后一个成功对齐的块」当页尾,页脚注就被插到舞台说明**前面**(实测一本
+    小说集里正文顺序整个颠倒)。现在按 bbox 找页尾块,短块用整行相等定位。
+    """
+    body = "医:“看看今天我能帮你什么忙。”"
+    short = "(沉默。)"
+    later = "病:“你帮不了我的忙,我猜。”"
+    md = (f"{BODY}引用在这里①。\n\n{body}\n\n{short}\n\n{later}\n")
+    blocks = [
+        text_block(f"{BODY}引用在这里①。", 0, y0=200),
+        text_block(body, 0, y0=500),
+        text_block(short, 0, y0=620),
+        note_block("\\* 未配对的页脚注释。", 0, y0=790),
+        text_block(later, 1, y0=200),
+    ]
+
+    res = reconstruct_footnotes(md, blocks)
+
+    assert res.stats["linked"] == 0
+    assert res.md.index(short) < res.md.index("\\* 未配对的页脚注释。")
+    assert res.md.index("\\* 未配对的页脚注释。") < res.md.index(later)

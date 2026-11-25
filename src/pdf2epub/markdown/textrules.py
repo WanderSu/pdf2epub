@@ -238,6 +238,12 @@ def _is_running_head_candidate(s: str, max_len: int) -> bool:
         return False
     if _is_block_start(s) or "[" in s or "]" in s:
         return False
+    # 整行被括号括起来的是舞台说明/署名(``(签名)`` / ``(沉默。)`` / ``(笑声)``),
+    # 不是页眉装饰。实测一本小说集里 ``(签名)`` 在 5 封信末各出现一次,短、不带
+    # 句末标点、重复 ≥3 次 —— 完全命中页眉候选,于是 5 处署名被整行删掉。
+    # 半角右括号 ``)`` 不在 END_PUNCT 里(那里只收了全角 ``）``),必须单独挡住。
+    if (s[0] in "([（【" and s[-1] in ")]）】"):
+        return False
     if _is_catalog_entry(s) or _is_note_line(s):
         return False                        # 目录/索引条目与注释是有内容的行,不是页面装饰
     if s[-1] in END_PUNCT:
