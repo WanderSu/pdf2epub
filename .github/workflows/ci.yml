@@ -61,7 +61,7 @@ jobs:
           fetch-depth: 0          # 范围判定需要 base/head 的完整历史
 
       # 常驻：保证纯文档 PR 里这个 job 也上报 success
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -166,7 +166,7 @@ jobs:
           fetch-depth: 0
 
       # 常驻：纯文档 PR 也要跑分类与门禁，并上报 success
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
