@@ -68,7 +68,8 @@ PDF2EPUB_LIVE_OCR=1 uv run pytest -q tests/test_live_ocr_footnotes.py
 | `src/pdf2epub/**`、`tests/**`、`config/**`、`scripts/**` | + ruff、pytest、pandoc 3.14 |
 | `desktop/src/**`、前端配置 | + tsc、eslint、vitest |
 | `desktop/src-tauri/**`、`cli.spec`、tauri.conf、发布脚本 | + cargo test、Windows 壳构建、PyInstaller、smoke test |
-| 锁文件、安全敏感路径、CI 自身、外部 fork PR、push 到 `main` | 全量 |
+| 锁文件、安全敏感路径、CI 自身、外部 fork PR | 全量 |
+| push 到 `main`（合并后的结果） | 只跑门禁与版本一致性：PR 上已验证过，push 事件不受分支保护约束 |
 
 `引擎与前端(Ubuntu)` 与 `桌面端与发布形态(Windows)` 是两个 required status
 checks，**即使重步骤被跳过也始终上报 success**。不要给 workflow 加 `paths-ignore`：

@@ -195,6 +195,16 @@ def classify_from(
 ) -> dict[str, bool]:
     """纯函数：给定改动文件与元数据，产出各层开关。便于本地自测。"""
     labels = labels or []
+
+    # push main 是 PR 合并后的结果：合并前 PR 上已按改动范围跑过完整检查，
+    # 且 push 事件不受分支保护约束，再跑一遍全量没有任何门禁价值。
+    # 两个受保护 job 依旧运行并上报 success，只是把所有重步骤关掉；凭证门禁
+    # (guard()) 与版本号一致性由 workflow 的常驻步骤保证，不随这里跳过。
+    # 需要人工重跑全量时用 workflow_dispatch.scope=full。
+    if event == "push":
+        print("[scope] push main：PR 已验证，仅保留常驻门禁，跳过所有重步骤")
+        return _blank()
+
     flags = _blank()
 
     def note(reason: str) -> None:
@@ -242,8 +252,6 @@ def classify_from(
     # 4) 元数据覆盖（只加不减）
     if fork:
         note("fork PR")
-    if event == "push":
-        note("push main（直推/合并后的唯一防线）")
     if head_ref.startswith("release/"):
         print("[scope] release/ 分支：追加发布形态检查")
         flags["release"] = True
@@ -406,7 +414,17 @@ def self_test() -> int:
         print(f"  {status} {name}: {bad or '符合预期'}")
         if bad:
             failed += 1
-    print(f"[self-test] {len(cases) - failed}/{len(cases)} 通过")
+    # push main 走轻量路径（cases 统一用 pull_request meta，这里单独验）
+    push_flags = classify_from(
+        ["src/pdf2epub/cli.py", "uv.lock"], event="push", title="",
+        head_ref="main", labels=[], fork=False, force="auto",
+    )
+    push_ok = not any(push_flags.values())
+    print(f"  {'OK ' if push_ok else 'FAIL'} push main 轻量: {push_flags}")
+    if not push_ok:
+        failed += 1
+    total = len(cases) + 1
+    print(f"[self-test] {total - failed}/{total} 通过")
     return 1 if failed else 0
 
 

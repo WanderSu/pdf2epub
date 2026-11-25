@@ -70,7 +70,8 @@ from the changed paths (plus the PR title, labels and whether it comes from a fo
 | `src/pdf2epub/**`, `tests/**`, `config/**`, `scripts/**` | + ruff, pytest, pandoc 3.14 |
 | `desktop/src/**`, frontend configs | + tsc, eslint, vitest |
 | `desktop/src-tauri/**`, `cli.spec`, tauri.conf, release scripts | + cargo test, Windows shell build, PyInstaller, smoke test |
-| Lockfiles, security-sensitive paths, CI itself, fork PRs, pushes to `main` | full pipeline |
+| Lockfiles, security-sensitive paths, CI itself, fork PRs | full pipeline |
+| Push to `main` (merge result) | guard + version-sync only — the PR already ran the full checks, and push events are not gated by branch protection |
 
 The two jobs `引擎与前端(Ubuntu)` and `桌面端与发布形态(Windows)` are required
 status checks and **always report success**, even when their heavy steps are
