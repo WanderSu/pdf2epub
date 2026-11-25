@@ -359,3 +359,256 @@ def test_chapter_with_variant_characters_is_adopted_by_toc_order() -> None:
     heads = [ln for ln in md.split("\n") if ln.startswith("#")]
     assert "# 巡 綫 工" in heads, "字形不同的章标题被降成了小节"
     assert any("补认" in n for n in notes)
+
+
+# ---------------------------------------------------------------- MinerU 版面正常化(《夜行货车》实测形态)
+#
+# 合成夹具复刻这本小说集里同时出现的几种错法:目录「页码在前」、页眉把大标题与
+# 副标题连写、页眉在 JSON 里排到本页正文之后、单字大标题整个漏识别、分节号被
+# 降级后又被页码规则删掉、日期与小节同级。印刷页码 + 5 = 证据层 page_idx。
+
+_NT_TOC = """\
+目录
+
+001 六月里的玫瑰花
+027 贺大哥
+073 夜行货车
+153 云
+"""
+
+_NT_A = "门开了。像地窖一般幽暗的酒吧,便在一霎时间掠过一片白色的日光,一个又瘦又高的黑人走了进来。"
+_NT_D = "贺大哥正文第一段足够长,用来给页眉标题提供落点锚点使用,内容不能太短。"
+_NT_B = "摩根索先生跨着大步走过林荣平的办公室,这一段文字必须足够长,才能作为标题落点的锚点使用。"
+_NT_C = "赠给敬爱的王祯和兄,并以最虔诚的祝福,祈望他快快康复,这一段也足够长可以当锚点。"
+
+_NT_MD = f"""\
+{_NT_TOC}
+## 疲倦的月亮
+
+{_NT_A}
+
+## 2
+
+## 3
+
+## 三月十二日
+
+## 1 凡劳苦背重担的人……
+
+{_NT_D}
+
+## 1 长尾雉的标本
+
+{_NT_B}
+
+华盛顿大楼之三
+
+{_NT_C}
+
+## 1 麦园
+
+正文其余部分。
+"""
+
+
+def _nt_block(kind: str, text: str, page: int, box: list, level: int | None = None) -> dict:
+    item = {"type": kind, "text": text, "page_idx": page, "bbox": box}
+    if level is not None:
+        item["text_level"] = level
+    return item
+
+
+def _nt_evidence() -> list[dict]:
+    return [
+        _nt_block("text", "疲倦的月亮", 6, [406, 449, 578, 473], 2),
+        _nt_block("text", _NT_A, 6, [95, 517, 892, 727]),
+        _nt_block("header", "六月里的玫瑰花", 6, [95, 112, 360, 139]),
+        _nt_block("page_number", "001", 6, [845, 948, 886, 963]),
+        _nt_block("text", _NT_D, 32, [95, 517, 892, 600]),
+        _nt_block("header", "贺大哥", 32, [101, 114, 215, 139]),
+        _nt_block("page_number", "027", 32, [845, 948, 886, 963]),
+        _nt_block("text", "1 长尾雉的标本", 78, [360, 445, 613, 469], 2),
+        _nt_block("text", _NT_B, 78, [90, 513, 886, 600]),
+        _nt_block("header", "夜行货车华盛顿大楼之一", 78, [87, 110, 267, 167]),
+        _nt_block("page_number", "073", 78, [837, 944, 883, 961]),
+        _nt_block("text", "华盛顿大楼之三", 158, [84, 160, 264, 180]),
+        _nt_block("text", _NT_C, 158, [84, 233, 816, 257]),
+        _nt_block("text", "1 麦园", 158, [415, 460, 549, 484], 2),
+        _nt_block("page_number", "153", 158, [837, 957, 880, 974]),
+        # 编号小节/日期/省略号标题的证据放在另一页:它们只要 ``text_level`` 背书,
+        # 不能挤进章首那一页的锚点候选(否则篇名会插到本章第 3 段之后)。
+        _nt_block("text", "2", 300, [450, 200, 476, 220], 2),
+        _nt_block("text", "3", 300, [447, 240, 473, 260], 2),
+        _nt_block("text", "三月十二日", 300, [171, 280, 322, 300], 2),
+        _nt_block("text", "1 凡劳苦背重担的人……", 300, [290, 320, 680, 340], 2),
+    ]
+
+
+def _nt_run():
+    ev = parse_evidence(_nt_evidence(), backend="mineru", part_id="book")
+    return restore_headings(_NT_MD, ev)
+
+
+def test_toc_with_leading_page_numbers_is_authoritative() -> None:
+    from pdf2epub.ir.structure import _parse_toc_line, _toc_titles
+
+    assert _parse_toc_line("001 六月里的玫瑰花") == ("六月里的玫瑰花", "", "001")
+    assert _parse_toc_line("379 为什么要读陈映真？/赵刚") == (
+        "为什么要读陈映真？", "赵刚", "379")
+    toc, _ = _toc_titles(_NT_TOC.split("\n"))
+    assert [t.page for t in toc.values()] == [1, 27, 73, 153]
+
+
+def test_numbered_body_lines_are_not_mistaken_for_toc() -> None:
+    from pdf2epub.ir.structure import _toc_titles
+
+    toc, _ = _toc_titles(["1 长尾雉的标本", "2 温柔的乳房", "3 沙漠博物馆"])
+    assert toc == {}
+
+
+def test_numbered_ellipsis_title_is_not_a_sentence() -> None:
+    from pdf2epub.ir.structure import _sentence_like
+
+    assert not _sentence_like("1 凡劳苦背重担的人……")
+
+
+def test_split_header_subtitle() -> None:
+    from pdf2epub.ir.structure import _split_header_subtitle
+
+    assert _split_header_subtitle("夜行货车华盛顿大楼之一", "夜行货车") == "华盛顿大楼之一"
+    assert _split_header_subtitle("万商帝君\n华盛顿大楼之四", "万商帝君") == "华盛顿大楼之四"
+
+
+def test_page_offset_ignores_repeated_footers() -> None:
+    """页脚每页都印篇名(实测「夜行货车」121 次),不能把卷首偏移算成 15。"""
+    from pdf2epub.ir.structure import _toc_page_offset, _toc_titles
+
+    ev = parse_evidence(_nt_evidence(), backend="mineru", part_id="book")
+    footers = parse_evidence(
+        [_nt_block("footer", "夜行货车", p, [162, 944, 258, 963]) for p in range(6, 18)],
+        backend="mineru", part_id="book")
+    toc, _ = _toc_titles(_NT_TOC.split("\n"))
+    assert _toc_page_offset(toc, tuple(ev) + tuple(footers)) == 5
+
+
+def test_layout_order_restores_merged_and_missing_chapter_titles() -> None:
+    md, notes = _nt_run()
+    # 篇名必须在本章第一个小节之前(旧逻辑按 JSON 块序,页眉被排到正文之后)
+    assert md.index("# 六月里的玫瑰花") < md.index("## 疲倦的月亮")
+    # 页眉合并的「大标题 + 副标题」拆开,且都排在二级标题之前
+    assert (md.index("# 夜行货车") < md.index("华盛顿大楼之一")
+            < md.index("## 1 长尾雉的标本"))
+    # 目录点名、正文里一个字都没识别出来的单字大标题,按印刷页码补回
+    assert md.index("# 云") < md.index("华盛顿大楼之三")
+    assert not any("找不到落点" in n for n in notes)
+
+
+def test_numbered_sections_survive_and_dates_drop_one_level() -> None:
+    md, _ = _nt_run()
+    assert "## 2" in md and "## 3" in md                 # 分节号不再被降级+删掉
+    assert "## 1 凡劳苦背重担的人……" in md              # 编号+省略号不再被当句子
+    assert "### 三月十二日" in md                       # 日期比小节低一级
+
+
+def _inline_blocks() -> list[dict]:
+    """《夜行货车》里真实的问题块:p180 成对署名、p193/p338 英文招牌。"""
+    return [
+        _nt_block("text", "二哥", 180, [453, 432, 523, 454], 2),
+        _nt_block("text", "装配线·文秀英", 180, [555, 471, 750, 493], 2),
+        _nt_block("text", "WASHINGTON BUILDING", 193, [209, 375, 584, 395], 2),
+        _nt_block("text", "MARKETING MANAGER", 338, [200, 738, 537, 758], 2),
+        # 真标题:编号小节、日期、无编号中文小节、裸分节号 —— 一个都不能被误判
+        _nt_block("text", "疲倦的月亮", 6, [406, 449, 578, 473], 2),
+        _nt_block("text", "2", 39, [450, 449, 476, 469], 2),
+        _nt_block("text", "1 长尾雉的标本", 78, [360, 445, 613, 469], 2),
+        _nt_block("text", "三月十二日", 170, [171, 631, 322, 653], 2),
+        _nt_block("text", "2 ROLANTO", 284, [200, 598, 415, 620], 2),
+    ]
+
+
+def test_inline_display_keys_catch_only_quoted_layout_text() -> None:
+    """``text_level`` 只是字号层级:招牌/广告/文章标题+署名不是书的小节。"""
+    from pdf2epub.ir.structure import _inline_display_keys, _title_key
+
+    ev = parse_evidence(_inline_blocks(), backend="mineru", part_id="book")
+    keys = _inline_display_keys(ev)
+    for text in ("二哥", "装配线·文秀英", "WASHINGTON BUILDING", "MARKETING MANAGER"):
+        assert _title_key(text) in keys, f"{text} 没被认成内嵌展示文字"
+    for text in ("疲倦的月亮", "2", "1 长尾雉的标本", "三月十二日", "2 ROLANTO"):
+        assert _title_key(text) not in keys, f"{text} 被误判成内嵌展示文字"
+
+
+_INLINE_MD = """目录
+
+001 甲篇
+027 乙篇
+073 丙篇
+
+甲篇正文第一段足够长用来定位章首。
+
+## 疲倦的月亮
+
+## 2
+
+## 1 长尾雉的标本
+
+### 三月十二日
+
+## 2 ROLANTO
+
+乙篇正文第一段足够长用来定位章首。
+
+## 二哥
+
+## 装配线·文秀英
+
+## WASHINGTON BUILDING
+
+## MARKETING MANAGER
+
+小节三的正文第一段足够长用来定位小节。
+
+丙篇正文第一段足够长用来定位章首。
+"""
+
+
+def _inline_evidence() -> list[dict]:
+    return [
+        _nt_block("header", "甲篇", 6, [95, 112, 360, 139]),
+        _nt_block("text", "甲篇正文第一段足够长用来定位章首。", 6, [95, 517, 892, 600]),
+        _nt_block("header", "乙篇", 32, [101, 114, 215, 139]),
+        _nt_block("text", "乙篇正文第一段足够长用来定位章首。", 32, [95, 517, 892, 600]),
+        _nt_block("header", "丙篇", 78, [87, 110, 267, 167]),
+        _nt_block("text", "丙篇正文第一段足够长用来定位章首。", 78, [90, 513, 886, 600]),
+        *_inline_blocks(),
+        # 页首编号页眉小节:目录不列,但确实是《云》章的第 3 小节
+        _nt_block("header", "3 AMERICAN DREAM", 48, [308, 112, 665, 132]),
+        _nt_block("text", "小节三的正文第一段足够长用来定位小节。", 48, [90, 178, 883, 240]),
+    ]
+
+
+def test_inline_titles_demoted_and_numbered_header_section_restored() -> None:
+    ev = parse_evidence(_inline_evidence(), backend="mineru", part_id="book")
+    md, _ = restore_headings(_INLINE_MD, ev)
+    heads = [line for line in md.split("\n") if line.startswith("#")]
+
+    assert "# 甲篇" in heads and "# 乙篇" in heads and "# 丙篇" in heads
+    assert "## 3 AMERICAN DREAM" in heads          # 章内二级小节,不与章并列
+    assert "# 3 AMERICAN DREAM" not in heads
+    assert (md.index("## 2 ROLANTO") < md.index("## 3 AMERICAN DREAM")
+            < md.index("丙篇正文"))
+    for text in ("二哥", "装配线·文秀英", "WASHINGTON BUILDING", "MARKETING MANAGER"):
+        assert not any(h.endswith(" " + text) for h in heads), f"{text} 仍是标题"
+        assert f"\n{text}\n" in md, f"{text} 降级后文字丢了"
+    assert "## 2" in heads and "## 1 长尾雉的标本" in heads
+    assert "### 三月十二日" in heads and "## 2 ROLANTO" in heads
+
+
+def test_footnote_star_is_stripped_from_promoted_title() -> None:
+    md_in = ("目录\n\n001 甲篇\n027 乙篇\n379 为什么要读陈映真？\n\n"
+             "为什么要读陈映真？\\*\n\n赵刚\n\n正文足够长,以免被当成诗行。\n")
+    ev = parse_evidence(_evidence(("text", "与标题无关的一条正文", 1)),
+                        backend="mineru", part_id="book")
+    md, _ = restore_headings(md_in, ev)
+    assert "# 为什么要读陈映真？" in md
+    assert "# 为什么要读陈映真？\\*" not in md
