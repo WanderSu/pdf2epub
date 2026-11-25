@@ -92,3 +92,60 @@ def test_idempotent(tmp_path: Path) -> None:
     add_title(epub, "烧纸")
     with zipfile.ZipFile(epub) as z:
         assert z.read("EPUB/content.opf").decode("utf-8").count("<dc:title>") == 1
+
+
+# ---------------------------------------------------------------- 目录页排版
+# pandoc 的 epub3 writer 把目录写成嵌套的 <ol class="toc">,阅读器按有序列表渲染
+# 成 1./1.1/1.1.1 数字序号。章节层级靠缩进就够,数字既多余又和书里自己排的
+# 小节号(``1 麦园``)打架 —— 产物侧换成 <ul>,只留圆点标识。
+
+TOC_NAV = """<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>目录</title></head>
+<body><nav epub:type="toc"><h1 id="toc-title">目录</h1><ol class="toc">
+<li id="toc-li-1"><a href="text/ch001.xhtml#a">甲篇</a>
+<ol class="toc"><li id="toc-li-2"><a href="text/ch001.xhtml#b">甲篇小节</a></li></ol></li>
+</ol></nav></body></html>
+"""
+
+
+def _make_toc_epub(path: Path, nav: str) -> Path:
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr(zipfile.ZipInfo("mimetype"), "application/epub+zip", zipfile.ZIP_STORED)
+        z.writestr("EPUB/content.opf", OPF)
+        z.writestr("EPUB/nav.xhtml", nav)
+        z.writestr("EPUB/toc.ncx", NCX)
+        z.writestr("EPUB/text/ch001.xhtml", CH1)
+    return path
+
+
+def test_unnumber_toc_uses_bullets_instead_of_numbers(tmp_path: Path) -> None:
+    from pdf2epub.epub.pandoc import unnumber_toc
+
+    epub = _make_toc_epub(tmp_path / "t.epub", TOC_NAV)
+    assert unnumber_toc(epub) == 2
+    with zipfile.ZipFile(epub) as z:
+        nav = z.read("EPUB/nav.xhtml").decode("utf-8")
+        assert '<ol class="toc">' not in nav and "</ol>" not in nav
+        assert nav.count('<ul class="toc">') == 2 and nav.count("</ul>") == 2
+        assert "甲篇" in nav and "甲篇小节" in nav          # 条目文字不丢
+        assert z.read("EPUB/toc.ncx") == NCX.encode("utf-8")  # ncx 不显示数字,不用动
+        assert z.infolist()[0].filename == "mimetype"
+        assert z.infolist()[0].compress_type == zipfile.ZIP_STORED
+    assert unnumber_toc(epub) == 0                         # 幂等
+
+
+def test_unnumber_toc_leaves_mixed_lists_alone(tmp_path: Path) -> None:
+    """nav 里混着非目录的 <ol> 时宁可不动 —— 换一半会配错标签。"""
+    from pdf2epub.epub.pandoc import unnumber_toc
+
+    mixed = TOC_NAV.replace("</ol></nav>", '<ol><li>别的有序列表</li></ol></ol></nav>')
+    epub = _make_toc_epub(tmp_path / "t.epub", mixed)
+    assert unnumber_toc(epub) == 0
+    with zipfile.ZipFile(epub) as z:
+        assert '<ol class="toc">' in z.read("EPUB/nav.xhtml").decode("utf-8")
+
+
+def test_book_css_styles_toc_list() -> None:
+    css = (Path(__file__).resolve().parents[1] / "config" / "book.css").read_text(
+        encoding="utf-8")
+    assert "ul.toc" in css and "list-style-type: disc" in css

@@ -548,6 +548,26 @@ li p {
   text-indent: 0;
 }
 
+/* ------------------------------------------------------------
+   目录页(EPUB nav.xhtml)
+   产物侧已把 pandoc 的 <ol class="toc"> 换成 <ul class="toc">:
+   目录不需要 1./2./3. 数字序号,一个圆点标识 + 层级缩进就够了。
+   嵌套目录单独收敛缩进,避免每深一层就多压 2em。
+   ------------------------------------------------------------ */
+ul.toc {
+  list-style-type: disc;
+  padding-left: 1.4em;
+}
+
+ul.toc ul.toc {
+  margin: 0.15em 0 0;
+  padding-left: 1.3em;
+}
+
+ul.toc > li {
+  margin-bottom: 0.35em;
+}
+
 /* 表格标题(Pandoc 的 <caption>)与定义列表:默认样式在阅读器之间差异很大,
    这里给出一个克制的统一值。 */
 caption {

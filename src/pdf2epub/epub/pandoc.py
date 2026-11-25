@@ -469,6 +469,54 @@ def dedupe_xhtml_ids(epub_path: str | Path) -> int:
     return _rewrite_zip(Path(epub_path), transform)
 
 
+#: 目录导航块:只在这个 nav 内部换列表标签 —— pandoc 还会另写一个
+#: ``epub:type="landmarks"`` 的 ``<ol>``(Title Page / Table of Contents),
+#: 整篇 nav.xhtml 一把替换会把它的闭合标签也换错。
+_TOC_NAV_RE = re.compile(
+    r'(<nav\b[^>]*epub:type="toc"[^>]*>)(.*?)(</nav>)', re.S)
+
+
+def unnumber_toc(epub_path: str | Path) -> int:
+    """把 nav.xhtml 的目录列表从 ``<ol>`` 换成 ``<ul>``,去掉 1./2./3. 数字序号。
+
+    pandoc 的 epub3 writer 把目录写成嵌套的 ``<ol class="toc">``,阅读器按有序
+    列表渲染成「1. 六月里的玫瑰花 / 1.1 疲倦的月亮 …」。章节层级靠嵌套缩进
+    就足够,数字序号既多余又容易和书里自己排的小节号(``1 麦园``)打架。换成
+    ``<ul>`` 后由阅读器给一个圆点标识 —— 有标识、无编号。
+
+    只在 ``epub:type="toc"`` 的 nav 内部替换,且该块里 ``<ol>`` 与 ``</ol>``
+    必须严格配对(否则说明混着别的列表,宁可不动也不配错标签);landmarks 导航、
+    正文与脚注里的有序列表一个都不碰。
+    """
+    opens = '<ol class="toc">'
+
+    def transform(name: str, data: bytes) -> tuple[bytes, int]:
+        if not name.endswith("nav.xhtml"):
+            return data, 0
+        text = data.decode("utf-8", errors="replace")
+        if opens not in text:
+            return data, 0                       # 已经是 <ul> / 不是 pandoc 目录
+        changed = 0
+
+        def fix(match: re.Match[str]) -> str:
+            nonlocal changed
+            head, body, tail = match.group(1), match.group(2), match.group(3)
+            n_list = body.count(opens)
+            if not n_list:
+                return match.group(0)
+            if (len(re.findall(r"<ol\b", body)) != n_list
+                    or body.count("</ol>") != n_list):
+                return match.group(0)            # 目录块里混着别的 <ol>,不冒险
+            body = body.replace(opens, '<ul class="toc">').replace("</ol>", "</ul>")
+            changed += n_list
+            return head + body + tail
+
+        cleaned = _TOC_NAV_RE.sub(fix, text)
+        return cleaned.encode("utf-8"), changed
+
+    return _rewrite_zip(Path(epub_path), transform)
+
+
 #: pandoc 在「有 title 元数据但不出标题页」时留下的空标题(见 add_title)
 EMPTY_TITLE_H1 = '<h1 class="unnumbered"></h1>'
 
@@ -759,6 +807,9 @@ def build_epub(
         # XML/EPUB 不允许同一 XHTML 里出现重复 id。尤其是多个「Footnotes」标题会
         # 生成重复的 #footnotes，先修复再交给校验器，避免严格模式把整本书判失败。
         dedupe_xhtml_ids(part)
+        # 目录页排版:pandoc 默认用有序列表,阅读器会显示 1./2./3. 数字序号。
+        # 换成无序列表(圆点标识),层级仍由嵌套缩进表达。
+        unnumber_toc(part)
         # 译者:pandoc 没有 translator → dc:contributor 的映射,产物侧补(见 add_contributor)
         if translator:
             add_contributor(part, translator)
