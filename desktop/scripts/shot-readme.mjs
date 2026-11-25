@@ -270,14 +270,16 @@ const SCRIPTS = {
 // running 那本永远停在「转换中」（convert_file 挂 10 分钟），其余正常收尾
 await evalJs(`window.__holdFor = ${JSON.stringify({ [PATHS.running]: 600000 })}; "ok"`);
 
-// 书目页数据：结构与 LibEntry 一致（types.ts）。注意 mtime/added_at 单位是**秒**
-// （Rust 侧 SystemTime），App 里 fmtDate(mtime * 1000) —— 传毫秒日期会错乱。
+// 书目页数据：结构与 LibEntry 一致（types.ts）。注意 mtime/added_at/converted_at
+// 单位是**秒**（Rust 侧 SystemTime）—— 传毫秒日期会错乱。
+// 日期列只认 converted_at / added_at；mtime 是文件最后一次被写的时间，外部工具
+// 碰一下就会变，所以它不参与展示。
 const sec = Math.floor(Date.now() / 1000);
 await evalJs(`window.__library = [
-  { path: "/output/中国哲学简史.epub", title: "中国哲学简史", author: "冯友兰", size: 2411724, mtime: ${sec - 3600}, added_at: ${sec - 3600}, kind: "TXT", backend: "Local", pages: 312 },
-  { path: "/output/公社与公社所有制诸形态.epub", title: "公社与公社所有制诸形态", author: "吴泽", size: 508559, mtime: ${sec - 7200}, added_at: ${sec - 7200}, kind: "SCN", backend: "PaddleOCR", pages: 8 },
-  { path: "/output/巴勒斯坦问题的由来和发展.epub", title: "巴勒斯坦问题的由来和发展", author: "", size: 2198578, mtime: ${sec - 86400}, added_at: ${sec - 86400}, kind: "SCN", backend: "MinerU", pages: 72 },
-  { path: "/output/自然辩证法研究.epub", title: "自然辩证法,还是社会历史辩证法", author: "俞吾金", size: 478123, mtime: ${sec - 172800}, added_at: ${sec - 172800}, kind: "SCN", backend: "PaddleOCR", pages: 7 },
+  { path: "/output/中国哲学简史.epub", title: "中国哲学简史", author: "冯友兰", size: 2411724, mtime: ${sec - 3600}, added_at: ${sec - 3600}, converted_at: ${sec - 3600}, kind: "TXT", backend: "Local", pages: 312 },
+  { path: "/output/公社与公社所有制诸形态.epub", title: "公社与公社所有制诸形态", author: "吴泽", size: 508559, mtime: ${sec - 7200}, added_at: ${sec - 7200}, converted_at: ${sec - 7200}, kind: "SCN", backend: "PaddleOCR", pages: 8 },
+  { path: "/output/巴勒斯坦问题的由来和发展.epub", title: "巴勒斯坦问题的由来和发展", author: "", size: 2198578, mtime: ${sec - 86400}, added_at: ${sec - 86400}, converted_at: ${sec - 86400}, kind: "SCN", backend: "MinerU", pages: 72 },
+  { path: "/output/自然辩证法研究.epub", title: "自然辩证法,还是社会历史辩证法", author: "俞吾金", size: 478123, mtime: ${sec - 172800}, added_at: ${sec - 172800}, converted_at: ${sec - 172800}, kind: "SCN", backend: "PaddleOCR", pages: 7 },
 ]; "ok"`);
 
 const shot = async (name) => {

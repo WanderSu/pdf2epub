@@ -5,146 +5,232 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    # labeled/unlabeled 让 ci:full、ci:docs 标签能触发重跑；
+    # ready_for_review 让 draft 转正式时重新判定一次
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
   workflow_dispatch:
+    inputs:
+      scope:
+        description: 强制指定检查范围（auto = 按改动自动判定）
+        type: choice
+        default: auto
+        options: [auto, docs, python, frontend, rust, release, full]
+
+# fork PR 下 GITHUB_TOKEN 天然只读，这里显式钉死最小权限
+permissions:
+  contents: read
+  pull-requests: read
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  # PR 连续 push 取消旧 run；push main 不取消，保证每个 main 提交都留下完整记录
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  # Windows runner 的管道默认 cp1252:脚本/引擎打印中文会抛 UnicodeEncodeError
+  # Windows runner 的管道默认 cp1252：脚本/引擎打印中文会抛 UnicodeEncodeError
   PYTHONUTF8: "1"
   PYTHONIOENCODING: utf-8
+  PANDOC_VERSION: "3.14"
 
+# ---------------------------------------------------------------------------
+# 分支保护把下面两个 job 名设为 required status checks，且 enforce_admins: true。
+# 因此两个 job 必须「永远运行并上报 success」：省时间靠「步骤按范围跳过」，
+# 不能靠 paths-ignore 让 workflow 不触发，也不能靠 skip 掉整个 job —— 那会让
+# context 永不上报，PR 永久 pending（271ee2f 加 paths-ignore 后 4 分钟被 revert
+# 就是这个原因）。判定逻辑见 scripts/ci_scope.py，矩阵见 work/ci-scenario-analysis.md。
+# ---------------------------------------------------------------------------
 jobs:
   engine:
     name: 引擎与前端(Ubuntu)
     runs-on: ubuntu-latest
+    env:
+      EVENT_NAME: ${{ github.event_name }}
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      BEFORE_SHA: ${{ github.event.before }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      HEAD_REF: ${{ github.event.pull_request.head.ref }}
+      PR_TITLE: ${{ github.event.pull_request.title || '' }}
+      PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+      FORK: ${{ github.event.pull_request.head.repo.fork }}
+      # 用 github.event.inputs 而非 inputs：后者只在 dispatch/reusable workflow
+      # 里保证存在，push/PR 事件下引用未定义上下文会有解析风险
+      FORCE_SCOPE: ${{ github.event.inputs.scope || 'auto' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # 范围判定需要 base/head 的完整历史
 
+      # 常驻：保证纯文档 PR 里这个 job 也上报 success
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
+      - name: 变更范围判定 + PR 门禁
+        id: scope
+        shell: bash
+        run: python scripts/ci_scope.py
+
+      - name: 版本号一致性（秒级，常驻）
+        run: python scripts/bump_version.py --check
+
+      - name: 改动文档的本地链接检查
+        if: steps.scope.outputs.docs_only == 'true'
+        run: python scripts/ci_scope.py --check-docs
+
       - name: 安装 uv
+        if: steps.scope.outputs.python == 'true'
         run: pip install uv
 
-      # 依赖一律按锁文件装:CI 不做依赖升级(--locked 过期就直接失败)
-      - name: 安装 Python 依赖(锁文件)
+      # 依赖一律按锁文件装：CI 不做依赖升级（--locked 过期就直接失败）
+      - name: 安装 Python 依赖（锁文件）
+        if: steps.scope.outputs.python == 'true'
         run: uv sync --locked
 
-      # pandoc 必须与开发环境同版本:apt 里那份 3.1.x 生成的脚注回链与封面 meta
-      # 与 3.6+ 不同,会让正常产物被判失败(实测 doc-backlink / meta name=cover)
+      # pandoc 必须与开发环境同版本：apt 里那份 3.1.x 生成的脚注回链与封面 meta
+      # 与 3.6+ 不同，会让正常产物被判失败（实测 doc-backlink / meta name=cover）
       - name: 安装 pandoc 3.14 与中文字体
+        if: steps.scope.outputs.python == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends fonts-noto-cjk
-          curl -fsSL -o /tmp/pandoc.deb \
-            https://github.com/jgm/pandoc/releases/download/3.14/pandoc-3.14-1-amd64.deb
-          sudo dpkg -i /tmp/pandoc.deb
-          pandoc --version | head -1
+          python scripts/ci_install_pandoc.py
 
-      # 只检查 pyproject 的 [tool.ruff] include 里那批路径(新增 + 核心模块):
-      # 存量代码按模块逐步并入,不在一次提交里格式化整个历史仓库
+      # conftest 在缺 pandoc 时是 skip 而不是 fail；静默装错会造成「假绿」
+      - name: 确认 pandoc 可用
+        if: steps.scope.outputs.python == 'true'
+        run: pandoc --version | grep -q "$PANDOC_VERSION"
+
+      # 只检查 pyproject 的 [tool.ruff] include 里那批路径（新增 + 核心模块）：
+      # 存量代码按模块逐步并入，不在一次提交里格式化整个历史仓库。
+      # ruff 版本由 uv.lock 固定，不再用浮动的 uvx（上游发新版会让无关 PR 变红）
       - name: Ruff
-        run: uvx ruff check
+        if: steps.scope.outputs.python == 'true'
+        run: uv run ruff check
 
       - name: pytest
-        run: uv run pytest -q
+        if: steps.scope.outputs.python == 'true'
+        run: uv run pytest -q -ra --strict-markers
 
       - uses: actions/setup-node@v4
+        if: steps.scope.outputs.frontend == 'true'
         with:
           node-version: "20"
           cache: npm
           cache-dependency-path: desktop/package-lock.json
 
-      - name: 前端依赖(锁文件)
+      - name: 前端依赖 + 检查（tsc + eslint + vitest）
+        if: steps.scope.outputs.frontend == 'true'
         working-directory: desktop
-        run: npm ci
-
-      - name: 前端检查(tsc + eslint + vitest)
-        working-directory: desktop
-        run: npm run check
+        run: |
+          npm ci
+          npm run check
 
       - name: 安装 Tauri 构建依赖
+        if: steps.scope.outputs.rust == 'true'
         run: |
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
             librsvg2-dev patchelf libssl-dev
 
       - uses: dtolnay/rust-toolchain@stable
+        if: steps.scope.outputs.rust == 'true'
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.scope.outputs.rust == 'true'
+        with:
+          workspaces: desktop/src-tauri
 
       - name: Rust 测试
+        if: steps.scope.outputs.rust == 'true'
         working-directory: desktop/src-tauri
         run: cargo test --locked
 
   desktop:
     name: 桌面端与发布形态(Windows)
     runs-on: windows-latest
+    env:
+      EVENT_NAME: ${{ github.event_name }}
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      BEFORE_SHA: ${{ github.event.before }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      HEAD_REF: ${{ github.event.pull_request.head.ref }}
+      PR_TITLE: ${{ github.event.pull_request.title || '' }}
+      PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+      FORK: ${{ github.event.pull_request.head.repo.fork }}
+      # 用 github.event.inputs 而非 inputs：后者只在 dispatch/reusable workflow
+      # 里保证存在，push/PR 事件下引用未定义上下文会有解析风险
+      FORCE_SCOPE: ${{ github.event.inputs.scope || 'auto' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
+      # 常驻：纯文档 PR 也要跑分类与门禁，并上报 success
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
+      - name: 变更范围判定 + PR 门禁
+        id: scope
+        shell: bash
+        run: python scripts/ci_scope.py
+
+      - name: 跳过说明（轻量场景仍上报 success）
+        if: steps.scope.outputs.release != 'true'
+        run: echo "本场景不涉及发布形态，跳过 Windows 打包链路"
+
       - name: 安装 uv
+        if: steps.scope.outputs.release == 'true'
         run: pip install uv
 
-      - name: 安装 Python 依赖(锁文件)
+      - name: 安装 Python 依赖（锁文件）
+        if: steps.scope.outputs.release == 'true'
         run: uv sync --locked
 
-      # runner 自带的 pandoc 版本不可控,发布形态 smoke test 需要引擎找得到它;
-      # 与 Linux 侧固定同一版本,避免"CI 绿、本机红"的假象
+      # runner 自带的 pandoc 版本不可控，发布形态 smoke test 需要引擎找得到它；
+      # 与 Linux 侧固定同一版本，避免「CI 绿、本机红」的假象
       - name: 安装 pandoc 3.14
-        shell: pwsh
-        run: |
-          $zip = "$env:RUNNER_TEMP\pandoc.zip"
-          Invoke-WebRequest -Uri "https://github.com/jgm/pandoc/releases/download/3.14/pandoc-3.14-windows-x86_64.zip" -OutFile $zip
-          Expand-Archive $zip -DestinationPath "$env:RUNNER_TEMP\pandoc" -Force
-          $bin = Get-ChildItem "$env:RUNNER_TEMP\pandoc" -Recurse -Filter pandoc.exe | Select-Object -First 1
-          $bin.Directory.FullName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          & $bin.FullName --version | Select-Object -First 1
-
-      # 7 处版本号同源(pyproject / uv.lock / tauri.conf / Cargo.toml / types.ts / README×2)
-      - name: 版本号一致性
-        run: uv run python scripts/bump_version.py --check
+        if: steps.scope.outputs.release == 'true'
+        run: python scripts/ci_install_pandoc.py
 
       - uses: actions/setup-node@v4
+        if: steps.scope.outputs.release == 'true'
         with:
           node-version: "20"
           cache: npm
           cache-dependency-path: desktop/package-lock.json
 
-      - name: 前端依赖(锁文件)
+      # 只为拿到 Tauri CLI：前端检查平台无关，已在 Ubuntu 侧跑过一次，不重复
+      - name: 前端依赖（锁文件，不重复跑 check）
+        if: steps.scope.outputs.release == 'true'
         working-directory: desktop
         run: npm ci
 
-      - name: 前端检查(tsc + eslint + vitest)
-        working-directory: desktop
-        run: npm run check
-
       - uses: dtolnay/rust-toolchain@stable
+        if: steps.scope.outputs.release == 'true'
 
-      - name: Rust 测试
-        working-directory: desktop/src-tauri
-        run: cargo test --locked
+      - uses: Swatinem/rust-cache@v2
+        if: steps.scope.outputs.release == 'true'
+        with:
+          workspaces: desktop/src-tauri
 
-      # 不产安装包:只验证壳能编译(体积小、不需要签名)
-      # 用 npx 直调 tauri CLI:`npm run tauri build -- --no-bundle` 会被 npm 当成
-      # 自身配置项解析(EUNKNOWNCONFIG),构建根本不会开始
+      # 不产安装包：只验证壳能编译（体积小、不需要签名）
+      # 用 npx 直调 tauri CLI：`npm run tauri build -- --no-bundle` 会被 npm 当成
+      # 自身配置项解析（EUNKNOWNCONFIG），构建根本不会开始
       - name: 桌面壳构建
+        if: steps.scope.outputs.release == 'true'
         working-directory: desktop
         run: npx tauri build --no-bundle
 
-      - name: 打包引擎(PyInstaller onedir)
+      - name: 打包引擎（PyInstaller onedir）
+        if: steps.scope.outputs.release == 'true'
         run: uv run --with pyinstaller pyinstaller cli.spec --noconfirm --distpath dist_ci --workpath build_ci
 
       - name: 最小发布形态 smoke test
+        if: steps.scope.outputs.release == 'true'
         shell: pwsh
         run: |
-          # 造一份两页文字 PDF(每页字数过检测阈值,走本地链路、不碰云端)
+          # 造一份两页文字 PDF（每页字数过检测阈值，走本地链路、不碰云端）
           uv run python -c @"
           import pymupdf
           doc = pymupdf.open()

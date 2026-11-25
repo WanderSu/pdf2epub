@@ -78,6 +78,17 @@ export function fmtDate(d: Date | number): string {
   return `${t.getFullYear()}-${p(t.getMonth() + 1)}-${p(t.getDate())}`;
 }
 
+/**
+ * 书目日期列:优先「本机转换时间」,其次「首次入库时间」;两者都没有就留空。
+ *
+ * 不能用文件 mtime —— 它只反映最后一次被写,打开阅读或被外部工具重写一次
+ * 就变成今天,转换日期会跟着漂。参数单位是**秒**(Rust 侧 SystemTime)。
+ */
+export function libDate(converted_at?: number | null, added_at?: number | null): string {
+  const epoch = converted_at || added_at || 0;
+  return epoch > 0 ? fmtDate(epoch * 1000) : "";
+}
+
 /** 本地 MM-DD(最近文件列表用) */
 export function fmtMonthDay(d: Date | number): string {
   const t = new Date(d);

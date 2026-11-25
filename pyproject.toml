@@ -1,6 +1,6 @@
 [project]
 name = "pdf2epub"
-version = "0.6.0"
+version = "0.6.1"
 description = "PDF → EPUB 电子书转换工具(统一输出高质量 EPUB)"
 requires-python = ">=3.12"
 dependencies = [
@@ -26,6 +26,9 @@ packages = ["src/pdf2epub"]
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    # 钉死版本：CI 用 uv run ruff check，不再用浮动的 uvx ruff check
+    #（上游发新版规则会让与改动无关的 PR 突然变红）
+    "ruff==0.17.6",
 ]
 
 [tool.pytest.ini_options]
@@ -56,6 +59,8 @@ include = [
     "tests/test_taskrun.py",
     "tests/test_error_categories.py",
     "tests/test_console_encoding.py",
+    "scripts/ci_scope.py",
+    "scripts/ci_install_pandoc.py",
 ]
 
 [tool.ruff.lint]

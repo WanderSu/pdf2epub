@@ -87,8 +87,13 @@ export interface LibEntry {
   title: string;
   author: string;
   size: number;
+  /** 文件最后一次被写的时间(秒)。**不用于展示**:阅读器/编辑器碰一下就会变。 */
   mtime: number;
+  /** 首次入库时间(秒):手动放进 output/ 的书靠它定日期。 */
   added_at: number;
+  /** 本机转换写出这份 EPUB 的时间(秒)。书目日期列以它为准,没有则退回
+   *  added_at。旧记录没有这个键。 */
+  converted_at?: number | null;
   /** 转换时回写的元数据(旧记录可能是 null → 界面显示未知) */
   kind?: string | null;
   backend?: string | null;
@@ -238,7 +243,7 @@ export interface InitialSettings {
   baseline: Record<string, boolean>;
 }
 
-export const APP_VERSION = "v0.6.0";
+export const APP_VERSION = "v0.6.1";
 export const MAX_RECENT = 8;
 
 /**

@@ -386,7 +386,8 @@ async fn convert_file(
         });
     }
     if let Some(ep) = &epub {
-        upsert_library(ep, Some(&file_path)); // 转换产物自动入库(连源文件路径一起记)
+        // 只有「本次真的转了」才更新转换日期;跳过时产物是上一轮的,日期不动
+        upsert_library(ep, Some(&file_path), terminal == "completed"); // 转换产物自动入库(连源文件路径一起记)
     }
     Ok(ConvertResult {
         success: true,
@@ -820,6 +821,11 @@ struct LibraryEntry {
     /// 界面只剩「打开 EPUB」,用户想重转也点不到(旧库没有这个键 → default)。
     #[serde(default)]
     source: Option<String>,
+    /// 本机转换写出这份 EPUB 的时间(秒)。书目日期列只认它和 `added_at`,
+    /// **绝不读文件 mtime** —— 阅读器/编辑器/同步工具碰一下文件,mtime 就会
+    /// 变成今天,转换日期于是自己漂移(旧库没有这个键 → default)。
+    #[serde(default)]
+    converted_at: Option<u64>,
 }
 
 fn library_db_path() -> PathBuf {
@@ -899,6 +905,15 @@ fn same_path(a: &str, b: &str) -> bool {
     norm_path(a) == norm_path(b)
 }
 
+/// 书目上显示的日期(秒):优先「本机转换时间」,其次「首次入库时间」。
+///
+/// 为什么不看 `mtime`:那不是我们的时间戳,只反映文件最后一次被写。打开阅读、
+/// 外部编辑器保存、同步工具重写,都会把它推到今天 —— 用户看到的「转换日期」
+/// 就变成「最后一次碰这个文件的日期」。转换时间只由本进程写出产物时盖章。
+fn library_date(e: &LibraryEntry) -> u64 {
+    e.converted_at.unwrap_or(e.added_at)
+}
+
 /// 书库去重:同一个文件曾被记成 "…\\output/x.epub" 与 "…\\output\\x.epub" 两条记录,
 /// 书库就会显示两本一模一样的书。按规范化路径合并,并保留更完整的元数据。
 fn dedupe_library(entries: Vec<LibraryEntry>) -> Vec<LibraryEntry> {
@@ -918,6 +933,11 @@ fn dedupe_library(entries: Vec<LibraryEntry>) -> Vec<LibraryEntry> {
                 }
                 prev.mtime = prev.mtime.max(e.mtime);
                 prev.added_at = prev.added_at.min(e.added_at);
+                // 转换日期取较早的那次(重复记录里较晚的多半是同步补出来的)
+                prev.converted_at = match (prev.converted_at, e.converted_at) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                };
                 if !e.path.contains('/') {
                     prev.path = e.path.clone(); // 统一成原生分隔符写法
                 }
@@ -1120,7 +1140,11 @@ fn epub_cover(path: String) -> Option<EpubCover> {
 ///
 /// ``source``:本次转换的源文件路径。只在有值(且非空)时写入 —— 手动放进 output/
 /// 的 EPUB 没有源文件,不该把上一次的记录覆盖成空。
-fn upsert_library(epub_path: &str, source: Option<&str>) {
+///
+/// ``produced_now``:这份 EPUB 是**本进程刚写出来的**(转换完成 / AI 另存)。
+/// 只有这时才给 `converted_at` 盖章;引擎跳过、重新扫描到已有文件都不算 ——
+/// 否则每跑一次批处理,书目里所有书都会变成「今天」。
+fn upsert_library(epub_path: &str, source: Option<&str>, produced_now: bool) {
     let mut entries = load_library();
     let name = Path::new(epub_path)
         .file_name()
@@ -1147,17 +1171,22 @@ fn upsert_library(epub_path: &str, source: Option<&str>) {
         }
         existing.size = size;
         existing.mtime = mtime;
+        if produced_now {
+            existing.converted_at = Some(now_secs());
+        }
         if let Some(s) = source.filter(|s| !s.is_empty()) {
             existing.source = Some(s.to_string());
         }
     } else {
+        let now = now_secs();
         entries.push(LibraryEntry {
             path: epub_path.to_string(),
             title,
             author,
             size,
             mtime,
-            added_at: now_secs(),
+            added_at: now,
+            converted_at: if produced_now { Some(now) } else { None },
             // 类型/后端/页数由前端在转换完成后调用 library_set_meta 回写
             kind: None,
             backend: None,
@@ -1307,6 +1336,9 @@ fn library_sync(output_dir: String) -> Vec<LibraryEntry> {
                 size,
                 mtime,
                 added_at: now_secs(),
+                // 手动放进 output/ 的书没有「本机转换」这回事:日期 = 首次发现的
+                // 那天,之后无论是打开、外部工具重写都不再变。
+                converted_at: None,
                 kind: None,
                 backend: None,
                 pages: None,
@@ -1314,9 +1346,9 @@ fn library_sync(output_dir: String) -> Vec<LibraryEntry> {
             });
         }
     }
-    // 3. 合并历史遗留的「/」「\」重复记录,再按修改时间倒序
+    // 3. 合并历史遗留的「/」「\」重复记录,再按书目上显示的日期倒序
     let mut entries = dedupe_library(entries);
-    entries.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+    entries.sort_by(|a, b| library_date(b).cmp(&library_date(a)));
     save_library(&entries);
     entries
 }
@@ -1364,7 +1396,7 @@ fn library_delete(path: String) -> Result<Vec<LibraryEntry>, String> {
     let removed = take_library_entry(&mut entries, &path)
         .ok_or_else(|| format!("书库中没有该记录: {path}"))?;
     remove_epub_file(&removed.path, None)?;
-    entries.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+    entries.sort_by(|a, b| library_date(b).cmp(&library_date(a)));
     save_library(&entries);
     Ok(entries)
 }
@@ -1381,7 +1413,7 @@ fn delete_book_output(epub: String, output_dir: String) -> Result<Vec<LibraryEnt
     remove_epub_file(&epub, Some(&dir))?;
     let mut entries = load_library();
     take_library_entry(&mut entries, &epub);
-    entries.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+    entries.sort_by(|a, b| library_date(b).cmp(&library_date(a)));
     save_library(&entries);
     Ok(entries)
 }
@@ -2517,7 +2549,7 @@ fn ai_apply_preview(app: AppHandle, preview_id: String) -> Result<String, String
         .lock()
         .unwrap()
         .remove(&preview_id);
-    upsert_library(&output.to_string_lossy(), None);
+    upsert_library(&output.to_string_lossy(), None, true);
     Ok(output.to_string_lossy().into_owned())
 }
 
@@ -3038,6 +3070,7 @@ mod tests {
             size: 1,
             mtime: 2,
             added_at: 3,
+            converted_at: None,
             kind: None,
             backend: None,
             pages: None,
@@ -3096,6 +3129,7 @@ mod tests {
             size: 10,
             mtime: 5,
             added_at: 7,
+            converted_at: None,
             kind: None,
             backend: None,
             pages: None,
@@ -3120,6 +3154,66 @@ mod tests {
         let entries: Vec<LibraryEntry> = serde_json::from_str(old).expect("旧库必须可解析");
         assert_eq!(entries.len(), 1);
         assert!(entries[0].kind.is_none() && entries[0].backend.is_none() && entries[0].pages.is_none());
+    }
+
+    #[test]
+    fn book_date_ignores_file_mtime() {
+        // 日期列只认「转换时间 / 首次入库时间」。外部工具(阅读器、编辑器、
+        // 同步盘)把文件 mtime 推到今天时,书目里的日期必须停在转换那天 ——
+        // 否则用户每打开一次书,「转换日期」就变一次。
+        let mk = |converted: Option<u64>, mtime: u64| LibraryEntry {
+            path: "E:\\out\\a.epub".into(),
+            title: "T".into(),
+            author: "A".into(),
+            size: 1,
+            mtime,
+            added_at: 1_700_000_000,
+            converted_at: converted,
+            kind: None,
+            backend: None,
+            pages: None,
+            source: None,
+        };
+        let touched_today = 1_900_000_000;
+        assert_eq!(library_date(&mk(None, touched_today)), 1_700_000_000);
+        assert_eq!(
+            library_date(&mk(Some(1_763_000_000), touched_today)),
+            1_763_000_000
+        );
+    }
+
+    #[test]
+    fn old_library_json_without_converted_at_falls_back_to_added_at() {
+        // 老记录的 mtime 是「最后一次被写」,不能当转换日期用;缺这个键时
+        // 必须退回 added_at,而不是让整个书库反序列化失败。
+        let old = r#"[{"path":"E:\\out\\a.epub","title":"T","author":"A",
+                      "size":1,"mtime":1900000000,"added_at":1700000000}]"#;
+        let entries: Vec<LibraryEntry> = serde_json::from_str(old).expect("旧库必须可解析");
+        assert!(entries[0].converted_at.is_none());
+        assert_eq!(library_date(&entries[0]), 1_700_000_000);
+    }
+
+    #[test]
+    fn dedupe_keeps_the_earliest_conversion_date() {
+        let mk = |path: &str, converted: Option<u64>| LibraryEntry {
+            path: path.into(),
+            title: "T".into(),
+            author: "A".into(),
+            size: 1,
+            mtime: 9,
+            added_at: 5,
+            converted_at: converted,
+            kind: None,
+            backend: None,
+            pages: None,
+            source: None,
+        };
+        let out = dedupe_library(vec![
+            mk("E:\\out\\a.epub", Some(1_763_000_500)),
+            mk("E:/out/a.epub", Some(1_763_000_100)),
+        ]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].converted_at, Some(1_763_000_100));
     }
 
     #[test]
@@ -3312,6 +3406,7 @@ mod tests {
             size: 0,
             mtime: 0,
             added_at: 0,
+            converted_at: None,
             kind: None,
             backend: None,
             pages: None,
