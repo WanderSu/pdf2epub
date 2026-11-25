@@ -34,7 +34,7 @@ or log them.**
 
 ```bash
 uv run pytest -q                    # full offline suite
-uvx ruff check                      # static checks (paths listed in pyproject)
+uv run ruff check                   # static checks (paths listed in pyproject)
 cd desktop && npm run check         # tsc + eslint + vitest
 cd desktop/src-tauri && cargo test --locked
 ```
@@ -58,6 +58,27 @@ build or a double charge, not an exception.
 - Do not remove existing cache-compatibility logic, do not weaken EPUB validation, and
   do not change file names, working directories, or artifact-recovery semantics.
 - Never commit real tokens, PDF/EPUB samples, `work/`, `output/`, `logs/`, or user data.
+
+## CI scopes
+
+CI runs on every PR, but the expensive steps are selected by `scripts/ci_scope.py`
+from the changed paths (plus the PR title, labels and whether it comes from a fork):
+
+| Change | What runs |
+|---|---|
+| Docs / screenshots / LICENSE / templates | version-sync check, PR guard (no tokens, samples or build outputs), local link check — about a minute |
+| `src/pdf2epub/**`, `tests/**`, `config/**`, `scripts/**` | + ruff, pytest, pandoc 3.14 |
+| `desktop/src/**`, frontend configs | + tsc, eslint, vitest |
+| `desktop/src-tauri/**`, `cli.spec`, tauri.conf, release scripts | + cargo test, Windows shell build, PyInstaller, smoke test |
+| Lockfiles, security-sensitive paths, CI itself, fork PRs, pushes to `main` | full pipeline |
+
+The two jobs `引擎与前端(Ubuntu)` and `桌面端与发布形态(Windows)` are required
+status checks and **always report success**, even when their heavy steps are
+skipped. Never add `paths-ignore` to the workflow: a run that never starts leaves
+those checks pending and blocks the PR (an earlier attempt was reverted for exactly
+this reason). Override the classification with a `ci:full` / `ci:docs` label, or
+run CI manually via `workflow_dispatch.scope`. `ruff` is pinned in `uv.lock` —
+use `uv run ruff check`, not `uvx ruff check`.
 
 ## Branching and releases
 
