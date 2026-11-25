@@ -1,25 +1,57 @@
 version: 2
 updates:
-  # 依赖 PR 会改锁文件，ci_scope.py 的 FULL 规则会强制走全量检查
+  # 依赖 PR 会改锁文件，ci_scope.py 的 FULL 规则会强制走全量检查。
+  # 首次扫描曾一次性倒出 16 个 PR：多数是大版本跳跃、彼此改同一个锁文件
+  # 互相冲突，还各跑一遍 12 分钟全量 CI。这里把每个生态合成一个 PR、
+  # 挡掉 semver-major，并把上限降到 2，让每周最多一两个可人工确认的小版本 PR。
   - package-ecosystem: "uv"
     directory: "/"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
+    groups:
+      all:
+        patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "npm"
     directory: "/desktop"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
+    groups:
+      all:
+        patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+      # Tauri 的 npm 包与 Rust crate 必须同 major/minor；dependabot 按生态
+      # 分开提 PR 必然触发 "Found version mismatched Tauri packages"。
+      # 这一组改人工成对升级，不交给自动更新。
+      - dependency-name: "@tauri-apps/*"
 
   - package-ecosystem: "cargo"
     directory: "/desktop/src-tauri"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
+    groups:
+      all:
+        patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "tauri*"
 
+  # GitHub Actions 的版本号只有 major 变化，忽略 semver-major 等于完全禁用，
+  # 所以这里不挡大版本，只合成一个 PR、每月最多一个，由人工确认后再合。
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "monthly"
+    open-pull-requests-limit: 2
+    groups:
+      all:
+        patterns: ["*"]
