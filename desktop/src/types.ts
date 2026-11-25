@@ -243,7 +243,7 @@ export interface InitialSettings {
   baseline: Record<string, boolean>;
 }
 
-export const APP_VERSION = "v0.6.0";
+export const APP_VERSION = "v0.6.1";
 export const MAX_RECENT = 8;
 
 /**
