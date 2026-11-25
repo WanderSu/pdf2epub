@@ -111,7 +111,7 @@ jobs:
         if: steps.scope.outputs.python == 'true'
         run: uv run pytest -q -ra --strict-markers
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: steps.scope.outputs.frontend == 'true'
         with:
           node-version: "20"
@@ -193,7 +193,7 @@ jobs:
         if: steps.scope.outputs.release == 'true'
         run: python scripts/ci_install_pandoc.py
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: steps.scope.outputs.release == 'true'
         with:
           node-version: "20"
