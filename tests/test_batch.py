@@ -87,6 +87,30 @@ def test_pdf_to_epub_end_to_end(tmp_path: Path) -> None:
     assert verify_epub(epub).ok
 
 
+def test_conversion_writes_a_quality_report(tmp_path: Path) -> None:
+    """每次转换在 work/<书名>/report.json 落一份质量报告(桌面端书库「报告」读它)。
+
+    报告是给人和界面看的**事实清单**:页数、后端、校验结果、清理统计、页覆盖。
+    它不能影响产物 —— 写不进去只告警(见 `_write_report`)。
+    """
+    pdf = make_pdf(tmp_path / "src" / "报告书.pdf", pages=2)
+    results = process_batch(
+        [pdf], config=dict(CFG),
+        work_root=tmp_path / "work", output_dir=tmp_path / "out", force=True,
+    )
+    assert results[0].status == "done"
+    path = tmp_path / "work" / "报告书" / "report.json"
+    assert path.is_file()
+    report = json.loads(path.read_text(encoding="utf-8"))
+    assert report["schema"] == 1
+    assert report["epub"] == "报告书.epub"
+    assert report["backend"] == "pymupdf"
+    assert report["pages"] == 2
+    assert report["verify"]["errors"] == 0
+    assert report["coverage"]["pages_covered"] == 2
+    assert report["clean"]["applied"] >= 0
+
+
 def test_second_run_is_skipped(tmp_path: Path) -> None:
     pdf = make_pdf(tmp_path / "src" / "跳过测试.pdf", pages=1)
     kwargs = dict(config=dict(CFG), work_root=tmp_path / "work", output_dir=tmp_path / "out")
@@ -803,6 +827,23 @@ def test_winerror2_from_pandoc_is_classified_as_missing_pandoc(
     md.write_text("# 书\n\n正文。\n", encoding="utf-8")
     with pytest.raises(PandocMissingError, match="pandoc"):
         pandoc.build_epub(md, tmp_path / "work", tmp_path / "out", title="书")
+
+
+def test_pandoc_candidate_includes_app_data_dir(tmp_path: Path,
+                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    """桌面端首启下载的 pandoc 在 `%LOCALAPPDATA%\\pdf2epub\\pandoc\\`。
+
+    装到 Program Files 后安装目录只读,内置 pandoc 只能落在数据根;引擎不认这个
+    位置的话,界面显示「pandoc 已就绪」而每次构建都报缺 pandoc。
+    """
+    appdata = tmp_path / "LocalAppData"
+    target = appdata / "pdf2epub" / "pandoc" / pandoc.PANDOC_EXE
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"")
+    monkeypatch.setenv("LOCALAPPDATA", str(appdata))
+    monkeypatch.delenv("PDF2EPUB_PANDOC", raising=False)
+    assert str(target) in pandoc._pandoc_candidates()
+    assert pandoc._resolve_pandoc() == str(target)
 
 
 def test_iter_sources_skips_artifact_and_env_dirs(tmp_path: Path) -> None:

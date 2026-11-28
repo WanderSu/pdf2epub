@@ -49,6 +49,12 @@ MIME = {
 }
 
 IMG_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp")
+#: XHTML 里 <img> 的 width/height 值(用于抓出百分比/带单位等非法写法)
+IMG_SIZE_ATTR_RE = re.compile(
+    r'<img\b[^>]*?\b(?:width|height)="'
+    r'(\d+(?:\.\d+)?(?:%|px|em|rem|pt|cm|mm|in)?|[A-Za-z]+)"',
+    re.IGNORECASE,
+)
 
 #: 空章节判定阈值(去掉标签后的正文字符数)
 EMPTY_CHAPTER_CHARS = 10
@@ -501,6 +507,14 @@ def verify_epub(
                 referenced_images.add(src.split("/")[-1])
                 if not in_zip(src, hf_dir):
                     broken_refs.append(f"{hf} → {src}")
+            # XHTML 的 width/height 只接受整数:``<img width="52%">`` 在 EPUB 3 里
+            # 非法(EPUBCheck RSC-005)。提取阶段已把百分比挪进 style(见
+            # backends.base.fix_img_size_attrs),这里兜住漏网的 —— 只告警,不致命。
+            for bad in IMG_SIZE_ATTR_RE.findall(content):
+                if not bad.isdigit():
+                    result.warn("img_size_attribute",
+                                f"{hf}: <img> 的 width/height 只能是整数,实际 {bad!r}")
+                    break
             # 图片也可能来自 <image xlink:href>(SVG 内嵌 / pandoc 的 svg 包装)
             svg_images = re.findall(r'<image\b[^>]*href="([^"]+)"', content)
             for src in svg_images:

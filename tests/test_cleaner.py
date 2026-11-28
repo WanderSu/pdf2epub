@@ -746,3 +746,83 @@ def test_longer_closing_fence_ends_the_block() -> None:
     md = "```python\nprint(1)\n````\n\n正文 中文 空格 要修正。\n"
     out = only(md, cjk_spaces=True)
     assert "正文中文空格要修正。" in out
+
+# ---------------------------------------------------------------- 印刷目录(与导航重复)
+# 实测《中国共产党历史讲义》的印刷目录独占 3766 字一章;《夜行货车》的条目则带着
+# 「001 六月里的玫瑰花」这样的头部页码。导航目录由 pandoc 生成,印刷目录是重复。
+
+
+def test_printed_toc_entries_are_removed() -> None:
+    md = """\
+# 夜行货车
+
+目录
+
+001 六月里的玫瑰花  
+
+027 贺大哥  
+
+073 夜行货车  
+
+# 六月里的玫瑰花
+
+正文段落,内容足够长,不会被当成版式字段。
+
+# 贺大哥
+
+第二篇正文。
+"""
+    out = clean(md)
+    assert "001 六月里的玫瑰花" not in out
+    assert "027 贺大哥" not in out
+    assert "目录" not in out
+    assert "# 六月里的玫瑰花" in out and "# 贺大哥" in out
+
+
+def test_printed_toc_with_tail_page_numbers_is_removed() -> None:
+    md = """\
+# 目录
+
+第一章 中国共产党的创立……（1）
+
+第一节 旧民主主义革命的失败……（3）
+
+# 第一章 中国共产党的创立
+
+正文第一段,内容足够长,不会被当成版式字段。
+"""
+    out = clean(md)
+    assert "旧民主主义革命的失败……（3）" not in out
+    assert "# 第一章 中国共产党的创立" in out
+
+
+def test_toc_label_without_entries_is_kept() -> None:
+    md = """\
+目录
+
+# 第一章 起头
+
+正文段落,内容足够长,不会被当成版式字段。
+"""
+    assert "目录" in clean(md)          # 只有标签没有条目:不当目录删
+
+
+def test_numbered_section_list_is_not_a_printed_toc() -> None:
+    """小节的「1 麦园」不是目录条目 —— 三位以上数字才算印刷页码。"""
+    md = """\
+# 第一章 起头
+
+1 麦园
+
+2 河湾
+
+3 山道
+
+4 石桥
+
+5 树林
+
+正文段落,内容足够长,不会被当成版式字段。
+"""
+    out = clean(md)
+    assert "1 麦园" in out and "5 树林" in out

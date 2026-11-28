@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
 import re
@@ -50,14 +51,16 @@ from pdf2epub.artifacts import (
     stat_signature,
 )
 from pdf2epub.artifacts import drop_previous_backup as _drop_previous_backup
-from pdf2epub.backends.base import (VARIANT_ORIGINAL, BackendError, collect_evidence,                           file_fingerprint, is_retryable)
+from pdf2epub.backends.base import (VARIANT_ORIGINAL, BackendError, collect_evidence,                           file_fingerprint, fix_img_size_attrs, is_retryable)
 from pdf2epub.clean import CleanEngineError, CleanOutcome, clean_book_md
 from pdf2epub.clean.options import CleanOptions, resolve_options
-from pdf2epub.convert import convert_auto, load_config
+from pdf2epub.convert import convert_auto, load_config, planned_shards
 from pdf2epub.cover import COVER_QUALITY, COVER_WIDTH, CoverInfo, detect_cover
 from pdf2epub.cover import render_cover as render_cover_page
 from pdf2epub.epub.content import verify_content
 from pdf2epub.epub.pandoc import (MISSING_PANDOC_HINT, PandocError, PandocMissingError,                        build_epub, pandoc_available)
+from pdf2epub.epub.epubcheck import MAX_MESSAGES as EPUBCHECK_MAX_MESSAGES
+from pdf2epub.epub.epubcheck import resolve_mode, run_epubcheck
 from pdf2epub.epub.verify import (VerifyResult, archive_issue, fatal_issue, verify_epub)
 from pdf2epub.ir import Producer
 from pdf2epub.lang_detect import resolve_language
@@ -125,6 +128,101 @@ def epub_language(book_md: Path, override: str | None) -> str:
     except OSError:
         text = ""
     return resolve_language(text, override=override)
+
+
+def source_page_count(source: Path) -> int:
+    """PDF 页数(只打开文档读页数,不解析内容)。
+
+    只用于**展示与进度分母**:读不出来就返回 0,由消费方显示为未知 —— 页数报错
+    比没页数更糟(进度条会按错的分母算)。真正需要页数的阶段(后端分片/校验)
+    各自从文档读,不依赖这里。
+    """
+    try:
+        import pymupdf
+
+        with pymupdf.open(source) as doc:
+            return int(doc.page_count)
+    except Exception:  # noqa: BLE001 - 页数只是展示用,读不到不是失败理由
+        return 0
+
+
+def _write_report(work: Path, *, source: Path, epub: Path, meta, backend: str,
+                  pdf_type: str, pages: int, elapsed: float, cached: bool,
+                  verify, cleaned) -> Path:
+    """写 `work/report.json`:一次转换的「质量报告」(页数 / 校验 / 清理 / 覆盖)。
+
+    为什么落盘而不是只打日志:用户反馈问题时要能一眼看到「这次到底跑了什么、丢了什么」,
+    桌面端也能直接读它做展示(书库里的「报告」)。**不影响产物**:只写在 work/ 下,
+    失败也不让整次转换失败(报告是附属品)。
+    """
+    issues = [{"level": i.level, "code": i.code, "message": i.message}
+              for i in getattr(verify, "issues", ())]
+    stats = getattr(verify, "stats", {}) or {}
+    clean_report = getattr(cleaned, "report", None)
+    coverage_pages = getattr(getattr(clean_report, "verification", None), "pages", {}) or {}
+    report = {
+        "schema": 1,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "file": source.name,
+        "epub": epub.name,
+        "title": getattr(meta, "title", None),
+        "author": getattr(meta, "author", None),
+        "backend": backend,
+        "pdf_type": pdf_type,
+        "pages": int(pages or 0),
+        "seconds": round(elapsed, 2),
+        "cached": bool(cached),
+        "verify": {
+            "summary": getattr(verify, "summary", lambda: "")(),
+            "errors": len(getattr(verify, "errors", ())),
+            "warnings": len(getattr(verify, "warnings", ())),
+            "issues": issues,
+        },
+        "clean": {
+            "applied": len(getattr(clean_report, "applied", ())),
+            "suggested": len(getattr(clean_report, "by_status", lambda _s: ())("suggested")),
+            "failed": len(getattr(clean_report, "failed", ())),
+            "issues": list(getattr(cleaned, "issues", ()) or ()),
+        },
+        "coverage": {
+            # 「页覆盖」用**正文页码注释**的覆盖(用户能核对:book.md 里有几页的注释),
+            # 不是 IR 页账的「已归属页数」——后者在逐页 OCR 的书里会因为对齐链接少
+            # 而只有十几页(实测 18/402),当成「页覆盖」展示会误导。
+            "pages_covered": int(stats.get("content_covered_pages")
+                                 or coverage_pages.get("covered") or 0),
+            "pages_expected": coverage_pages.get("expected"),
+            "ir_pages_covered": coverage_pages.get("covered"),
+            "md_page_marks": int(stats.get("content_covered_pages") or 0),
+            # 页级质量检查(见 epub/content.py::page_quality):空白页/纯图片页/短页
+            "pages_blank": int(stats.get("content_pages_blank") or 0),
+            "pages_image_only": int(stats.get("content_pages_image_only") or 0),
+            "pages_short": int(stats.get("content_pages_short") or 0),
+            "blank_pages": stats.get("content_pages_blank_list") or "",
+        },
+        "stats": {k: v for k, v in stats.items() if str(k).startswith("content_")},
+    }
+    path = work / "report.json"
+    try:
+        path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as exc:              # 报告是附属品:写不进去不该判失败
+        logger.warning("转换报告写入失败(%s): %s", path, exc)
+    return path
+
+
+def _announce_cache_reuse(conv, pages: int) -> None:
+    """本次直接复用了已落盘(已计费)的云端结果 → 发一条 `reuse` 事件。
+
+    复用本身是对的(云端那一次已经计费,重跑不该再买一次),但**不能静默**:
+    一本 400 页的书「两秒就完成」与「被跳过、直接拿旧产物」在界面上长得一模一样,
+    用户没有理由相信这次真的读过 PDF —— 于是会去删 work/ 强跑,白白再付一次钱。
+    """
+    stats = getattr(conv, "stats", None) or {}
+    if not stats.get("cached"):
+        return
+    events.emit("reuse", backend=conv.backend, pages=int(pages or 0),
+                parts=stats.get("parts"), reused_parts=stats.get("reused_parts"))
+    logger.info("[extract] 复用已落盘的解析结果(%s,未重新 OCR、未计费)",
+                conv.backend)
 
 logger = logging.getLogger("pdf2epub.batch")
 
@@ -247,9 +345,33 @@ def _fail(result: TaskResult, source: Path, error: Exception, *, code: str,
     return result
 
 
+def _normalize_book_md(book_md: Path) -> None:
+    """写盘后再统一修一次原始 HTML 图片的尺寸属性(见 fix_img_size_attrs)。
+
+    放在这里而不是只放各后端里:复用段缓存/续跑时 Markdown 是**直接读回来**的,
+    不会再过后端的归一化;而 ``<img width="52%">`` 这类写法会让 EPUBCheck 对整本
+    书报 RSC-005。只改工作副本,不动已落盘的段缓存(下次转换仍按同一规则修)。
+    """
+    try:
+        text = book_md.read_text(encoding="utf-8")
+    except OSError:
+        return
+    fixed = fix_img_size_attrs(text)
+    if fixed != text:
+        book_md.write_text(fixed, encoding="utf-8")
+
+
+def _epubcheck_mode(config: dict | None) -> str | None:
+    """config.yaml 的 `verify.epubcheck`(off/auto/on);没写就交给默认(auto)。"""
+    section = (config or {}).get("verify") or {}
+    value = section.get("epubcheck") if isinstance(section, dict) else None
+    return str(value) if value is not None else None
+
+
 def verify_output(epub: Path, *, strict: bool = False,
                   book_md: Path | None = None,
-                  expected_pages: int | None = None) -> VerifyResult:
+                  expected_pages: int | None = None,
+                  epubcheck: str | None = None) -> VerifyResult:
     """EPUB 结构与内容完整性校验(见 docs/design.md §7),接入转换流程。
 
     - 结构:容器 / manifest / 链接 / 图片 / 公式 / CSS(verify_epub)
@@ -282,6 +404,28 @@ def verify_output(epub: Path, *, strict: bool = False,
     except Exception as e:                   # noqa: BLE001 - 校验器内部错误也要收尾
         events.stage("verify", "done", failed=True)
         raise VerifyStageError(f"EPUB 校验过程出错: {e}") from e
+
+    # EPUBCheck(可选):装了 java + jar 才跑。auto 只把问题记成警告(不改变成败),
+    # on 才把规范错误判失败 —— 它依赖外部 Java,不能变成硬依赖;但「自校验通过、
+    # 规范检查红」的书必须能在报告里看到(实测目录曾用 <ul>,EPUBCheck 报 RSC-005)。
+    mode = resolve_mode(epubcheck)
+    if mode != "off":
+        outcome = run_epubcheck(epub)
+        if outcome.skipped:
+            logger.info("[verify] EPUBCheck 跳过(%s)", outcome.skipped)
+        else:
+            for message in outcome.errors[:EPUBCHECK_MAX_MESSAGES]:
+                text = f"EPUBCheck: {message.render()}"
+                if mode == "on":
+                    result.fail("epubcheck_error", text)
+                else:
+                    result.warn("epubcheck_error", text)
+            for message in outcome.warnings[:EPUBCHECK_MAX_MESSAGES]:
+                result.warn("epubcheck_warning", f"EPUBCheck: {message.render()}")
+            logger.info("[verify] EPUBCheck %s:%d 错误 / %d 警告",
+                        "通过" if outcome.ok else "未通过",
+                        len(outcome.errors), len(outcome.warnings))
+
     for issue in result.issues:
         log = logger.warning if issue.level == "warning" else logger.error
         log("[verify] %s", issue.message)
@@ -366,7 +510,7 @@ def process_one(
                 result.backend, result.pdf_type = "markdown", "markdown"
                 return _process_markdown(source, work_root, output_dir, t0, result,
                                        safe_stem, out_epub.stem, clean_options, strict,
-                                       lang_override)
+                                       lang_override, config=config)
             return _process_pdf(source, config, work_root, output_dir,
                                 backend_override, t0, result, safe_stem, out_epub.stem,
                                 clean_options, strict, lang_override)
@@ -441,19 +585,39 @@ def _process_pdf(source, config, work_root, output_dir, backend_override, t0, re
                  lang_override=None) -> TaskResult:
     work = work_root / safe_stem
     detection = None                      # 手动指定后端时没有检测结果
+    pages = 0                             # 本次的页数(进度分母 / 事件里的页数)
     if backend_override and backend_override != "auto":
+        # 手动指定后端时不看「文字层检测」的结论(用户已经替检测做了决定),但**页数
+        # 必须报**:桌面端拿它当进度分母、在队列行显示「页数」。此前这条分支一条
+        # plan 都不发,于是「整本 417 页正在 OCR」在界面上就是「没有进度、页数 —」,
+        # 看起来像被直接跳过了(见 docs/design.md §9 事件流)。
+        pages = source_page_count(source)
+        ocr_pages = 0 if backend_override == "pymupdf" else pages
+        events.emit(
+            "plan", backend=backend_override, pages=pages, ocr_pages=ocr_pages,
+            ocr_runs=1 if ocr_pages else 0,
+            # 与预检(--dry-run)同一口径:分片数按该后端的单任务页数上限算
+            shards=(planned_shards(pages, backend_override,
+                                   config.get(backend_override, {}))
+                    if ocr_pages else 0),
+        )
         events.stage("detect", "done", skipped=True)
         events.stage("extract", "start", backend=backend_override)
         backend = get_backend(backend_override, config.get(backend_override, {}))
         conv = backend.convert(source, work)
         result.backend = conv.backend
         result.pdf_type = "manual"
+        _normalize_book_md(conv.book_md)
+        _announce_cache_reuse(conv, pages)
         events.stage("extract", "done", backend=conv.backend)
     else:
         # detect / extract 阶段事件由 convert_auto 负责(检测与提取都在里面)
         conv, detection = convert_auto(source, work, config=config)
         result.backend = conv.backend
         result.pdf_type = detection.pdf_type.value
+        pages = detection.total_pages
+        _normalize_book_md(conv.book_md)
+        _announce_cache_reuse(conv, pages)
         if getattr(detection, "suspicious_pages", 0) > 0:
             logger.warning(
                 "⚠️ %s: %d/%d 页疑似文字层损坏(乱码),本地提取可能不可读;"
@@ -469,8 +633,7 @@ def _process_pdf(source, config, work_root, output_dir, backend_override, t0, re
 
     # Markdown 清理(IR 引擎;按 clean_options 开关,失败即判该文件失败)
     cleaned = clean_stage(conv.book_md, backend=conv.backend, work=work, source=source,
-                          total_pages=(getattr(detection, "total_pages", None)
-                                       or int(conv.stats.get("pages") or 0)),
+                          total_pages=(pages or int(conv.stats.get("pages") or 0)),
                           options=clean_options, images_dir=conv.images_dir,
                           title_hint=stem_title)
 
@@ -506,12 +669,19 @@ def _process_pdf(source, config, work_root, output_dir, backend_override, t0, re
     events.stage("verify", "start")
     verify = verify_output(
         epub, strict=strict, book_md=conv.book_md,
-        expected_pages=getattr(detection, "total_pages", None) or conv.stats.get("pages"),
+        expected_pages=pages or conv.stats.get("pages"),
+        epubcheck=_epubcheck_mode(config),
     )
     result.verify = verify.summary()
     result.elapsed = time.time() - t0
+    _write_report(work, source=source, epub=epub, meta=meta, backend=result.backend,
+                  pdf_type=result.pdf_type, pages=pages, elapsed=result.elapsed,
+                  cached=bool(conv.stats.get("cached")), verify=verify, cleaned=cleaned)
     events.emit("complete", file=source.name, epub=epub.name, backend=result.backend,
                 pdf_type=result.pdf_type, verify=result.verify,
+                # cached:本次**没有重新 OCR**(直接复用了已落盘的云端结果)。
+                # 与 `reuse` 事件同一条事实:终态界面据此说明「为什么这么快」。
+                cached=bool(conv.stats.get("cached")),
                 seconds=round(result.elapsed, 2))
     logger.info("完成(%s/%s): %s → %s", result.pdf_type, result.backend, source.name, epub.name)
     return result
@@ -556,12 +726,14 @@ def _normalize_newlines(text: str) -> str:
 
 
 def _process_markdown(source, work_root, output_dir, t0, result, safe_stem, out_name,
-                      clean_options=None, strict=False, lang_override=None) -> TaskResult:
+                      clean_options=None, strict=False, lang_override=None,
+                      config: dict | None = None) -> TaskResult:
     work = work_root / safe_stem
     work.mkdir(parents=True, exist_ok=True)
     # 已有 Markdown:复制到统一 work 目录(连同 images/)
     book_md = work / "book.md"
-    book_md.write_text(_read_markdown_source(source), encoding="utf-8")
+    # Markdown 输入也可能夹着带单位/百分比的 <img width>,这里一并修掉(见 fix_img_size_attrs)
+    book_md.write_text(fix_img_size_attrs(_read_markdown_source(source)), encoding="utf-8")
     src_images = source.parent / "images"
     if src_images.is_dir():
         import shutil
@@ -597,11 +769,15 @@ def _process_markdown(source, work_root, output_dir, t0, result, safe_stem, out_
     events.stage("build", "done", cover=False)
     result.epub = epub
     events.stage("verify", "start")
-    verify = verify_output(epub, strict=strict, book_md=book_md)
+    verify = verify_output(epub, strict=strict, book_md=book_md,
+                            epubcheck=_epubcheck_mode(config))
     result.verify = verify.summary()
     result.elapsed = time.time() - t0
+    _write_report(work, source=source, epub=epub, meta=meta, backend="markdown",
+                  pdf_type="markdown", pages=0, elapsed=result.elapsed,
+                  cached=False, verify=verify, cleaned=cleaned)
     events.emit("complete", file=source.name, epub=epub.name, backend="markdown",
-                pdf_type="markdown", verify=result.verify,
+                pdf_type="markdown", verify=result.verify, cached=False,
                 seconds=round(result.elapsed, 2))
     logger.info("完成(markdown): %s → %s", source.name, epub.name)
     return result

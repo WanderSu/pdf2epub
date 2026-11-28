@@ -5,7 +5,7 @@ import {
   Rule, TypeBadge, BackendBadge, SpineBlock, ChapterHead, DeleteDialog, TrashIcon,
 } from "../primitives";
 import { formatSize } from "../format";
-import type { AiSettings, Backend, LibraryBook } from "../types";
+import type { AiSettings, Backend, ConversionReport, LibraryBook } from "../types";
 import { AiWorkbench } from "./AiWorkbench";
 
 // ── LIBRARY SCREEN(书目)──────────────────────────────────────────────────────
@@ -33,6 +33,109 @@ function CoverThumb({ book }: { book: LibraryBook }) {
   );
 }
 
+/** 转换报告:引擎在 `work/<书名>/report.json` 落的事实清单(页数/校验/清理/覆盖)。 */
+function ReportPanel({ lang, book, report, error, loading, onClose }: {
+  lang: Lang;
+  book: LibraryBook;
+  report: ConversionReport | null;
+  error: string | null;
+  loading: boolean;
+  onClose: () => void;
+}) {
+  const t = T[lang].library;
+  const cjk = lang === "zh" ? "cjk" : "font-mono";
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const verify = report?.verify ?? {};
+  const clean = report?.clean ?? {};
+  const coverage = report?.coverage ?? {};
+  const issues = [
+    ...(verify.issues ?? []).map(i => `${i.level === "error" ? "✕" : "!"} [${i.code}] ${i.message}`),
+    ...(clean.issues ?? []).map(i => `! ${i}`),
+  ];
+  const rows: [string, string][] = report ? [
+    [t.reportPages, String(report.pages ?? "—")],
+    [t.reportBackend, report.backend ?? "—"],
+    [t.reportSeconds, report.seconds != null ? `${report.seconds}s` : "—"],
+    [t.reportCached, report.cached ? t.reportCachedYes : t.reportCachedNo],
+    [t.reportVerify, `${verify.errors ?? 0} / ${verify.warnings ?? 0}`],
+    [t.reportClean, `${clean.applied ?? 0} / ${clean.suggested ?? 0} / ${clean.failed ?? 0}`],
+    [t.reportCoverage, coverage.pages_expected
+      ? `${coverage.pages_covered ?? 0} / ${coverage.pages_expected}`
+      : "—"],
+    [t.reportPageQuality, t.reportPageQualityValue(
+      coverage.pages_blank ?? 0, coverage.pages_image_only ?? 0, coverage.pages_short ?? 0)],
+  ] : [];
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--foreground)]/20 p-8"
+      role="dialog" aria-modal="true" aria-label={t.reportTitle}
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-[560px] max-h-[80vh] flex flex-col bg-[var(--card)] border border-[var(--border)]"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="px-8 pt-6 pb-4 border-b border-[var(--border)] shrink-0">
+          <div className="flex items-baseline gap-4">
+            <span className="font-mono text-[11px] tracking-[0.1em] text-[var(--primary)]">{t.reportTitle}</span>
+            <span className={`font-serif text-[18px] leading-tight text-[var(--foreground)] truncate ${lang === "zh" ? "cjk-serif" : ""}`}>{book.title}</span>
+          </div>
+          <div className={`mt-1 text-[10px] text-[var(--muted-foreground)] break-all selectable ${cjk}`}>{book.epub}</div>
+        </div>
+
+        <div className="px-8 py-5 overflow-auto scroll-area">
+          {loading && <div className={`text-[12px] text-[var(--muted-foreground)] ${cjk}`}>{t.reportLoading}</div>}
+          {!loading && error && (
+            <div className={`text-[12px] leading-relaxed text-[var(--muted-foreground)] ${cjk}`}>
+              {t.reportMissing}
+              <div className="mt-2 text-[10px] opacity-70 break-all selectable">{error}</div>
+            </div>
+          )}
+          {!loading && report && (
+            <>
+              <div className="space-y-2">
+                {rows.map(([label, value]) => (
+                  <div key={label} className="flex items-baseline gap-3">
+                    <span className="font-mono text-[10px] tracking-[0.08em] text-[var(--muted-foreground)] w-[96px] shrink-0 uppercase">{label}</span>
+                    <span className={`text-[12px] text-[var(--foreground)] ${cjk}`}>{value}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-5 pt-4 border-t border-[var(--border)]">
+                <div className="font-mono text-[10px] tracking-[0.1em] text-[var(--muted-foreground)] uppercase mb-2">{t.reportIssues}</div>
+                {issues.length === 0 ? (
+                  <div className={`text-[12px] text-[var(--ok)] ${cjk}`}>{t.reportNoIssues}</div>
+                ) : (
+                  <ul className="space-y-1.5">
+                    {issues.slice(0, 40).map((line, i) => (
+                      <li key={i} className={`text-[11px] leading-relaxed break-words ${cjk} ${line.startsWith("✕") ? "text-[var(--danger)]" : "text-[var(--warn)]"}`}>{line}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end px-8 py-3 border-t border-[var(--border)] bg-[var(--background)] shrink-0">
+          <button
+            onClick={onClose}
+            className={`text-[11px] text-[var(--muted-foreground)] hover:text-[var(--foreground)] ${lang === "zh" ? "cjk" : "font-mono tracking-[0.08em] uppercase"}`}
+          >
+            {t.reportClose}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function LibraryScreen({ lang, books, loading, outputDir, aiSettings = { provider: "OpenAI", api_url: "https://api.openai.com/v1", model: "gpt-4.1-mini" }, onRefresh, onOpenFolder, onOpenEpub, onReconvert, onDelete }: {
   lang: Lang;
   books: LibraryBook[];
@@ -55,6 +158,22 @@ export function LibraryScreen({ lang, books, loading, outputDir, aiSettings = { 
   const [deleteTarget, setDeleteTarget] = useState<LibraryBook | null>(null);
   /** 打开工作台的目标书；生成、预览、另存都在 AiWorkbench 内部完成 */
   const [aiTarget, setAiTarget] = useState<LibraryBook | null>(null);
+  /** 正在看转换报告的书 + 报告内容(读不到时给明确提示,不假装成功) */
+  const [reportTarget, setReportTarget] = useState<LibraryBook | null>(null);
+  const [report, setReport] = useState<ConversionReport | null>(null);
+  const [reportError, setReportError] = useState<string | null>(null);
+  const [reportLoading, setReportLoading] = useState(false);
+
+  const openReport = (book: LibraryBook) => {
+    setReportTarget(book);
+    setReport(null);
+    setReportError(null);
+    setReportLoading(true);
+    void invoke<ConversionReport>("conversion_report", { epub: book.epub })
+      .then(r => setReport(r))
+      .catch(e => setReportError(String(e)))
+      .finally(() => setReportLoading(false));
+  };
   const searchRef = useRef<HTMLInputElement>(null);
 
   // 页快捷键「/」由 App 广播(Booklist 自己不该关心键盘),这里只认事件
@@ -227,6 +346,19 @@ export function LibraryScreen({ lang, books, loading, outputDir, aiSettings = { 
               <div className={`flex items-center gap-3 self-center transition-opacity duration-[140ms] ${hoveredId === book.id ? "opacity-100" : "opacity-55"} focus-within:opacity-100`}>
                 <button onClick={() => onOpenEpub(book.epub)} className={`font-mono text-[10px] tracking-[0.06em] uppercase text-[var(--foreground)] hover:text-[var(--primary)] transition-colors ${lang === "zh" ? "cjk font-mono" : ""}`}>{t.openEpub}</button>
                 <Rule vertical />
+                <button
+                  onClick={() => openReport(book)}
+                  aria-label={t.report}
+                  title={t.report}
+                  className="p-0.5 text-[var(--muted-foreground)] hover:text-[var(--primary)] transition-colors"
+                >
+                  <svg width="11" height="13" viewBox="0 0 11 13" fill="none" stroke="currentColor" strokeWidth="1">
+                    <path d="M1 1h6l3 3v8H1z" />
+                    <path d="M7 1v3h3" />
+                    <path d="M3 7h5M3 9.5h5" />
+                  </svg>
+                </button>
+                <Rule vertical />
                 <button onClick={() => setAiTarget(book)} className={`font-mono text-[10px] tracking-[0.06em] uppercase text-[var(--primary)] hover:text-[var(--foreground)] transition-colors ${lang === "zh" ? "cjk font-mono" : ""}`}>{t.aiButton}</button>
                 {book.path && (
                   <>
@@ -270,6 +402,16 @@ export function LibraryScreen({ lang, books, loading, outputDir, aiSettings = { 
             setDeleteTarget(null);
             onDelete(book);
           }}
+        />
+      )}
+      {reportTarget && (
+        <ReportPanel
+          lang={lang}
+          book={reportTarget}
+          report={report}
+          error={reportError}
+          loading={reportLoading}
+          onClose={() => { setReportTarget(null); setReport(null); setReportError(null); }}
         />
       )}
       {aiTarget && (

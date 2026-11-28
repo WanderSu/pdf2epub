@@ -20,8 +20,14 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
+
+#: 页边界块的类型标记(与 ``markdown.footnotes.PAGE_BREAK_TYPE`` 同一个字符串)。
+#: 这里**再写一遍**而不是 import:page_result 是预检(dryrun)也会用到的轻量模块,
+#: 让它依赖脚注模块会把「只读预检」拖进不需要的导入链。两处一致性由
+#: tests/test_page_marks.py 钉住。
+PAGE_BREAK_BLOCK_TYPE = "page_break"
 
 #: 扫描页连续区段数上限:超出则合并区段,避免云端 OCR 任务数失控
 #: (每个区段 = 一次云端提交;交错严重的书可能切出几十个区段)
@@ -118,6 +124,64 @@ def page_marker_from_range(page_range: str, note: str | None = None) -> str:
 def page_marks(md: str) -> list[list[int]]:
     """取出 Markdown 里的页码注释,每个注释展开成页码列表(按出现顺序)。"""
     return [parse_pages(m.group("pages")) for m in PAGE_MARK_RE.finditer(md)]
+
+
+def ensure_page_marks(md: str, blocks: list[dict]) -> tuple[str, list[dict]]:
+    """给**没有**页注释的旧 Markdown 补上页注释,并同步平移页边界块的 ``offset``。
+
+    为谁而做:PaddleOCR 在 v0.6.2 之前不写页码注释,已落盘的段缓存里只有
+    ``content_list.json`` 的 ``page_break`` 块带着页边界 offset。不补的话,
+    这些书每次复用缓存都让「页覆盖」校验空转(``content_covered_pages=0``)。
+
+    规则:
+    - 已经有页注释(新缓存/新转换)→ 原样返回,块不动(幂等);
+    - 没有 ``page_break`` 块 → 原样返回(拿不到页边界就不猜);
+    - 否则在每页起点插入 ``<!-- page N -->``,把所有页边界块(以及其它带
+      ``offset`` 的块)的 offset 平移到新文本上的同一位置 —— 脚注层按 offset
+      认页边界,不平移会把脚注挂到上一页。
+
+    返回 ``(新 md, 新块列表)``;失败/不可信时返回原值,绝不半改。
+    """
+    if page_marks(md):
+        return md, blocks
+    breaks: list[tuple[int, int]] = []
+    for block in blocks:
+        if not isinstance(block, dict) or block.get("type") != PAGE_BREAK_BLOCK_TYPE:
+            continue
+        offset, page = block.get("offset"), block.get("page_idx")
+        if isinstance(offset, int) and isinstance(page, int) and 0 <= offset <= len(md):
+            breaks.append((offset, page))
+    if not breaks:
+        return md, blocks
+    breaks.sort()
+    # 同一 offset 上只放一条(重叠的页边界没有意义)
+    unique: list[tuple[int, int]] = []
+    for offset, page in breaks:
+        if unique and unique[-1][0] == offset:
+            continue
+        unique.append((offset, page))
+    # 从后往前插入,前面的 offset 不受影响
+    new_md = md
+    for offset, page in reversed(unique):
+        new_md = new_md[:offset] + page_marker([page + 1]) + "\n\n" + new_md[offset:]
+    # 平移:位于 offset 及其后的内容整体后移「插入点严格在它之前」的标记长度
+    lengths = [(offset, len(page_marker([page + 1])) + 2) for offset, page in unique]
+    shifted: list[dict] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            shifted.append(block)
+            continue
+        offset = block.get("offset")
+        if not isinstance(offset, int):
+            shifted.append(block)
+            continue
+        delta = sum(size for point, size in lengths if point < offset)
+        moved = dict(block)
+        moved["offset"] = offset + delta
+        shifted.append(moved)
+    if len(new_md) != len(md) + sum(size for _point, size in lengths):
+        return md, blocks                      # 自检不过:不半改
+    return new_md, shifted
 
 
 def contiguous_runs(page_idxs: Iterable[int]) -> list[list[int]]:

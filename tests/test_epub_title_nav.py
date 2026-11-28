@@ -118,15 +118,22 @@ def _make_toc_epub(path: Path, nav: str) -> Path:
     return path
 
 
-def test_unnumber_toc_uses_bullets_instead_of_numbers(tmp_path: Path) -> None:
-    from pdf2epub.epub.pandoc import unnumber_toc
+def test_unnumber_toc_hides_numbers_without_breaking_the_spec(tmp_path: Path) -> None:
+    """用 CSS 去编号,``<ol>`` 必须原样保留。
+
+    被钉住的缺陷:旧实现把目录列表换成 ``<ul>`` —— 数字没了,但 EPUB 3 规定
+    ``nav[epub:type="toc"]`` 里必须是有序列表,EPUBCheck 对**每一本产物**报两条
+    `RSC-005`(nav incomplete / ul not allowed here),整批书不合规。
+    """
+    from pdf2epub.epub.pandoc import TOC_NUMBER_CSS, unnumber_toc
 
     epub = _make_toc_epub(tmp_path / "t.epub", TOC_NAV)
     assert unnumber_toc(epub) == 2
     with zipfile.ZipFile(epub) as z:
         nav = z.read("EPUB/nav.xhtml").decode("utf-8")
-        assert '<ol class="toc">' not in nav and "</ol>" not in nav
-        assert nav.count('<ul class="toc">') == 2 and nav.count("</ul>") == 2
+        assert nav.count('<ol class="toc">') == 2 and nav.count("</ol>") == 2
+        assert "<ul" not in nav, "目录列表不能换成 ul(EPUB3 规范要求 ol)"
+        assert TOC_NUMBER_CSS in nav, "去编号的 CSS 没注入"
         assert "甲篇" in nav and "甲篇小节" in nav          # 条目文字不丢
         assert z.read("EPUB/toc.ncx") == NCX.encode("utf-8")  # ncx 不显示数字,不用动
         assert z.infolist()[0].filename == "mimetype"
@@ -135,17 +142,21 @@ def test_unnumber_toc_uses_bullets_instead_of_numbers(tmp_path: Path) -> None:
 
 
 def test_unnumber_toc_leaves_mixed_lists_alone(tmp_path: Path) -> None:
-    """nav 里混着非目录的 <ol> 时宁可不动 —— 换一半会配错标签。"""
-    from pdf2epub.epub.pandoc import unnumber_toc
+    """nav 里混着别的 ``<ol>`` 时结构一个字节不动:CSS 只作用于 ``ol.toc``。"""
+    from pdf2epub.epub.pandoc import TOC_NUMBER_CSS, unnumber_toc
 
     mixed = TOC_NAV.replace("</ol></nav>", '<ol><li>别的有序列表</li></ol></ol></nav>')
     epub = _make_toc_epub(tmp_path / "t.epub", mixed)
-    assert unnumber_toc(epub) == 0
+    assert unnumber_toc(epub) == 2
     with zipfile.ZipFile(epub) as z:
-        assert '<ol class="toc">' in z.read("EPUB/nav.xhtml").decode("utf-8")
+        nav = z.read("EPUB/nav.xhtml").decode("utf-8")
+        assert '<ol class="toc">' in nav
+        assert "<ol><li>别的有序列表</li></ol>" in nav
+        assert TOC_NUMBER_CSS in nav
 
 
 def test_book_css_styles_toc_list() -> None:
     css = (Path(__file__).resolve().parents[1] / "config" / "book.css").read_text(
         encoding="utf-8")
-    assert "ul.toc" in css and "list-style-type: disc" in css
+    assert "ol.toc" in css and "list-style-type: none" in css
+    assert "ul.toc" not in css, "目录还是 <ol>,CSS 不该再按 ul 写"

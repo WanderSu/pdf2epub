@@ -34,6 +34,11 @@ desktop/src-tauri/gen/
 dist_cli/
 build_cli/
 
+# 本地构建工具(NSIS 等,由 scripts/build_installer.py 下载到 .tools/)
+.tools/
+# NSIS 编译时由 build_installer.py 生成的参数文件(含绝对路径,不入库)
+installer/_generated.nsh
+
 # 发布包输出(打好的 zip 与 staging 目录,不入库)
 dist_release/
 

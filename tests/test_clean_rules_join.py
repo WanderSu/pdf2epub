@@ -358,3 +358,47 @@ def test_indented_code_block_is_atomic() -> None:
     ir = _ir(md)
     assert render_ir(ir) == md                     # 往返不变量先守住
     assert propose_join_lines(ir).patches == ()
+
+# ---------------------------------------------------------------- 文本连续性(逐页 OCR)
+# 逐页 OCR 的书里,跨页段落两侧各是一段:证据层**没有**覆盖整段的结构块,按对齐
+# 链接判这些拼接永远停在 suggested(实测一本教材 276 处)。只要书带证据层,就按
+# 「相邻两块首尾接得上」放行;引擎再核对「删的确实是这次拼接追加的那段」。
+# 手写 Markdown(没有证据层)保持旧行为:只记建议、一个字不动。
+
+
+def test_unlinked_continuation_joins_when_evidence_layer_exists() -> None:
+    md = f"{LINE_A}\n\n{LINE_B}。\n"
+    # 证据层存在,但内容对不上正文 → 不会产生对齐链接
+    evidence = [
+        {"type": "text", "text": "与正文无关的一段证据文字,长度足够长不至于被丢弃。",
+         "page_idx": 0},
+    ]
+    ir = _ir(md, evidence=evidence)
+    proposal = propose_join_lines(ir)
+    result = apply_patches(ir, proposal.patches, allow_heuristic_apply=True,
+                           started_at=0, finished_at=0)
+
+    assert render_ir(result.ir) == f"{LINE_A}{LINE_B}。\n"
+    delete = next(p for p in result.patches if p.operation == "delete_block")
+    assert delete.status == "applied"
+    assert delete.evidence.source == "continuity"
+
+
+def test_continuity_delete_without_a_merge_is_rejected() -> None:
+    """防御:规则不能只挂一条 continuity 证据就删块 —— 引擎要求它依赖一次真实合并。"""
+    from pdf2epub.clean.patch import Evidence, Patch
+
+    md = f"{LINE_A}\n\n{LINE_B}。\n"
+    ir = _ir(md, evidence=[{"type": "text", "text": "无关证据块内容,长度足够。", "page_idx": 0}])
+    victim = next(b for b in ir.editable_blocks if b.text.strip().startswith(LINE_B))
+    patch = Patch.propose(
+        patch_id="p0001", rule_id="join_lines", block=victim,
+        operation="delete_block",
+        evidence=Evidence(kind="text_continuity", source="continuity",
+                          matched="伪造的连续性片段" * 2),
+        confidence="heuristic", risk="high",
+    )
+    result = apply_patches(ir, [patch], started_at=0, finished_at=0)
+    assert result.patches[0].status == "suggested"
+    assert result.patches[0].skip_reason == "evidence_insufficient"
+    assert render_ir(result.ir) == md

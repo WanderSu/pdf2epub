@@ -385,36 +385,23 @@ def _looks_like_front_field(text: str) -> bool:
     return line[-1] not in END_PUNCT
 
 
-def propose_front_matter(ir: BookIR, *, first_id: int = 1,
-                         title_hint: str | None = None) -> RuleProposal:
-    """卷首(封面/扉页)去重:第 1 页若只是书名、作者、出版社这类版式字段,整块删除。
+def _cover_blocks(blocks: list[Block], title_hint: str | None) -> list[Block]:
+    """卷首(封面/扉页)要删的块;判据不成立返回空列表。
 
-    为什么必须删:封面图已作为 ``cover.jpg`` 放在 EPUB 首位(见 ``batch.render_cover``),
-    OCR 再把同一页识成一堆文字,读者打开后就会看到**两遍**书名与作者 —— 再加上
-    ``dc:title`` 生成的标题页,一本扫描书能出现三处书名。
-
-    判据(四条同时成立才删,缺一条只留原样):
-      1. 该块属于**第 1 页**(``prov.page_idx == 0``);没有页归属证据时,退化为
-         "文首连续块",且必须能在其中找到与书名高度相似(≥0.7)的标题;
-      2. 整页块数 ≤ ``FRONT_MAX_BLOCKS``、非空白字符 ≤ ``FRONT_MAX_CHARS``;
-      3. 没有长句:任一可见块超过 ``FRONT_MAX_LINE`` 字或带句末标点 → 判定为正文,
-         整条规则放弃(宁可留一页重复,也不能吃掉第一章的开头);
-      4. 页里要么有与书名相似的标题,要么全是 ≤24 字的短行(纯字段式封面)。
-
-    只动 ``delete_block``,文字一个字节都不改 —— 删错了可以从报告的 before 里原文恢复。
+    1. 该块属于**第 1 页**(``prov.page_idx == 0``);没有页归属证据时退化为
+       "文首连续块",且必须能在其中找到与书名高度相似(≥0.7)的标题;
+    2. 整页块数 ≤ ``FRONT_MAX_BLOCKS``、非空白字符 ≤ ``FRONT_MAX_CHARS``;
+    3. 没有长句:任一可见块超过 ``FRONT_MAX_LINE`` 字或带句末标点 → 判定为正文;
+    4. 页里要么有与书名相似的标题,要么全是 ≤24 字的短行(纯字段式封面)。
     """
-    blocks = [b for b in sorted(ir.editable_blocks, key=lambda b: b.order)
-              if not _is_page_marker(b) and str(b.extra.get("role") or "") != "html_comment"]
     if len(blocks) < 2:
-        return RuleProposal("front_matter")
-
+        return []
     page1 = [b for b in blocks if b.prov.page_idx == 0]
     positional = False
     if page1:
         # 第 1 页 = 文首连续的一段,直到第一块明确属于后面某页。中间那些**没有页归属**
         # 的块(太短、对齐不出锚点的版式字段,如「xx 出版社」)留在段内 —— 它们物理上
-        # 就在第 1 页,只是对齐阶段挂不上证据。少了这一步,封面页会只删掉书名、
-        # 把作者和出版社留在正文第一屏。
+        # 就在第 1 页,只是对齐阶段挂不上证据。
         page1 = []
         for blk in blocks:
             idx = blk.prov.page_idx
@@ -430,55 +417,160 @@ def propose_front_matter(ir: BookIR, *, first_id: int = 1,
                 break
             page1.append(blk)
             if len(page1) > FRONT_MAX_BLOCKS:
-                return RuleProposal("front_matter")
-
+                return []
     if not page1 or len(page1) >= len(blocks):
-        return RuleProposal("front_matter")      # 整本书都在"第 1 页":不可能,不猜
-
+        return []                                # 整本书都在"第 1 页":不可能,不猜
     visible = [b.text.strip() for b in page1 if b.text.strip()]
     chars = sum(len(re.sub(r"\s+", "", b.text)) for b in page1)
     if len(page1) > FRONT_MAX_BLOCKS or chars > FRONT_MAX_CHARS:
-        return RuleProposal("front_matter")
+        return []
     if any(len(t) > FRONT_MAX_LINE or t[-1] in END_PUNCT for t in visible):
-        return RuleProposal("front_matter")
+        return []
     # 封面/扉页不会写着「第一章」:第 1 页上有章节标注 → 这是正文的第一页
-    # (实测:章标题独占一页时,旧判据会把它当成"字段式封面"删掉)
     if any(b.kind == "heading" and is_chapter_anchor(_heading_text(b)) for b in page1):
-        return RuleProposal("front_matter")
-
-    headings = [b for b in page1 if b.kind == "heading"]
+        return []
     matched: Block | None = None
     if title_hint:
-        for blk in headings:
-            if _same_title(_heading_text(blk), title_hint):
+        for blk in page1:
+            if blk.kind == "heading" and _same_title(_heading_text(blk), title_hint):
                 matched = blk
                 break
     fields_only = all(_looks_like_front_field(t) for t in visible) and bool(visible)
     if matched is None and (not fields_only or len(page1) < 2):
-        # 认不出书名、又只有孤零零一块:那更像"只排了一行标题的正文页",不删
-        return RuleProposal("front_matter")
+        return []
     if positional and matched is None:
-        # 没有页证据又没有书名命中:文首那几行可能是序言/引文,不删
-        return RuleProposal("front_matter")
-    # 卷首页之后必须紧接章节标题:否则这更像是正文开头(有些书直接从第一段起)
+        return []
     rest = [b for b in blocks if b.order > page1[-1].order]
     nxt = next((b for b in rest if b.kind == "heading"), None)
     if nxt is not None and not is_chapter_anchor(_heading_text(nxt)) and matched is None:
+        return []
+    return page1
+
+
+#: 印刷目录的标题行
+_TOC_LABEL_RE = re.compile(r"^(?:目\s*录|目\s*次|contents?)$", re.IGNORECASE)
+#: 条目头部的页码(``001 六月里的玫瑰花``):至少三位数,避免和「1 麦园」这类小节号混淆
+_TOC_HEAD_PAGE_RE = re.compile(r"^\s*\d{3,4}[.、]?\s+\S")
+#: 条目尾部的页码(``第一章 ……（1）`` / ``六月里的玫瑰花   1``)
+_TOC_TAIL_PAGE_RE = re.compile(r"(?:[.…．·]{2,}|\s{2,})\s*[（(]?\s*\d{1,4}\s*[）)]?\s*$")
+
+
+def _is_toc_label(text: str) -> bool:
+    """「目录/目次/Contents」标签:标题块文本带 ``#``,先剥掉再匹配。"""
+    return bool(_TOC_LABEL_RE.match(re.sub(r"^#+\s*", "", (text or "").strip())))
+
+
+def _is_toc_line(line: str) -> bool:
+    line = line.strip()
+    if not line or len(line) > 80:
+        return False
+    if _is_toc_label(line):
+        return True
+    if _TOC_HEAD_PAGE_RE.match(line):
+        return True
+    return bool(_TOC_TAIL_PAGE_RE.search(line))
+
+
+def _toc_hits(text: str) -> tuple[int, int]:
+    """(目录式行数, 非空行数)。"""
+    lines = [ln for ln in text.split("\n") if ln.strip()]
+    return sum(1 for ln in lines if _is_toc_line(ln)), len(lines)
+
+
+def _printed_toc_blocks(blocks: list[Block]) -> list[Block]:
+    """卷首的**印刷目录**整段(与 EPUB 导航重复),找不到就返回空。
+
+    为什么删:导航目录已经由 pandoc 生成,印刷目录再排一遍就是「同一份目录出现两次」;
+    它还会把卷首撑成几千字的一章(实测《中国共产党历史讲义》目录独占 3766 字)。
+    判据刻意保守:
+      - 只在**前 60 块**里找起点,起点要么是「目录/目次/Contents」标签块,要么整块
+        ≥5 行且 ≥60% 是目录条目;
+      - 向后只收「目录条目块 / 空块 / 目录里的短续行」,遇到标题块或正文长句立刻停;
+      - 至少要删 2 块;只有「目录」两个字却没有条目时不动。
+    """
+    limit = 60
+    start = None
+    for i, blk in enumerate(blocks[:limit]):
+        if _is_toc_label(blk.text):
+            start = i
+            break
+    if start is None:
+        for i, blk in enumerate(blocks[:limit]):
+            hits, total = _toc_hits(blk.text)
+            if total >= 5 and hits >= 5 and hits / total >= 0.6:
+                start = i
+                break
+    if start is None:
+        return []
+    run: list[Block] = []
+    for blk in blocks[start:]:
+        text = blk.text.strip()
+        if not text:
+            run.append(blk)
+            continue
+        if run and blk.kind == "heading" and not _is_toc_label(text):
+            break                                # 目录之后的第一条标题 = 正文开始
+        hits, total = _toc_hits(blk.text)
+        if total and hits / total >= 0.5:
+            run.append(blk)
+            continue
+        if len(text) > 40 and any(ch in END_PUNCT for ch in text[-2:]):
+            break                                # 正文长句:目录到此为止
+        if len(text) > 200:
+            break
+        run.append(blk)                          # 目录条目被折行后的短续行
+    if len(run) < 2:
+        return []
+    if start + len(run) >= len(blocks):
+        return []                                # 一路删到书尾:这不是卷首目录
+    return run
+
+
+def propose_front_matter(ir: BookIR, *, first_id: int = 1,
+                         title_hint: str | None = None) -> RuleProposal:
+    """卷首清理:封面/扉页去重 + 印刷目录删除(两者都只动 ``delete_block``)。
+
+    为什么封面要删:封面图已作为 ``cover.jpg`` 放在 EPUB 首位(见
+    ``batch.render_cover``),OCR 再把同一页识成一堆文字,读者打开后就会看到
+    **两遍**书名与作者 —— 再加上 ``dc:title`` 生成的标题页,一本扫描书能出现三处书名。
+
+    为什么目录要删:导航目录由 pandoc 生成,印刷目录是它的重复;而且它常把卷首
+    撑成几千字的一章。判据见 :func:`_printed_toc_blocks`。
+
+    删错了可以从报告 ``before`` 里的原文恢复(文字一个字节都不改)。
+    """
+    blocks = [b for b in sorted(ir.editable_blocks, key=lambda b: b.order)
+              if not _is_page_marker(b) and str(b.extra.get("role") or "") != "html_comment"]
+    if len(blocks) < 2:
         return RuleProposal("front_matter")
 
-    patches = []
+    patches: list[Patch] = []
+    notes: list[str] = []
     id_counter = first_id
-    for blk in page1:
+    cover = _cover_blocks(blocks, title_hint)
+    for blk in cover:
         patches.append(Patch.propose(
             patch_id=f"p{id_counter:04d}", rule_id="front_matter", block=blk,
             operation="delete_block", evidence=_whole_block_evidence(blk),
             confidence="derived", risk="low",
         ))
         id_counter += 1
+    if cover:
+        notes.append(f"卷首页: 删除 {len(cover)} 块(封面/扉页已在封面图上)")
 
-    note = (f"卷首页: 删除 {len(patches)} 块(封面/扉页已在封面图上)"
-            + (f", 书名取自卷首《{_heading_text(matched)}》" if matched is not None else ""))
-    return RuleProposal("front_matter", tuple(patches), (note,))
+    cover_ids = {b.id for b in cover}
+    toc = [b for b in _printed_toc_blocks(blocks) if b.id not in cover_ids]
+    for blk in toc:
+        patches.append(Patch.propose(
+            patch_id=f"p{id_counter:04d}", rule_id="front_matter", block=blk,
+            operation="delete_block", evidence=_whole_block_evidence(blk),
+            confidence="derived", risk="medium",
+        ))
+        id_counter += 1
+    if toc:
+        notes.append(f"印刷目录: 删除 {len(toc)} 块(与导航目录重复)")
+
+    return RuleProposal("front_matter", tuple(patches), tuple(notes))
 
 
 # ================================================================ headings
@@ -926,6 +1018,29 @@ def _boundary_snippet(entries: list[_Entry], block_id: str) -> str:
     return ""
 
 
+#: 文本连续性 probe 两端各取多少个非空白字符(太短容易在别处重名)
+_CONTINUITY_EDGE = 12
+#: probe 最短长度(低于它就放弃,只留 suggested)
+_CONTINUITY_MIN = 20
+
+
+def _predecessor(blocks: list[Block], blk: Block) -> Block | None:
+    prev: Block | None = None
+    for other in blocks:
+        if other.order >= blk.order:
+            break
+        prev = other
+    return prev
+
+
+def _continuity_probe(prev_text: str, text: str) -> str | None:
+    """相邻两块「首尾相接」的那一小段(去空白);太短返回 None。"""
+    tail = "".join(prev_text.strip()[-_CONTINUITY_EDGE:].split())
+    head = "".join(text.strip()[:_CONTINUITY_EDGE].split())
+    probe = tail + head
+    return probe if len(probe) >= _CONTINUITY_MIN else None
+
+
 def propose_join_lines(ir: BookIR, *, first_id: int = 1) -> RuleProposal:
     """join_lines(+ 诗行硬换行)的候选提案。"""
     units = _flatten(ir)
@@ -935,11 +1050,37 @@ def propose_join_lines(ir: BookIR, *, first_id: int = 1) -> RuleProposal:
     linked_ids = frozenset(
         b.id for b in blocks if _linked_evidence(ir, b) is not None)
 
-    entries, last_mark_before = _run_join_state_machine(units, linked_ids=linked_ids)
-    # 假设跑(不设证据门槛):找出「本可以拼但被吸收块缺证据」的块,留 suggested 建议
+    # 假设跑(不设证据门槛):找出「本可以拼但被吸收块缺证据」的块
     hypothetical, _ = _run_join_state_machine(
         units, linked_ids=frozenset(b.id for b in blocks))
     blocked = {bid for bid in _absorptions(hypothetical) if bid not in linked_ids}
+
+    # 逐页 OCR 的书里,跨页段落两侧各是一段,证据层**没有**覆盖整段的结构块 ——
+    # 按对齐链接判,这些拼接永远停在 suggested,段落于是长期是碎的(实测一本教材
+    # 276 处)。这里补一条文本判据:相邻两块首尾真的接得上(probe ≥20 字)就放行;
+    # 引擎侧再核对「被删块确实是这次拼接追加的那段」(_merge_consistency_evidence)。
+    # 判据本身没放宽:仍是 _joinable 那一套(无句末标点 / 非块首 / 非目录 / 非诗行…)。
+    #
+    # 但**只对带证据层的书**放开:手写 Markdown 没有证据层,「这一段是不是被
+    # 硬拆开的」无从判断,那里保持「只记建议、一个字不动」的旧行为。
+    by_id = {b.id: b for b in blocks}
+    unlinked: dict[str, Evidence] = {}
+    if ir.evidence_blocks:
+        for bid in blocked:
+            blk = by_id.get(bid)
+            if blk is None:
+                continue
+            prev = _predecessor(blocks, blk)
+            if prev is None:
+                continue
+            probe = _continuity_probe(prev.text, blk.text)
+            if probe is not None:
+                unlinked[bid] = Evidence(kind="text_continuity", source="continuity",
+                                         matched=probe)
+
+    entries, last_mark_before = _run_join_state_machine(
+        units, linked_ids=linked_ids | frozenset(unlinked))
+    blocked = {bid for bid in blocked if bid not in unlinked}
 
     marked = _verse_mark(entries)
     root_of = _absorptions(entries)
@@ -1002,12 +1143,14 @@ def propose_join_lines(ir: BookIR, *, first_id: int = 1) -> RuleProposal:
             dep = emitted.get(root_of[blk.id])
             if dep is None:                   # 理论不可达(吸收者必在更早的块)
                 continue
-            # 删除的证据 = 被吸收块自己的链接(放行条件已保证存在)
+            # 删除的证据:对齐链接优先;没有链接的按文本连续性(引擎会核对
+            # 「删的确实是这次拼接追加的那段」,见 _merge_consistency_evidence)
+            evidence = _linked_evidence(ir, blk) or unlinked.get(blk.id)
             patches.append(_dc_replace(
                 Patch.propose(
                     patch_id=next_id(), rule_id="join_lines", block=blk,
                     operation="delete_block",
-                    evidence=_linked_evidence(ir, blk),
+                    evidence=evidence,
                     confidence="heuristic", risk="high",
                 ),
                 depends_on=dep,
@@ -1055,6 +1198,8 @@ def propose_join_lines(ir: BookIR, *, first_id: int = 1) -> RuleProposal:
         notes.append(f"诗行硬换行 {marked} 行")
     if root_of:
         notes.append(f"跨块拼接 {len(root_of)} 处(删除依赖前置替换成功)")
+    if unlinked:
+        notes.append(f"跨块拼接 {len(unlinked)} 处无对齐链接,按文本连续性放行")
     if blocked:
         notes.append(f"跨块拼接 {len(blocked)} 处因缺证据降级为建议")
     return RuleProposal("join_lines", tuple(patches), tuple(notes))

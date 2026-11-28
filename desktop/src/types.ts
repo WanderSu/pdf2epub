@@ -34,6 +34,10 @@ export interface QueueFile {
   type?: FileType;
   stages: StageNode[];
   signatures?: Signatures;
+  /** 当前阶段的页级进度(引擎 progress 事件):有它才能在行内显示「12/417 页」 */
+  progressDetail?: { current: number; total: number };
+  /** 本次没有重新 OCR(直接复用了已落盘的云端解析结果) */
+  reused?: boolean;
   cloudPages?: number;
   lastLog?: string;
   log: string[];
@@ -103,6 +107,46 @@ export interface LibEntry {
   source?: string | null;
 }
 
+/** 一次转换的质量报告(引擎写在 `work/<书名>/report.json`,书库「报告」读它)。 */
+export interface ConversionReport {
+  schema: number;
+  generated_at?: string;
+  file?: string;
+  epub?: string;
+  title?: string | null;
+  author?: string | null;
+  backend?: string;
+  pdf_type?: string;
+  pages?: number;
+  seconds?: number;
+  cached?: boolean;
+  verify?: {
+    summary?: string;
+    errors?: number;
+    warnings?: number;
+    issues?: { level: string; code: string; message: string }[];
+  };
+  clean?: {
+    applied?: number;
+    suggested?: number;
+    failed?: number;
+    issues?: string[];
+  };
+  coverage?: {
+    pages_covered?: number | null;
+    pages_expected?: number | null;
+    md_page_marks?: number;
+    /** IR 页账的「已归属页数」(与正文页码注释覆盖不是一回事) */
+    ir_pages_covered?: number | null;
+    /** 页级质量检查:空白页 / 纯图片页 / 短页 */
+    pages_blank?: number;
+    pages_image_only?: number;
+    pages_short?: number;
+    blank_pages?: string;
+  };
+  stats?: Record<string, number>;
+}
+
 export interface EnvState {
   pandoc: { status: string; version: string | null; path: string | null };
   engine: { status: string; version: string | null; path: string | null };
@@ -112,6 +156,10 @@ export interface EnvState {
   apikey_path: string | null;
   /** 凭证文件权限是否已收紧(null = 还没有凭证文件) */
   apikey_perms_ok: boolean | null;
+  /** 数据根(设置页展示,也是「迁移旧数据」的目标) */
+  data_dir?: string;
+  /** 安装目录里还存在的旧数据项(work/output/pandoc/apikey.json) */
+  legacy_data?: string[];
 }
 
 /** CLI `--dry-run --json` 的单个文件计划(印前检查的原始数据) */
@@ -160,6 +208,17 @@ export interface ReviewRow {
 /** 一批新导入文件的复核请求(App 持有,ConvertScreen 渲染)。 */
 export interface ReviewSheet {
   rows: ReviewRow[];
+  /** 这批来自「书库 → 重新转换」:允许勾选「强制重新解析」 */
+  allowForceReparse?: boolean;
+  /** 用户勾了「强制重新解析」→ 透传 CLI `--no-resume`(不复用已落盘的云端结果) */
+  noResume?: boolean;
+}
+
+/** 复核表结算结果:`null`(取消)由调用方区分,这里只表示「开跑」。 */
+export interface ReviewDecision {
+  rows: ReviewRow[];
+  /** 勾了「强制重新解析」:不读 work/ 里的云端结果缓存(--no-resume) */
+  noResume: boolean;
 }
 
 export interface RecentEntry {
@@ -241,9 +300,18 @@ export interface AiProgress {
 export interface InitialSettings {
   file: SettingsFile;
   baseline: Record<string, boolean>;
+  /** 默认目录(由壳给出):输出/中间产物/数据根都是绝对路径,不把 %LOCALAPPDATA% 写进界面 */
+  dirs?: DefaultDirs;
 }
 
-export const APP_VERSION = "v0.6.1";
+/** 壳的 `default_dirs` 命令:输出目录、work 目录与数据根。 */
+export interface DefaultDirs {
+  output: string;
+  work: string;
+  data: string;
+}
+
+export const APP_VERSION = "v0.6.2";
 export const MAX_RECENT = 8;
 
 /**

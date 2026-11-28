@@ -88,7 +88,7 @@ def convert_auto(
     elif detection.pdf_type == PDFType.SCANNED:
         events.emit("plan", backend=ocr_name, pages=detection.total_pages,
                     ocr_pages=detection.total_pages, ocr_runs=1,
-                    shards=_planned_shards(detection.total_pages, ocr_name, ocr_cfg))
+                    shards=planned_shards(detection.total_pages, ocr_name, ocr_cfg))
         events.stage("extract", "start", backend=ocr_name)
         result = get_backend(ocr_name, ocr_cfg).convert(pdf_path, work_dir)
     else:
@@ -99,7 +99,7 @@ def convert_auto(
         runs = plan_ocr_runs(scanned, limit)
         events.emit("plan", backend=f"hybrid({ocr_name})", pages=detection.total_pages,
                     ocr_pages=len(scanned), ocr_runs=len(runs),
-                    shards=sum(_planned_shards(len(r), ocr_name, ocr_cfg) for r in runs))
+                    shards=sum(planned_shards(len(r), ocr_name, ocr_cfg) for r in runs))
         events.stage("extract", "start", backend=f"hybrid({ocr_name})")
         result = _convert_hybrid(
             pdf_path, work_dir, ocr_name, ocr_cfg, detection,
@@ -111,7 +111,7 @@ def convert_auto(
     return result, detection
 
 
-def _planned_shards(pages: int, ocr_name: str, ocr_cfg: dict) -> int:
+def planned_shards(pages: int, ocr_name: str, ocr_cfg: dict) -> int:
     """按后端单任务页数上限估算云端任务数(与实际提交口径一致,见 dryrun)。
 
     口径必须跟着**实际后端**走:以前写死 ``{"mineru": ocr_cfg}``,PaddleOCR
@@ -119,6 +119,10 @@ def _planned_shards(pages: int, ocr_name: str, ocr_cfg: dict) -> int:
     """
     from pdf2epub.dryrun import estimate_shards, max_pages_per_task
     return estimate_shards(pages, max_pages_per_task({ocr_name: ocr_cfg}, ocr_name))
+
+
+#: 旧名(私有):手动后端分支也用它,别让两个模块各算一套分片口径。
+_planned_shards = planned_shards
 
 
 def _convert_hybrid(

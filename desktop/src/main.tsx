@@ -3,7 +3,7 @@ import ReactDOM from 'react-dom/client'
 import { invoke } from '@tauri-apps/api/core'
 import App from './App'
 import { clearLegacySettings, readLegacySettings } from './format'
-import type { InitialSettings, SettingsFile } from './types'
+import type { DefaultDirs, InitialSettings, SettingsFile } from './types'
 import './index.css'
 
 // 启动引导:设置要在**渲染之前**读出来,否则会先闪一帧默认主题与默认语言。
@@ -12,13 +12,17 @@ import './index.css'
 async function bootstrap(): Promise<InitialSettings> {
   let file: SettingsFile | null = null
   let baseline: Record<string, boolean> = {}
+  let dirs: DefaultDirs | undefined
   try {
-    const [loaded, base] = await Promise.all([
+    const [loaded, base, defaults] = await Promise.all([
       invoke<SettingsFile | null>('load_settings'),
       invoke<Record<string, boolean> | null>('clean_baseline'),
+      // 默认输出/work 目录由壳算(数据根在 %LOCALAPPDATA%,前端不该拼这个路径)
+      invoke<DefaultDirs>('default_dirs').catch(() => null),
     ])
     file = loaded ?? null
     baseline = base ?? {}
+    dirs = defaults ?? undefined
   } catch { /* 非 Tauri 环境忽略 */ }
 
   if (!file) {
@@ -33,7 +37,7 @@ async function bootstrap(): Promise<InitialSettings> {
       } catch { /* 写不进去就先用着内存里这份,下次再说 */ }
     }
   }
-  return { file: file ?? {}, baseline }
+  return { file: file ?? {}, baseline, dirs }
 }
 
 void bootstrap().then(initial => {

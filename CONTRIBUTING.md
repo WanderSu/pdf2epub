@@ -49,6 +49,11 @@ Any change to networking, caching, or archive handling **must** come with tests 
 failure modes, timeouts, retries, and size limits — these paths fail silently: a bad
 build or a double charge, not an exception.
 
+Build the desktop shell through the Tauri CLI only (`cd desktop && npx tauri build
+--no-bundle`, or `uv run python scripts/build_release.py <version>`). A plain
+`cargo build --release` produces an exe **without the embedded frontend** (the
+custom-protocol step is skipped) — verified locally, and it shows a blank window.
+
 ## Commits
 
 - **One topic per commit**: independently describable, with the relevant tests passing
@@ -93,8 +98,16 @@ Releases are a maintainer-run, manual step — **never automated in CI**:
 uv run python scripts/bump_version.py <version>
 uv run python scripts/build_release.py <version>
 uv run python scripts/check_release.py dist_release/<version>
-gh release create v<version> <zip> --notes-file <notes>
+uv run python scripts/build_installer.py <version> --verify-install
+gh release create v<version> \
+  dist_release/pdf2epub-v<version>-win-x64.zip \
+  dist_release/pdf2epub-v<version>-win-x64-setup.exe --notes-file <notes>
 ```
+
+The installer (`setup.exe`, per-user, no UAC) is what most Windows users should download;
+the zip stays for portable use. CI builds both on Windows when the release scope runs and
+uploads them as the `pdf2epub-installer` artifact, so a broken installer fails CI instead of
+the release.
 
 Before publishing, confirm the archive contains no `apikey.json`, `work/`, `output/`,
 `logs/`, or local paths.

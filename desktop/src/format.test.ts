@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   normPath, formatSize, fmtDate, fmtMonthDay, libDate, baseName,
-  backendFromPlan, parseTypeFromLine,
+  backendFromPlan, backendToCli, resolveCliBackend, parseTypeFromLine,
   clearLegacySettings, diffCleanOpts, mergeCleanOpts, readLegacySettings,
 } from "./format";
 import { CLEAN_KEYS, CLEAN_DEFAULTS, MAX_RECENT } from "./types";
@@ -75,6 +75,49 @@ describe("backendFromPlan", () => {
     expect(backendFromPlan("paddleocr")).toBe("PaddleOCR");
     expect(backendFromPlan("mineru")).toBe("MinerU");
     expect(backendFromPlan("something-else")).toBe("Auto");
+  });
+});
+
+describe("backendToCli", () => {
+  //  被钉住的缺陷:行上写着 PADDLE、重跑却退回全局偏好(Auto → config.yaml
+  //  的 ocr_backend,默认 mineru)—— 用户点了「用 PaddleOCR 重跑」,跑的却是
+  //  MinerU,界面上还看不出来(徽标停在 PADDLE)。
+  it("徽标回译成 CLI 的 --backend 值", () => {
+    expect(backendToCli("MinerU")).toBe("mineru");
+    expect(backendToCli("PaddleOCR")).toBe("paddleocr");
+    expect(backendToCli("Local")).toBe("pymupdf");
+  });
+
+  it("Auto / 未知 = 不传参数(继续听检测与全局偏好)", () => {
+    expect(backendToCli("Auto")).toBeNull();
+    expect(backendToCli(undefined)).toBeNull();
+  });
+});
+
+describe("resolveCliBackend", () => {
+  const SCN = { backend: "PaddleOCR" as const, type: "SCN" as const };
+  const HYB = { backend: "MinerU" as const, type: "HYB" as const };
+
+  it("重试/重新入队照用这一行上次的后端,不退回全局偏好", () => {
+    // 被钉住的缺陷:全局偏好 auto → config.yaml 的 ocr_backend(默认 mineru),
+    // 行上写着 PADDLE 却跑了一遍 MinerU。
+    expect(resolveCliBackend(undefined, SCN, "auto")).toBe("paddleocr");
+    expect(resolveCliBackend(undefined, SCN, "mineru")).toBe("paddleocr");
+  });
+
+  it("混合型的徽标只是 ocr 主干,不能当成 --backend(否则变成整本 OCR)", () => {
+    expect(resolveCliBackend(undefined, HYB, "auto")).toBeNull();
+    expect(resolveCliBackend(undefined, HYB, "paddleocr")).toBe("paddleocr");
+  });
+
+  it("这次显式选过的后端优先于历史与偏好", () => {
+    expect(resolveCliBackend("mineru", SCN, "paddleocr")).toBe("mineru");
+    expect(resolveCliBackend("pymupdf", HYB, "auto")).toBe("pymupdf");
+  });
+
+  it("表里选了「自动」= 明确听设置,不用徽标回填", () => {
+    expect(resolveCliBackend(null, SCN, "auto")).toBeNull();
+    expect(resolveCliBackend(null, SCN, "paddleocr")).toBe("paddleocr");
   });
 });
 

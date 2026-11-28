@@ -350,3 +350,46 @@ describe("ConvertScreen 删除队列记录", () => {
     expect(onDelete).not.toHaveBeenCalled();
   });
 });
+
+// ── 书库重新转换:后端可换、可强制重新解析、进度按页数 ─────────────────────────
+
+describe("书库重新转换", () => {
+  it("复核表给出「强制重新解析」勾选,勾上把 true 回传", () => {
+    const onReviewNoResume = vi.fn();
+    render(
+      <ConvertScreen
+        {...baseProps()}
+        review={{
+          rows: [{ id: "r1", name: "夜行货车.pdf", path: "C:/books/夜行货车.pdf", type: "SCN", pages: 417, ocrPages: 417, known: true }],
+          allowForceReparse: true,
+          noResume: false,
+        }}
+        onReviewNoResume={onReviewNoResume}
+      />,
+    );
+    const sheet = within(screen.getByRole("dialog"));
+    const box = sheet.getByRole("checkbox");
+    expect(box.hasAttribute("checked")).toBe(false);
+    fireEvent.click(box);
+    expect(onReviewNoResume).toHaveBeenCalledWith(true);
+  });
+
+  it("普通导入的复核表没有这个勾选(没有旧缓存可复用)", () => {
+    renderConvert([], SHEET);
+    expect(within(screen.getByRole("dialog")).queryByRole("checkbox")).toBeNull();
+  });
+
+  it("转换中显示页级进度(第 n/总 页),不是只写进日志", () => {
+    renderConvert([
+      makeFile({ status: "converting", progress: 30, pages: 417, progressDetail: { current: 12, total: 417 } }),
+    ]);
+    expect(screen.getByText("第 12/417 页")).toBeTruthy();
+  });
+
+  it("复用已解析结果时说明「没有重新 OCR」,不被当成跳过", () => {
+    renderConvert([
+      makeFile({ status: "done", progress: 100, reused: true, epub: "C:/out/a.epub" }),
+    ]);
+    expect(screen.getByText(/复用 work\/ 里已解析好的结果/)).toBeTruthy();
+  });
+});

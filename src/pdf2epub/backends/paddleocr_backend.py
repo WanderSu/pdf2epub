@@ -47,6 +47,7 @@ from pdf2epub.net import (
     download_to,
     read_bytes,
 )
+from pdf2epub.page_result import ensure_page_marks, page_marker
 from pdf2epub.paths import load_api_key, redact_secret
 
 from .base import (
@@ -96,6 +97,34 @@ STATE_LABELS = {
     "done": "完成",
     "failed": "失败",
 }
+
+
+def _as_int(value) -> int | None:
+    """云端进度字段 → int;缺失/``None``/解析不了一律返回 None(不抛异常)。"""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def extract_progress(data: dict) -> tuple[int, int] | None:
+    """从任务响应里取 ``(已解析页数, 总页数)``;取不到可用值时返回 None。
+
+    PaddleOCR 官方响应形如 ``data.extractProgress.{totalPages, extractedPages}``。
+    这里对字段缺失/类型异常做兜底:进度只是展示信息,**不能因为云端少给一个字段就
+    让轮询中断**(中断后只能等超时,已提交的任务还要再等一轮)。
+    """
+    progress = (data or {}).get("extractProgress")
+    if not isinstance(progress, dict):
+        return None
+    total = _as_int(progress.get("totalPages"))
+    extracted = _as_int(progress.get("extractedPages"))
+    if total is None or total <= 0 or extracted is None:
+        return None
+    return max(0, min(extracted, total)), total
+
 
 #: 段缓存里附带的结构化结果文件名 —— 与 MinerU 同名同形,因此脚注层、合并逻辑、
 #: 校验都共用一套(合并阶段读的就是这份「归一化块」)。
@@ -327,12 +356,18 @@ class PaddleOCRAdapter(Backend):
 
         老缓存(本改动之前落的段)里没有 `content_list.json` —— 那段重建不出脚注,
         但**不因此判定缓存失效**:为一个附带文件让整本重新上传、重新计费不划算。
+
+        另一个老缓存问题:PaddleOCR 在 v0.6.2 之前不写页码注释,页覆盖校验对这条
+        链路是空的。这里用旧 `content_list` 里 `page_break` 块的 offset 补上页码注释
+        (并平移 offset),不必重新 OCR 也能恢复页覆盖与页级归属。
         """
         md_text = store.md_path(self.PART_ID).read_text(encoding="utf-8", errors="replace")
         path = store.dir_for(self.PART_ID) / CONTENT_LIST_FILE
         if not path.is_file():
             return md_text, {}
-        md_text, stats = reconstruct_footnotes_in(md_text, load_content_list(path))
+        blocks = load_content_list(path)
+        md_text, blocks = ensure_page_marks(md_text, blocks)
+        md_text, stats = reconstruct_footnotes_in(md_text, blocks)
         if stats.get("notes"):
             print(f"[paddleocr] 脚注: 结构化结果 {stats['notes']} 条 → "
                   f"关联 {stats['linked']} 条 (high {stats['high']} / "
@@ -381,7 +416,10 @@ class PaddleOCRAdapter(Backend):
             task_id=None,
             stats={"chars": len(md_text),
                    "images": sum(1 for _ in images_abs.iterdir()),
-                   "model": MODEL, "total_pages": None, "cached": True, **fn_stats},
+                   "model": MODEL, "total_pages": None,
+                   # cached:本次没有提交/轮询云端任务 —— 上层发 reuse 事件,
+                   # 让界面能解释「为什么几百页的书两秒就完成了」。
+                   "cached": True, "parts": 1, "reused_parts": 1, **fn_stats},
         )
 
     def _probe(self, job_id: str) -> dict | None:
@@ -463,10 +501,15 @@ class PaddleOCRAdapter(Backend):
                     retryable=False,
                     category="cloud",
                 )
-            progress = data.get("extractProgress") or {}
+            # 页级进度必须走**结构化事件**:桌面端的进度条只认 `progress` 事件里的
+            # current/total,光打印中文日志等于没报进度 —— 界面会一直显示 0/总页数。
+            # 与 MinerU 的 `events.progress("extract", ..., detail="mineru")` 同一约定。
+            pages = extract_progress(data)
             detail = ""
-            if progress:
-                detail = f" ({progress.get('extractedPages')}/{progress.get('totalPages')} 页)"
+            if pages:
+                extracted, total = pages
+                detail = f" ({extracted}/{total} 页)"
+                events.progress("extract", extracted, total, detail="paddleocr")
             print(f"[paddleocr] {STATE_LABELS.get(state, state)}{detail} ...")
             time.sleep(self.poll_interval)
         # 超时可重试:jobId 还在缓存里,重跑继续轮询同一个任务,不重新上传
@@ -549,13 +592,22 @@ class PaddleOCRAdapter(Backend):
                     page_indices.append(page_idx - 1)
 
         # 逐页拼接,同时记下每页的起始偏移 → 作为「页边界」块交给脚注层,
-        # 页归属不再靠文本对齐去猜(重复页眉/页脚会把它带偏)
+        # 页归属不再靠文本对齐去猜(重复页眉/页脚会把它带偏)。
+        #
+        # 每页还写一条页码注释(`<!-- page N -->`):内容对照的**页覆盖**只认它
+        # (实测 PaddleOCR 书 `content_covered_pages=0`,页覆盖校验整条空转),
+        # IR 的页归属与人工在 book.md 里按页定位也都靠它。空页同样写标记 ——
+        # 否则「这页没识别出文字」会被误算成「这页不存在」。
         md_text = ""
-        for page, part in zip(page_indices, pages_md, strict=False):
+        by_page = dict(zip(page_indices, pages_md, strict=False))
+        for page in range(page_idx):
+            part = by_page.get(page, "")
             if md_text:
                 md_text += "\n\n"
             blocks.append({"type": PAGE_BREAK_TYPE, "page_idx": page, "offset": len(md_text)})
-            md_text += part
+            md_text += page_marker([page + 1])
+            if part:
+                md_text += "\n\n" + part
 
         # **空结果绝不能当成功**:结果地址失效 / 代理返回 HTML 错误页 / 响应被截断时,
         # 每一行都解析失败,上面会一路 continue 到「0 页内容」。若照旧写出空 book.md 并

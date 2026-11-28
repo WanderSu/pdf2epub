@@ -18,12 +18,19 @@ EPUB 由它生成。所以「Markdown 引用 87 张图、EPUB 里只有 12 张�
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from pdf2epub.epub.verify import VerifyResult, verify_epub
-from pdf2epub.page_result import page_marks
+from pdf2epub.page_result import page_marks, parse_pages
 #: Markdown 图片引用:![alt](路径) —— 只取文件名去重(不同目录同名视为同一张)
 IMG_RE = re.compile(r"!\[[^\]]*\]\(([^)\s]+)")
+#: 原始 HTML 图片引用:`<img src="images/x.jpg">`。云端 OCR(MinerU / PaddleOCR-VL)的
+#: 图片框就是这种形态 —— 只数 `![]()` 会把「明明引用着、只是写成 HTML」的图算成不存在,
+#: 内容对照于是报「EPUB 图片多于 Markdown 引用」(实测《夜行货车》2 张 vs 0 张),
+#: 反过来在真丢图时又会把源侧也数成 0、永远不报 `content_images_lost`。
+IMG_HTML_SRC_RE = re.compile(
+    r"""<img\b[^>]*?\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s"'>]+))""", re.I)
 #: 行间公式:$$ … $$ / \[ … \]
 DISPLAY_MATH_RE = re.compile(r"\$\$.+?\$\$|\\\[.+?\\\]", re.S)
 #: 行内公式:`$ … $`。**必须按 pandoc 的定界规则**,否则会把根本不是公式的东西数进来:
@@ -43,6 +50,16 @@ TRAILING_BREAK_RE = re.compile(r"\S {2,}\n(?=\S)")
 RAW_BR_RE = re.compile(r"<br\b[^>]*>", re.I)
 #: 原始 HTML 图片(`<img src=…>`):产物里没有可见文字,统计正文时一并剥掉
 IMG_HTML_RE = re.compile(r"<img\b[^>]*>", re.I)
+#: 页注释(用于按页切分做「页级质量检查」;与 page_result.PAGE_MARK_RE 同一语法)
+#: **不能带捕获组**:re.split 会把捕获组也塞进结果,切出来的段落就不是纯文本了。
+PAGE_MARK_SPLIT_RE = re.compile(
+    r"<!--\s*page\s+[\d,\s-]+?(?:\s+[A-Za-z_]+)?\s*-->")
+#: 整条 Markdown 图片语法(含右括号)—— 页级统计要把图片占位彻底删掉
+#: (``IMG_RE`` 只匹配到路径,替换后会留一个 ``)``)
+IMG_FULL_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+#: 页内文字少于此数(非空白字符)记「短页」—— 扫描书里的图版页很常见,只统计不告警
+SHORT_PAGE_CHARS = 50
+
 #: 表格分隔行(`|---|:--:|`)—— 出现一次就是一张表
 TABLE_SEP_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$", re.M)
 #: 围栏代码块的开合行(成对出现 → 块数 = 行数 // 2)
@@ -67,8 +84,16 @@ BREAK_KEEP_RATIO = 0.9
 
 
 def markdown_images(md: str) -> set[str]:
-    """Markdown 引用的图片文件名集合(去重)。"""
-    return {ref.split("/")[-1].split("\\")[-1] for ref in IMG_RE.findall(md)}
+    """Markdown 引用的图片文件名集合(去重)。
+
+    两种引用语法都要认:``![alt](path)`` 与原始 HTML ``<img src=…>``。后者不是边缘
+    情况 —— 云端 OCR 的图片框全都长这样,漏掉它会让内容对照在「图片」这一项上既
+    误报(EPUB 比「源」多)又漏报(真丢图时源侧也是 0)。
+    """
+    refs = list(IMG_RE.findall(md))
+    for groups in IMG_HTML_SRC_RE.findall(md):
+        refs.extend(g for g in groups if g)
+    return {ref.split("/")[-1].split("\\")[-1] for ref in refs}
 
 
 def markdown_math_count(md: str) -> int:
@@ -139,6 +164,52 @@ def covered_pages(md: str) -> int:
     return len(pages)
 
 
+@dataclass(frozen=True)
+class PageQuality:
+    """按页注释切出来的页级统计(供报告与「空白页」告警)。"""
+
+    pages: int
+    blank: tuple[int, ...]
+    image_only: tuple[int, ...]
+    short: tuple[int, ...]
+
+
+def page_quality(md: str) -> PageQuality:
+    """按页注释做页级质量检查:空白页 / 纯图片页 / 短页。
+
+    为什么需要它:整体字符数对得上,不代表每页都好 —— 一页只识别出页码、一页
+    整页漏字,总量可能仍然是 96%。这里逐页看**文字量与图片数**,把「空页」交给人
+    复核(扫描书的图版页天然没字,所以「纯图片页」只统计、不告警)。
+    多页合并成一条注释(`<!-- page 2,4 ocr -->`)的段落无法逐页判断,跳过。
+    """
+    groups = page_marks(md)
+    if not groups:
+        return PageQuality(0, (), (), ())
+    segments = PAGE_MARK_SPLIT_RE.split(md)
+    # split 的第一个元素是第一条注释**之前**的内容(卷首),不属于任何一页
+    bodies = segments[1:]
+    blank: list[int] = []
+    image_only: list[int] = []
+    short: list[int] = []
+    pages = 0
+    for group, body in zip(groups, bodies):
+        pages += len(group)
+        if len(group) != 1:                 # 多页合并:没法逐页判断
+            continue
+        page = group[0]
+        text = IMG_HTML_RE.sub("", body)
+        text = IMG_FULL_RE.sub("", text)
+        chars = len(re.sub(r"\s+", "", re.sub(r"[#>*_`|\-]", "", text)))
+        images = len(IMG_RE.findall(body)) + len(IMG_HTML_SRC_RE.findall(body))
+        if chars == 0 and images == 0:
+            blank.append(page)
+        elif chars == 0:
+            image_only.append(page)
+        elif chars < SHORT_PAGE_CHARS:
+            short.append(page)
+    return PageQuality(pages, tuple(blank), tuple(image_only), tuple(short))
+
+
 def verify_content(
     markdown_path: str | Path,
     epub_path: str | Path,
@@ -192,6 +263,7 @@ def verify_content(
     md_links = markdown_link_count(md)
     epub_links = structure.stats.get("links", 0)
     pages = covered_pages(md)
+    quality = page_quality(md)
 
     result.stats.update({
         "content_md_images": len(md_images),
@@ -213,6 +285,10 @@ def verify_content(
         "content_md_links": md_links,
         "content_epub_links": epub_links,
         "content_covered_pages": pages,
+        "content_pages_blank": len(quality.blank),
+        "content_pages_image_only": len(quality.image_only),
+        "content_pages_short": len(quality.short),
+        "content_pages_blank_list": ",".join(str(p) for p in quality.blank[:20]),
     })
 
     # ---- 图片:少一张都是内容丢失(EPUB 多出来的通常是封面) ----
@@ -281,6 +357,14 @@ def verify_content(
                     f"链接全部丢失: Markdown 有 {md_links} 个链接,EPUB 内没有任何 <a href>")
 
     # ---- 页覆盖:只有 Markdown 带页码注释时才有意义(hybrid / 扫描分片) ----
+    if quality.blank:
+        threshold = max(3, int(quality.pages * 0.05))
+        if len(quality.blank) >= threshold:
+            sample = "、".join(str(p) for p in quality.blank[:8])
+            result.warn(
+                "content_pages_blank",
+                f"疑似空白页 {len(quality.blank)}/{quality.pages} 页(如 {sample}),建议人工复核",
+            )
     if expected_pages and pages and pages < expected_pages * PAGE_COVER_RATIO:
         result.warn("content_page_coverage",
                     f"页覆盖不足: 原始 PDF {expected_pages} 页,Markdown 页码注释只覆盖 {pages} 页")

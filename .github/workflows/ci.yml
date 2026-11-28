@@ -37,7 +37,7 @@ env:
 # 因此两个 job 必须「永远运行并上报 success」：省时间靠「步骤按范围跳过」，
 # 不能靠 paths-ignore 让 workflow 不触发，也不能靠 skip 掉整个 job —— 那会让
 # context 永不上报，PR 永久 pending（271ee2f 加 paths-ignore 后 4 分钟被 revert
-# 就是这个原因）。判定逻辑见 scripts/ci_scope.py，矩阵见 work/ci-scenario-analysis.md。
+# 就是这个原因）。判定逻辑见 scripts/ci_scope.py，矩阵见 docs/ci-scenarios.md。
 # ---------------------------------------------------------------------------
 jobs:
   engine:
@@ -214,7 +214,7 @@ jobs:
         with:
           workspaces: desktop/src-tauri
 
-      # 不产安装包：只验证壳能编译（体积小、不需要签名）
+      # 壳只做 --no-bundle 构建（体积小）；安装包在下方由 NSIS 单独编（见「发布包与安装包」）
       # 用 npx 直调 tauri CLI：`npm run tauri build -- --no-bundle` 会被 npm 当成
       # 自身配置项解析（EUNKNOWNCONFIG），构建根本不会开始
       - name: 桌面壳构建
@@ -248,3 +248,26 @@ jobs:
           ./smoke_pkg/cli/cli.exe --help
           ./smoke_pkg/cli/cli.exe smoke.pdf -o smoke_out
           uv run python scripts/verify_epub.py smoke_out/smoke.epub
+
+      # 安装包是「常规软件安装流程」的交付物:CI 里真的编一遍,而不是只在本地验证。
+      # staging 用 dist_ci/cli(--cli-dir):本地脚本默认读 dist_cli/,CI 的
+      # PyInstaller 落在 dist_ci/。
+      - name: 发布包与安装包(NSIS)
+        if: steps.scope.outputs.release == 'true'
+        shell: pwsh
+        run: |
+          $ver = uv run python -c "import tomllib,pathlib;print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])"
+          Write-Host "版本: $ver"
+          uv run python scripts/build_release.py $ver --skip-build --cli-dir dist_ci/cli
+          uv run python scripts/build_installer.py $ver
+          Get-ChildItem dist_release -Filter "*setup.exe" | Select-Object Name,Length
+
+      - name: 上传安装包与发布包
+        if: steps.scope.outputs.release == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf2epub-installer
+          path: |
+            dist_release/pdf2epub-*-setup.exe
+            dist_release/pdf2epub-*-win-x64.zip
+          if-no-files-found: error

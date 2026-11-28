@@ -323,6 +323,37 @@ def _structural_self_evidence(patch: Patch, block: Block) -> bool:
     return bool(ev.matched.strip()) and ev.matched.strip() == block.text.strip()
 
 
+def _fold_ws(text: str) -> str:
+    return "".join(text.split())
+
+
+def _merge_consistency_evidence(records: list[Patch], patch: Patch, block: Block) -> bool:
+    """拼接删除的合法性:被删块确实是「刚被合并进上一块」的那一段。
+
+    为什么需要它:逐页 OCR 的书里,跨页段落被拆成两段,证据层**没有**覆盖整段的
+    结构块(每页各一段),`evidence.sufficient` 永远 False —— 这些拼接此前只能停在
+    suggested,段落于是长期是碎的。判据换成**合并本身的一致性**:
+
+    1. 这条 ``delete_block`` 来自 ``join_lines``,且依赖一条已应用的 ``replace_text``;
+    2. 依赖的 ``after`` 以依赖的 ``before`` 开头(即:只在末尾追加,没有重写原文);
+    3. 被删块的文本确实出现在追加的那段里。
+
+    「该不该拼」仍由规则层的文本判据负责(无句末标点 / 非块首 / 非目录 / 非诗行…);
+    这里只保证「删掉的就是刚拼进去的那段」,不会删到别的块。
+    """
+    if patch.rule_id != "join_lines" or patch.operation != "delete_block":
+        return False
+    dep = next((p for p in records if p.patch_id == patch.depends_on), None)
+    if dep is None or dep.operation != "replace_text" or dep.after is None:
+        return False
+    before = _fold_ws(dep.before.text)
+    joined = _fold_ws(dep.after.text)
+    piece = _fold_ws(block.text)
+    if not piece or not joined.startswith(before):
+        return False
+    return piece in joined[len(before):]
+
+
 def _content_gone(ir: BookIR, patch: Patch) -> bool:
     """被删的那块是不是真的不在了(同正文 + 同块间空行的可编辑块一个都没有)。
 
@@ -507,7 +538,8 @@ def apply_patches(ir: BookIR, patches: Sequence[Patch], *, engine: str = "ir",
             ))
             continue
         if patch.destructive and not patch.evidence.sufficient \
-                and not _structural_self_evidence(patch, block):
+                and not _structural_self_evidence(patch, block) \
+                and not _merge_consistency_evidence(records, patch, block):
             records.append(_suggested(
                 patch, "evidence_insufficient",
                 f"{patch.operation} 缺少可用证据(需结构块/几何证据、"

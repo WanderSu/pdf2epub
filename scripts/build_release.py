@@ -108,9 +108,16 @@ def build_shell() -> Path:
     return shell_exe()
 
 
-def stage(version: str, skip_build: bool) -> Path:
-    """把产物收集到 dist_release/v<版本>/ 下。"""
-    cli_exe = (DIST_CLI / CLI_DIR_NAME / CLI_EXE_NAME) if skip_build else build_cli()
+def stage(version: str, skip_build: bool, cli_dir: Path | None = None) -> Path:
+    """把产物收集到 dist_release/v<版本>/ 下。
+
+    ``cli_dir`` 可指定另一份已构建好的 cli/ 目录(CI 里 PyInstaller 落在
+    ``dist_ci/cli``,与本地 ``dist_cli/cli`` 不同);默认用 DIST_CLI。
+    """
+    if cli_dir is not None:
+        cli_exe = (Path(cli_dir) / CLI_EXE_NAME) if skip_build else build_cli()
+    else:
+        cli_exe = (DIST_CLI / CLI_DIR_NAME / CLI_EXE_NAME) if skip_build else build_cli()
     shell = shell_exe() if skip_build else build_shell()
     for exe in (cli_exe, shell):
         if not exe.exists():
@@ -163,6 +170,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("version", help="版本号,如 0.2.4")
     parser.add_argument("--skip-build", action="store_true",
                         help="复用现有 dist_cli/cli.exe 与桌面 release exe,只重新打包")
+    parser.add_argument("--cli-dir", default=None,
+                        help="复用另一份已构建的 cli/ 目录(CI 用 dist_ci/cli)")
     parser.add_argument("--no-check", action="store_true", help="跳过发布包自检")
     args = parser.parse_args(argv)
 
@@ -178,7 +187,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     # 走到这里说明每一处都等于目标版本(否则 mismatched 一定非空),一致性自明
 
-    staging = stage(args.version, args.skip_build)
+    staging = stage(args.version, args.skip_build, args.cli_dir)
     zip_path = make_zip(staging, args.version)
     size_mb = zip_path.stat().st_size / 1024 / 1024
     print(f"\n发布包: {zip_path}  ({size_mb:.1f} MB)")

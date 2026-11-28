@@ -38,8 +38,8 @@ PANDOC = "pandoc"
 #: 环境缺失时的提示(装完 pandoc 需要重开终端/桌面端才会进 PATH)
 MISSING_PANDOC_HINT = (
     "未找到 pandoc(生成 EPUB 的必需组件):请安装 pandoc 并确保它在 PATH 中"
-    "(Windows 上装完需要重开终端或桌面端),或把 pandoc.exe 放进安装目录的 "
-    "pandoc/ 子目录,然后重跑"
+    "(Windows 上装完需要重开终端或桌面端),或把 pandoc.exe 放进 "
+    "%LOCALAPPDATA%\\pdf2epub\\pandoc\\ 子目录(桌面端「首启下载」就装在这里),然后重跑"
 )
 
 
@@ -67,16 +67,21 @@ def _pandoc_candidates() -> list[str]:
 
     查找顺序(命中即止,`pandoc_available` 与真正执行共用同一条链,
     避免「探测到了、执行时却找不到」):
-      1. 环境变量 PDF2EPUB_PANDOC(显式覆盖,测试/高级用户用)
-      2. exe 同级 pandoc/(旧绿色版:cli.exe 与 pandoc/ 平级)
-      3. exe 上级 pandoc/(v0.6+ onedir 布局:引擎在 cli/ 里,pandoc/ 在安装根)
-      4. 源码根 pandoc/(开发模式:仓库里放了就能用)
-      5. PATH(shutil.which)
+      1. 环境变量 PDF2EPUB_PANDOC(显式覆盖,桌面端首启下载后就是用它)
+      2. **数据根 pandoc/**(`%LOCALAPPDATA%\\pdf2epub\\pandoc\\`):v0.7 起首启下载
+         的目标位置;装到 Program Files 后安装目录只读,内置 pandoc 只能放这里
+      3. exe 同级 pandoc/(旧绿色版:cli.exe 与 pandoc/ 平级)
+      4. exe 上级 pandoc/(v0.6+ onedir 布局:引擎在 cli/ 里,pandoc/ 在安装根)
+      5. 源码根 pandoc/(开发模式:仓库里放了就能用)
+      6. PATH(shutil.which)
     """
     candidates: list[str] = []
     env = os.environ.get("PDF2EPUB_PANDOC")
     if env:
         candidates.append(env)
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        candidates.append(str(Path(local) / "pdf2epub" / "pandoc" / PANDOC_EXE))
     exe = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else None
     if exe is not None:
         candidates.append(str(exe / "pandoc" / PANDOC_EXE))
@@ -476,43 +481,49 @@ _TOC_NAV_RE = re.compile(
     r'(<nav\b[^>]*epub:type="toc"[^>]*>)(.*?)(</nav>)', re.S)
 
 
+#: 目录页去编号用的 CSS。**不能把 <ol> 换成 <ul>**:EPUB 3 规范要求
+#: `nav[epub:type="toc"]` 里是 `ol`(EPUBCheck 会报 RSC-005「element "nav" incomplete;
+#: missing required element "ol"」),而阅读器又会把 `ol` 渲染成 1./2./3.。
+#: 正解是保留 `ol`、用 CSS 去掉编号(见 `unnumber_toc`)。
+TOC_NUMBER_CSS = (
+    "nav#toc ol.toc, nav#toc ol.toc ol { list-style: none; margin: 0; "
+    "padding-left: 1.4em; }"
+)
+
+
 def unnumber_toc(epub_path: str | Path) -> int:
-    """把 nav.xhtml 的目录列表从 ``<ol>`` 换成 ``<ul>``,去掉 1./2./3. 数字序号。
+    """用 CSS 去掉 nav.xhtml 目录列表的 1./2./3. 编号,**保留 ``<ol>``**。
 
-    pandoc 的 epub3 writer 把目录写成嵌套的 ``<ol class="toc">``,阅读器按有序
-    列表渲染成「1. 六月里的玫瑰花 / 1.1 疲倦的月亮 …」。章节层级靠嵌套缩进
-    就足够,数字序号既多余又容易和书里自己排的小节号(``1 麦园``)打架。换成
-    ``<ul>`` 后由阅读器给一个圆点标识 —— 有标识、无编号。
+    pandoc 的 epub3 writer 把目录写成嵌套的 ``<ol class="toc">``,阅读器按有序列表
+    渲染成「1. 六月里的玫瑰花 / 1.1 疲倦的月亮 …」。章节层级靠嵌套缩进就够,数字
+    既多余又容易和书里自己排的小节号(``1 麦园``)打架。
 
-    只在 ``epub:type="toc"`` 的 nav 内部替换,且该块里 ``<ol>`` 与 ``</ol>``
-    必须严格配对(否则说明混着别的列表,宁可不动也不配错标签);landmarks 导航、
-    正文与脚注里的有序列表一个都不碰。
+    旧实现把 ``<ol>`` 换成 ``<ul>``:数字确实没了,但 **EPUB 3 规定 toc 导航里必须是
+    ``ol``** —— EPUBCheck 对每一本产物都报两条 `RSC-005`,整批书不合规。现在改成
+    往 nav.xhtml 的 ``<head>`` 里注入一条 inline ``<style>``,标签一个字节不动。
+
+    只在 ``epub:type="toc"`` 的 nav 存在时动手;返回被处理的目录列表数(幂等)。
     """
-    opens = '<ol class="toc">'
-
     def transform(name: str, data: bytes) -> tuple[bytes, int]:
         if not name.endswith("nav.xhtml"):
             return data, 0
         text = data.decode("utf-8", errors="replace")
-        if opens not in text:
-            return data, 0                       # 已经是 <ul> / 不是 pandoc 目录
-        changed = 0
-
-        def fix(match: re.Match[str]) -> str:
-            nonlocal changed
-            head, body, tail = match.group(1), match.group(2), match.group(3)
-            n_list = body.count(opens)
-            if not n_list:
-                return match.group(0)
-            if (len(re.findall(r"<ol\b", body)) != n_list
-                    or body.count("</ol>") != n_list):
-                return match.group(0)            # 目录块里混着别的 <ol>,不冒险
-            body = body.replace(opens, '<ul class="toc">').replace("</ol>", "</ul>")
-            changed += n_list
-            return head + body + tail
-
-        cleaned = _TOC_NAV_RE.sub(fix, text)
-        return cleaned.encode("utf-8"), changed
+        match = _TOC_NAV_RE.search(text)
+        if match is None:
+            return data, 0                       # 没有目录导航,不动
+        if TOC_NUMBER_CSS in text:
+            return data, 0                       # 幂等:样式已经在了
+        body = match.group(2)
+        count = max(1, body.count('<ol class="toc">'))
+        style = f"<style>{TOC_NUMBER_CSS}</style>"
+        if "<style>" in text:
+            # pandoc 的 nav.xhtml 自带一个空 <style>,直接填进去(不新增元素)
+            text = text.replace("<style>", f"<style>{TOC_NUMBER_CSS}", 1)
+        elif "</head>" in text:
+            text = text.replace("</head>", f"  {style}\n</head>", 1)
+        else:
+            return data, 0                       # 结构不认识:宁可不动
+        return text.encode("utf-8"), count
 
     return _rewrite_zip(Path(epub_path), transform)
 
