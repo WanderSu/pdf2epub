@@ -5,7 +5,7 @@ description = "PDF → EPUB 电子书转换工具(统一输出高质量 EPUB)"
 requires-python = ">=3.12"
 dependencies = [
     "pymupdf4llm>=1.28.2",
-    "pyyaml>=6.0.3",
+    "pyyaml>=6.0.4",
     "requests>=2.34.2",
 ]
 
@@ -25,7 +25,7 @@ packages = ["src/pdf2epub"]
 
 [dependency-groups]
 dev = [
-    "pytest>=9.1.1",
+    "pytest>=9.2.0",
     # 钉死版本：CI 用 uv run ruff check，不再用浮动的 uvx ruff check
     #（上游发新版规则会让与改动无关的 PR 突然变红）
     "ruff==0.17.6",
