@@ -107,6 +107,10 @@ def test_tighten_windows_removes_inherited_acls(tmp_path: Path) -> None:
     assert "authenticated users" not in acl
     # 加固不影响本机读取
     assert key.read_text(encoding="utf-8") == '{"MinerU": "t"}'
+    # 属主仍能改名/删除:只给 (R,W) 会让用户自己都删不掉这份凭证
+    moved = key.with_name("apikey.moved.json")
+    key.rename(moved)
+    moved.unlink()
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX 权限位路径")
@@ -201,3 +205,18 @@ def test_api_key_found_in_install_root_for_onedir(tmp_path: Path, monkeypatch) -
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "executable", str(exe_dir / "cli.exe"))
     assert paths.api_key_file() == key
+
+def test_api_key_found_in_the_desktop_data_dir(tmp_path: Path, monkeypatch) -> None:
+    """新布局:壳把凭证写在用户数据目录,引擎必须能读到(装到 Program Files 时 cwd 是只读安装根)。"""
+    monkeypatch.delenv("PDF2EPUB_HOME", raising=False)
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    data = tmp_path / "data"
+    data.mkdir()
+    key = data / "apikey.json"
+    key.write_text('{"PaddleOCR-VL": "token-from-data"}', encoding="utf-8")
+    work = tmp_path / "cwd"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    monkeypatch.setenv("PDF2EPUB_DATA", str(data))
+    assert paths.api_key_file() == key
+    assert paths.load_api_key("PaddleOCR-VL") == "token-from-data"

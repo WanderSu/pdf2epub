@@ -103,6 +103,8 @@ export interface EventState {
   retrying?: RetryInfo | null;
   /** 终态一:本次**什么都没做**(产物早已存在)—— 不是「完成」 */
   skipped?: boolean;
+  /** 本次没有重新 OCR:直接复用了已落盘(已计费)的云端解析结果(引擎 `reuse`) */
+  reused?: boolean;
   /** 终态二:本次跑完了整条链路 */
   done: boolean;
   /** 已展示过的最高进度:进度条**只许前进**,否则用户会以为回滚了 */
@@ -245,6 +247,17 @@ function applyEvent(state: EventState, ev: EngineEvent): EventState {
       const total = num(ev["total"]);
       return total > 1 ? { ...st, signatures: { current: 0, total } } : st;
     }
+    case "reuse": {
+      //  复用已落盘的云端解析结果 = 本次没有 OCR、也没有新的页级进度。
+      //  只把「页数」与「复用」事实记下来,让界面能解释「为什么几百页两秒完成」;
+      //  不伪造进度(current/total)——编出来的数字比没有更糟。
+      return {
+        ...st,
+        reused: true,
+        pages: num(ev["pages"], st.pages ?? 0),
+        backend: backendLabel(str(ev["backend"])) ?? st.backend,
+      };
+    }
     case "verify":
       return {
         ...st,
@@ -294,7 +307,13 @@ function applyEvent(state: EventState, ev: EngineEvent): EventState {
     }
     case "complete": {
       const finished = STAGE_KEYS.reduce<EventState>((acc, key) => markStages(acc, key, "done"), st);
-      return { ...finished, active: null, detail: undefined, done: true, skipped: false };
+      //  complete.cached:引擎在终态里再确认一次「本次没有重新 OCR」。
+      //  没有 reuse 事件的老版引擎/被截断的流也能据此显示正确的说明。
+      const cached = ev["cached"] === true;
+      return {
+        ...finished, active: null, detail: undefined, done: true, skipped: false,
+        reused: cached ? true : finished.reused,
+      };
     }
     default:
       return st;

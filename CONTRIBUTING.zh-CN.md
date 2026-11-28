@@ -44,6 +44,10 @@ cd desktop/src-tauri && cargo test --locked
 PDF2EPUB_LIVE_OCR=1 uv run pytest -q tests/test_live_ocr_footnotes.py
 ```
 
+**构建桌面壳只走 tauri CLI**(`cd desktop && npx tauri build --no-bundle`,或者
+`uv run python scripts/build_release.py <版本>`)。直接 `cargo build --release` 出来的 exe
+**没有内嵌前端**(少了 custom-protocol 那一步),装上去是白窗口 —— 本地验证过,别再用它出包。
+
 新增网络、缓存、解压相关逻辑时,**必须补异常、超时、重试与体积上限的用例** ——
 这些路径出了问题不会报错,只会静默产出坏书或重复扣费。
 
@@ -89,7 +93,14 @@ Windows 发布形态两条流水线)。
 uv run python scripts/bump_version.py <版本>
 uv run python scripts/build_release.py <版本>
 uv run python scripts/check_release.py dist_release/<版本>
-gh release create v<版本> <zip> --notes-file <notes>
+uv run python scripts/build_installer.py <版本> --verify-install
+gh release create v<版本> \
+  dist_release/pdf2epub-v<版本>-win-x64.zip \
+  dist_release/pdf2epub-v<版本>-win-x64-setup.exe --notes-file <notes>
 ```
+
+安装包(per-user、不弹 UAC)是 Windows 用户的默认下载;zip 留给绿色版。CI 在发布范围
+被触发时会同时编出两者并作为 `pdf2epub-installer` artifact 上传 —— 安装包坏了在 CI
+就红,不会拖到发版。
 
 发布前确认 zip 里没有 `apikey.json`、`work/`、`output/`、`logs/` 与本机路径。

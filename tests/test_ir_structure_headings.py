@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from pdf2epub.ir.parse import parse_evidence
 from pdf2epub.ir.structure import restore_headings
+
 TOC = """\
 目录
 
@@ -327,6 +328,126 @@ def test_toc_is_authority_for_non_listed_headings() -> None:
     heads = [ln for ln in md.split("\n") if ln.startswith("#")]
     assert "## 別处的短篇" in heads
     assert "# 別处的短篇" not in heads
+
+
+# ---------------------------------------------------------------- 目录行「标题 作者」弱形式
+#
+# 实测《黑暗之魂：韩国分断小说选》:目录印「最后的牧人 玄基荣 / 001」,标题与作者之间
+# 只有一个空格。弱形式解析**切不开**它(和「第一章 绪论 35」形态完全一样,硬切会造出
+# 「标题=第一章、作者=绪论」),于是 toc key 带着作者;证据层里后端明明标了
+# heading「最后的牧人」,却因为 key 不等于目录 key 被「目录权威」过滤掉,正文里独立成段
+# 的篇名也因为 key 配不上而提不起来 —— 8 篇小说的短篇集只剩 3 章,其中一章 18 万字。
+#
+# 判据必须是**硬证据**:短标题在证据层里是标题,或正文里有独立成段的一行。
+
+_AUTHOR_INLINE_TOC = """\
+走在历史的前面(代序) / 001
+最后的牧人 玄基荣 / 001
+烧纸 李沧东 / 020
+译后记 / 287
+"""
+
+_BODY_1 = "小说正文第一段,内容足够长,前二十四个字要够长才能当锚点用。"
+_BODY_2 = "第二篇小说正文,同样足够长,前二十四个字也要够长才行。"
+_BIO_1 = "玄基荣,韩国著名小说家,这段简介足够长,可以当锚点用。"
+_BIO_2 = "李沧东,韩国小说家,这段简介足够长,也可以当锚点用。"
+
+MD_AUTHOR_INLINE = f"""\
+# 书名
+
+目次
+
+{_AUTHOR_INLINE_TOC}
+# 走在历史的前面(代序)
+
+代序正文足够长,前二十四个字要够长才能当锚点用。
+
+最后的牧人
+
+![](images/a.jpg)
+
+{_BIO_1}
+
+{_BODY_1}
+
+烧纸
+
+{_BIO_2}
+
+{_BODY_2}
+
+# 译后记
+
+译后记正文足够长,前二十四个字要够长才能当锚点用。
+"""
+
+
+def _run_author_inline(md: str = MD_AUTHOR_INLINE):
+    rows = _evidence(
+        ("header", "走在历史的前面", 0),
+        ("text", "代序正文足够长,前二十四个字要够长才能当锚点用。", 0),
+        ("heading", "最后的牧人", 3),
+        ("text", "![]", 3),
+        ("text", _BIO_1, 3),
+        ("text", _BODY_1, 3),
+        ("heading", "烧纸", 22),
+        ("text", _BIO_2, 22),
+        ("text", _BODY_2, 22),
+        ("header", "译后记", 300),
+    )
+    ev = parse_evidence(rows, backend="mineru", part_id="book")
+    return restore_headings(md, ev)
+
+
+def test_toc_author_inline_is_stripped_using_evidence() -> None:
+    """目录把作者并进标题时,用证据里真正存在的短标题剥掉作者,章才补得回来。"""
+    md, notes = _run_author_inline()
+    heads = [ln for ln in md.split("\n") if ln.startswith("#")]
+    assert "# 最后的牧人" in heads, heads
+    assert "# 烧纸" in heads, heads
+    # 剥掉作者后不再报「找不到落点」
+    assert not any("找不到落点" in n for n in notes), notes
+
+
+def test_promoted_title_is_not_left_as_a_duplicate_paragraph() -> None:
+    """正文里已经独立成段的篇名 → 就地升成标题,不再插一个同名标题。"""
+    md, _ = _run_author_inline()
+    assert md.count("最后的牧人") == 2, "目录一条 + 标题一条,正文里不能再来一条"
+    # 标题在章首配图之前(不是插到简介/正文之后)
+    assert "# 最后的牧人\n\n![](images/a.jpg)" in md
+
+
+def test_author_suffix_is_recorded_as_byline() -> None:
+    """剥下来的作者尾巴要记进作者键,署名行判据跟着变准(这里只要求不误升成章)。"""
+    md, _ = _run_author_inline()
+    heads = [ln.lstrip("#").strip() for ln in md.split("\n") if ln.startswith("#")]
+    assert "玄基荣" not in heads and "李沧东" not in heads
+
+
+def test_proven_full_title_is_not_split() -> None:
+    """目录标题本身就能在正文里找到落点时,不做任何收缩(不猜作者列)。"""
+    md_in = """\
+第一章 绪论 / 1
+第二章 本论 / 9
+附录: 附记 / 20
+
+# 第一章 绪论
+
+第一章正文足够长,前二十四个字要够长才能当锚点用。
+
+# 第二章 本论
+
+第二章正文同样足够长,前二十四个字也要够长才行。
+
+# 附录: 附记
+
+附录正文足够长,前二十四个字要够长才能当锚点用。
+"""
+    ev = parse_evidence(_evidence(("text", "与标题无关的一条正文", 0)),
+                        backend="mineru", part_id="book")
+    md, _ = restore_headings(md_in, ev)
+    assert "# 第一章 绪论" in md
+    assert "# 第二章 本论" in md
 
 
 def test_chapter_with_variant_characters_is_adopted_by_toc_order() -> None:
@@ -669,3 +790,149 @@ def test_variant_chapters_adopted_among_many_sections() -> None:
             < md.index("# 路 考") < md.index("# 駿馬飞馳")
             < md.index("# 王林林"))
     assert any("补认 2" in n for n in notes)
+
+
+# ---------------------------------------------------------------- 卷首版式页(目录/CIP/版权)
+#
+# 实测两本书:books/《万延年的足球队》导航里出现「京新登字 101 号」「图书在版编目(CIP)数据」
+# 「目录」三个伪章;《中国共产党历史讲义》的「目录」独占一章 3766 字。它们被后端标成了
+# heading,但都是版式页的标签 —— 不是章。这里只**降级标题**(文字一个字节不动)。
+
+
+def _run_front_labels(md: str):
+    rows = _evidence(
+        ("header", "万延年的足球队", 0),
+        ("heading", "1 死者引导我们", 3),
+        ("text", "第一章正文足够长,前二十四个字要够长才能当锚点用。", 3),
+    )
+    ev = parse_evidence(rows, backend="mineru", part_id="book")
+    return restore_headings(md, ev)
+
+
+def test_front_matter_labels_are_not_chapters() -> None:
+    """目录/CIP/登字/出版信息被标成标题时降回正文,不进导航。"""
+    md_in = """\
+# 万延年的足球队
+
+于长敏 王新新译
+
+# 京新登字 101 号
+
+著作权合同登记号 图字 01—95—152
+
+# 图书在版编目(CIP)数据
+
+ISBN 7-80091-695-2
+
+出版发行：光明日报出版社
+
+# 目录
+
+第一章 甲
+
+# 1 死者引导我们
+
+第一章正文足够长,前二十四个字要够长才能当锚点用。
+"""
+    md, notes = _run_front_labels(md_in)
+    heads = [ln.lstrip("#").strip() for ln in md.split("\n") if ln.startswith("#")]
+    assert "京新登字 101 号" not in heads
+    assert "图书在版编目(CIP)数据" not in heads
+    assert "目录" not in heads
+    # 真章还在
+    assert "1 死者引导我们" in heads
+    # 只降标题、不删文字
+    assert "\n京新登字 101 号\n" in md
+    assert "\n图书在版编目(CIP)数据\n" in md
+    assert any("版式标签" in n for n in notes)
+
+
+def test_front_matter_labels_demoted_even_without_toc() -> None:
+    """目录页本身就解析失败时(没有权威目录),这些伪章也不能留在导航里。"""
+    md_in = """\
+# 书名
+
+# 京新登字 101 号
+
+# 图书在版编目(CIP)数据
+
+# 目录
+
+（这是一页没有页码、解析不出条目的目录）
+
+# 第一章 起头
+
+第一章正文足够长,前二十四个字要够长才能当锚点用。
+"""
+    md, notes = _run_front_labels(md_in)
+    heads = [ln.lstrip("#").strip() for ln in md.split("\n") if ln.startswith("#")]
+    assert "京新登字 101 号" not in heads
+    assert "图书在版编目(CIP)数据" not in heads
+    assert "目录" not in heads
+    assert any("版式标签" in n for n in notes)
+
+# ---------------------------------------------------------------- 年表/日记体的日期标题
+#
+# 实测《万延年的足球队》:「大江健三郎年表简编」之后的 `1935年` / `1955年` 被后端标成
+# heading(text_level=2),结果成了与正文各讲并列的独立章。日期是章内小节,不是章;
+# 但编年体全书都是年份时不能降级(否则整本没有一级标题,pandoc 的章节切分会全塌)。
+
+
+def _run_year_titles(md: str, rows):
+    ev = parse_evidence(rows, backend="mineru", part_id="book")
+    return restore_headings(md, ev)
+
+
+def test_year_headings_become_sections_under_a_chapter() -> None:
+    md_in = """\
+# 大江健三郎年表简编
+
+王中忱
+
+# 1935年
+
+1月31日,出生于日本爱媛县,父大江好太郎。
+
+# 1955年
+
+二十岁,考入东京大学。
+
+# 1 死者引导我们
+
+第一章正文足够长,前二十四个字要够长才能当锚点用。
+"""
+    rows = _evidence(
+        ("header", "大江健三郎年表简编", 372),
+        ("heading", "1935年", 372),
+        ("heading", "1955年", 374),
+        ("heading", "1 死者引导我们", 1),
+        ("text", "第一章正文足够长,前二十四个字要够长才能当锚点用。", 1),
+    )
+    md, notes = _run_year_titles(md_in, rows)
+    assert "# 大江健三郎年表简编" in md          # 真章保持一级
+    lines = md.split("\n")
+    assert "## 1935年" in lines and "# 1935年" not in lines
+    assert "## 1955年" in lines and "# 1955年" not in lines
+    assert any("日期标题" in n for n in notes)
+
+
+def test_all_year_headings_keep_chapter_level() -> None:
+    """编年体:整本书的标题都是年份 → 一个都不降(否则全书没有一级标题)。"""
+    md_in = """\
+# 1990年
+
+第一年正文,内容足够长,前二十四个字要够长才能当锚点用。
+
+# 1991年
+
+第二年正文,同样足够长,前二十四个字也要够长才行。
+"""
+    rows = _evidence(
+        ("heading", "1990年", 0),
+        ("text", "第一年正文,内容足够长,前二十四个字要够长才能当锚点用。", 0),
+        ("heading", "1991年", 1),
+        ("text", "第二年正文,同样足够长,前二十四个字也要够长才行。", 1),
+    )
+    md, _ = _run_year_titles(md_in, rows)
+    assert "# 1990年" in md and "# 1991年" in md
+    assert "## 1990年" not in md

@@ -9,14 +9,21 @@ PaddleOCR 一次提交整本(单 Token、单 job),因此它只有一层段缓存
 """
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 
 import pytest
 
+import pdf2epub.events as events
 from pdf2epub.backends import paddleocr_backend
 from pdf2epub.backends.base import is_retryable
-from pdf2epub.backends.paddleocr_backend import JOBS_URL, PaddleOCRAdapter, PaddleOCRError
+from pdf2epub.backends.paddleocr_backend import (
+    JOBS_URL,
+    PaddleOCRAdapter,
+    PaddleOCRError,
+    extract_progress,
+)
 from conftest import make_pdf
 
 JSONL_URL = "https://result.local/out.jsonl"
@@ -55,12 +62,15 @@ class FakePaddle:
     """假 PaddleOCR:记录提交/轮询/下载次数,状态按脚本给出。"""
 
     def __init__(self, poll_states: list[str] | None = None,
-                 jsonl: str | None = None) -> None:
+                 jsonl: str | None = None,
+                 poll_progress: list[dict] | None = None) -> None:
         self.posts: list[dict] = []
         self.polls = 0
         self.downloads = 0
         self.poll_states = list(poll_states or [])
         self.jsonl = jsonl if jsonl is not None else self._default_jsonl()
+        #: 每个状态依次附带的 `extractProgress`(不足时沿用最后一个,模拟真实云端)
+        self.poll_progress = list(poll_progress or [])
 
     def _next_state(self) -> str:
         """按脚本给状态:列表里只剩一个时**一直**返回它(便于演「永远解析中」)。"""
@@ -88,9 +98,14 @@ class FakePaddle:
     def get(self, url: str, headers: dict | None = None, timeout: int | None = None,
             stream: bool = False) -> FakeResp:
         if url.startswith(f"{JOBS_URL}/"):
+            index = self.polls
             self.polls += 1
             state = self._next_state()
             payload = {"code": 0, "data": {"jobId": url.rsplit("/", 1)[-1], "state": state}}
+            if self.poll_progress:
+                # 第 N 次轮询带第 N 条进度;用完后沿用最后一条(与真实云端同形)
+                payload["data"]["extractProgress"] = self.poll_progress[
+                    min(index, len(self.poll_progress) - 1)]
             if state == "done":
                 payload["data"]["resultUrl"] = {"jsonUrl": JSONL_URL}
             elif state == "failed":
@@ -305,4 +320,102 @@ def test_result_with_zero_pages_is_an_error(tmp_path, monkeypatch) -> None:
     with pytest.raises(PaddleOCRError, match="为空"):
         _adapter().convert(pdf, work)
     assert not (work / "_parts").exists()
+
+
+# ---------------------------------------------------------------- 页级进度事件
+#
+# 被钉住的缺陷:轮询只把「解析中 (3/268 页)」打进中文日志,从不发 `progress` 事件 ——
+# 桌面端进度条只认事件的 current/total,于是整段解析期间一直显示 0/总页数。
+
+
+@pytest.fixture()
+def event_buffer():
+    """开启事件流并把解析出来的事件交回用例(结束时关闭,避免污染别的用例)。"""
+    buf = io.StringIO()
+    events.configure(stream=buf)
+    try:
+        yield buf
+    finally:
+        events.configure(False)
+
+
+def _read_events(buf: io.StringIO, name: str = "progress") -> list[dict]:
+    return [obj for obj in (json.loads(line) for line in buf.getvalue().splitlines() if line.strip())
+            if obj["event"] == name]
+
+
+def test_poll_reports_page_progress_as_events(tmp_path, monkeypatch, event_buffer) -> None:
+    """解析中/排队中都要把云端页数报给事件流,桌面端才能显示「3/268 页」。"""
+    fake = FakePaddle(
+        poll_states=["pending", "running", "running", "done"],
+        poll_progress=[{}, {"totalPages": 268, "extractedPages": 0},
+                       {"totalPages": 268, "extractedPages": 3},
+                       {"totalPages": 268, "extractedPages": 268}],
+    )
+    monkeypatch.setattr(paddleocr_backend, "requests", fake)
+
+    _adapter().convert(make_pdf(tmp_path / "扫描书.pdf", pages=2), tmp_path / "work")
+
+    progress = _read_events(event_buffer)
+    assert [(e["current"], e["total"]) for e in progress] == [(0, 268), (3, 268)]
+    assert all(e["stage"] == "extract" and e["detail"] == "paddleocr" for e in progress)
+
+
+def test_malformed_progress_does_not_break_polling(tmp_path, monkeypatch, event_buffer) -> None:
+    """云端少给/给错进度字段只是少一次进度上报,绝不能让轮询中断。"""
+    fake = FakePaddle(
+        poll_states=["running", "running", "done"],
+        poll_progress=[{"totalPages": None, "extractedPages": 5},
+                       {"totalPages": "abc"},
+                       {}],
+    )
+    monkeypatch.setattr(paddleocr_backend, "requests", fake)
+
+    result = _adapter().convert(make_pdf(tmp_path / "扫描书.pdf", pages=2), tmp_path / "work")
+
+    assert _read_events(event_buffer) == []        # 没有可用页数就不上报
+    assert "第一页" in result.book_md.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("data,expected", [
+    ({"extractProgress": {"totalPages": 10, "extractedPages": 4}}, (4, 10)),
+    ({"extractProgress": {"totalPages": "10", "extractedPages": "4"}}, (4, 10)),
+    ({"extractProgress": {"totalPages": 10, "extractedPages": 99}}, (10, 10)),   # 夹到总数内
+    ({"extractProgress": {"totalPages": 10, "extractedPages": -3}}, (0, 10)),
+    ({"extractProgress": {"totalPages": 0, "extractedPages": 0}}, None),
+    ({"extractProgress": None}, None),
+    ({"extractProgress": "oops"}, None),
+    ({}, None),
+])
+def test_extract_progress_parsing(data, expected) -> None:
+    assert extract_progress(data) == expected
+
+
+# ---------------------------------------------------------------- 页级页码注释
+#
+# 被钉住的缺陷:PaddleOCR 合并出来的 Markdown **没有页码注释**,于是内容对照的
+# 「页覆盖」检查整条空转(`content_covered_pages=0`,既不是 0% 也不是 100%,是
+# 「没法算」)。MinerU 分片有页注释,PaddleOCR 这一路也必须写,空页同样写 ——
+# 否则「这页没识别出文字」会被算成「这页不存在」。
+
+
+def test_every_page_gets_a_page_marker(tmp_path, monkeypatch) -> None:
+    pages = [
+        {"markdown": {"text": "# 第一页\n\n正文一,句号结尾。", "images": {}}},
+        {"markdown": {"text": "", "images": {}}},            # 空白页(OCR 没识别出文字)
+        {"markdown": {"text": "第三页正文,内容足够长。", "images": {}}},
+    ]
+    jsonl = json.dumps({"result": {"layoutParsingResults": pages}}, ensure_ascii=False) + "\n"
+    monkeypatch.setattr(paddleocr_backend, "requests", FakePaddle(jsonl=jsonl))
+
+    result = _adapter().convert(make_pdf(tmp_path / "扫描书.pdf", pages=3),
+                                tmp_path / "work")
+    md = result.book_md.read_text(encoding="utf-8")
+
+    from pdf2epub.epub.content import covered_pages
+    from pdf2epub.page_result import page_marks
+
+    assert page_marks(md) == [[1], [2], [3]]
+    assert covered_pages(md) == 3
+    assert "<!-- page 2 -->" in md, "空白页也要有页注释,否则页覆盖会少算一页"
 

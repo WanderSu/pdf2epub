@@ -67,6 +67,62 @@ def test_markdown_structure_counters() -> None:
     assert markdown_link_count(md) == 1
 
 
+# ---------------------------------------------------------------- HTML 图片引用
+#
+# 云端 OCR(MinerU / PaddleOCR-VL)的图片框是原始 HTML:`<img src="images/x.jpg">`。
+# 只数 `![]()` 会让内容对照在图片这一项上两头都错:正常书报「EPUB 比源多」
+# (实测《夜行货车》2 张 vs 0 张),真丢图时又因为源侧也是 0 而永远不报错。
+
+
+def test_markdown_images_counts_html_img() -> None:
+    md = ('<div style="text-align:center;"><img src="images/a.jpg" alt="Image" /></div>\n\n'
+          "<img src='images/b.jpg'>\n\n"
+          "<img src=images/c.jpg>\n\n"
+          "![普通图](images/d.png)\n")
+    assert markdown_images(md) == {"a.jpg", "b.jpg", "c.jpg", "d.png"}
+
+
+def test_html_only_images_do_not_report_extra(tmp_path: Path) -> None:
+    """HTML 形态引用的图与产物一致时,不许报 `content_images_extra`。"""
+    src = tmp_path / "src"
+    src.mkdir(parents=True, exist_ok=True)
+    write_png(src / "fig.png")
+    body = ('正文段落,句号结尾。\n\n'
+            '<div style="text-align:center;"><img src="fig.png" alt="Image" /></div>')
+    epub = build_epub(src, tmp_path / "html-img.epub", title="样本书",
+                      body=body, with_image=False)
+
+    report = verify_content(src / "book.md", epub)
+
+    codes = {i.code for i in report.issues}
+    assert "content_images_extra" not in codes, [i.message for i in report.issues]
+    assert "content_images_lost" not in codes, [i.message for i in report.issues]
+    assert report.stats["content_md_images"] == report.stats["content_epub_images"] == 1
+
+
+def test_lost_html_images_are_an_error(tmp_path: Path) -> None:
+    """源 Markdown 用 HTML 引用 3 张图、产物里 0 张 → 仍然要报内容丢失。"""
+    src = tmp_path / "src"
+    epub = build_epub(src, tmp_path / "few.epub", title="样本书", with_image=False)
+    md = tmp_path / "book.md"
+    md.write_text("""# 样本书
+
+正文段落,句号结尾。
+
+<div><img src="images/a.png" /></div>
+
+<div><img src="images/b.png" /></div>
+
+<div><img src="images/c.png" /></div>
+""", encoding="utf-8")
+
+    report = verify_content(md, epub)
+
+    assert any(i.code == "content_images_lost" for i in report.errors)
+    assert report.stats["content_md_images"] == 3
+    assert report.stats["content_epub_images"] == 0
+
+
 def test_counters_ignore_code_blocks() -> None:
     """代码块里的 `  ` / `|---|` / `[^1]:` 都是示例文本,不能被当成结构。"""
     md = "```\n第一行  \n| a | b |\n|---|---|\n[^1]: x\n```\n"
@@ -575,3 +631,63 @@ def test_markdown_text_chars_ignores_void_html() -> None:
     assert markdown_text_chars('一二<img src="a.png">三四') == 4
     # 被 pandoc 转义成**文字**的尖括号片段仍然是正文,不能被当成标签剥掉
     assert markdown_text_chars("<repetitio>") == len("<repetitio")
+
+# ---------------------------------------------------------------- 页级质量检查
+# 整体字符数对得上,不代表每页都好:一页只识别出页码、一页整页漏字,总量可能仍有 96%。
+# 这里逐页看文字量与图片数,把「空页」交给人复核;扫描书的图版页天然没字,只统计不告警。
+
+
+def test_page_quality_classifies_blank_image_only_and_short_pages() -> None:
+    from pdf2epub.epub.content import page_quality
+
+    md = """\
+<!-- page 1 -->
+第一页正文内容足够长,长到不会被算成短页;这一页还有更多字用来充数,凑够五十个非空白字符,再补一些字确保超过阈值。
+
+<!-- page 2 -->
+
+<!-- page 3 -->
+![图](images/a.png)
+
+<!-- page 4 -->
+短
+
+<!-- page 5 -->
+第五页正文内容足够长,长到不会被算成短页;这一页还有更多字用来充数,凑够五十个非空白字符,再补一些字确保超过阈值。
+"""
+    q = page_quality(md)
+    assert q.pages == 5
+    assert q.blank == (2,)
+    assert q.image_only == (3,)
+    assert q.short == (4,)
+
+
+def test_page_quality_skips_merged_page_markers() -> None:
+    from pdf2epub.epub.content import page_quality
+
+    md = "<!-- page 2,4 ocr -->\n\n合并页内容\n\n<!-- page 5 -->\n\n第五页内容足够长一些。\n"
+    q = page_quality(md)
+    assert q.pages == 3          # 2、4、5
+    assert q.blank == ()         # 合并页没法逐页判断,不能算空白
+
+
+def test_many_blank_pages_raise_a_warning(tmp_path: Path) -> None:
+    from conftest import build_epub
+    from pdf2epub.epub.content import verify_content
+
+    # 10 页里 4 页空白(阈值 max(3, 5% * 10) = 3)
+    parts = []
+    for page in range(1, 11):
+        body = "" if page in (3, 5, 7, 9) else f"第 {page} 页正文,内容足够长一些。"
+        parts.append(f"<!-- page {page} -->\n\n{body}")
+    md = "\n\n".join(parts) + "\n"
+    src = tmp_path / "src"
+    src.mkdir()
+    epub = build_epub(src, tmp_path / "book.epub", body="")
+    # build_epub 会自己写一份 book.md:先造 EPUB,再覆盖成带页注释的源
+    (src / "book.md").write_text(md, encoding="utf-8")
+    result = verify_content(src / "book.md", epub, expected_pages=10)
+    issues = [i for i in result.issues if i.code == "content_pages_blank"]
+    assert issues and issues[0].level == "warning"
+    assert "4/10" in issues[0].message
+    assert result.stats["content_pages_blank"] == 4

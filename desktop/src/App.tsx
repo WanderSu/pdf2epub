@@ -16,6 +16,7 @@ import { T, type Lang } from "./i18n";
 import {
   KIND_TO_TYPE,
   backendFromPlan,
+  backendToCli,
   baseName,
   baseValue,
   diffCleanOpts,
@@ -25,6 +26,7 @@ import {
   normPath,
   parseTypeFromLine,
   parseWarningFromLine,
+  resolveCliBackend,
   rowBackendValue,
   updateStagesFromLine,
 } from "./format";
@@ -52,6 +54,7 @@ import {
   type PreflightReport,
   type QueueFile,
   type RecentEntry,
+  type ReviewDecision,
   type ReviewRow,
   type ReviewSheet,
   type RowBackend,
@@ -65,7 +68,7 @@ import {
 export default function App({ initial = { file: {}, baseline: {} } }: { initial?: InitialSettings }) {
   //  设置来自 %LOCALAPPDATA%\pdf2epub\settings.json —— main.tsx 在**渲染之前**
   //  就把它读好了(否则会先闪一帧默认主题/语言)。这里只取初值,之后由 persist 落盘。
-  const { file, baseline } = initial;
+  const { file, baseline, dirs } = initial;
   const [screen, setScreen] = useState<Screen>("convert");
   const [darkMode, setDarkMode] = useState<boolean>(file.theme === "dark");
   const [lang, setLang] = useState<Lang>(() => {
@@ -96,7 +99,9 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
   const [batchNotice, setBatchNotice] = useState<PreflightReport | null>(null);
   const [busyPreflight, setBusyPreflight] = useState(false);
   const [backendPref, setBackendPref] = useState<BackendPref>(file.backend ?? "auto");
-  const [outputDir, setOutputDir] = useState<string>(file.output_dir ?? "output");
+  //  输出目录默认值来自壳的 default_dirs(数据根下,或旧安装目录的 output/);
+  //  不写死 "output" —— 那会按进程 cwd 解析,快捷方式/Program Files 下都不可控。
+  const [outputDir, setOutputDir] = useState<string>(file.output_dir ?? dirs?.output ?? "output");
   const [cliPath, setCliPath] = useState<string>(file.cli_path ?? "");
   //  三层取值:内置默认 → config.yaml 的 clean: 段 → 用户改过的键
   const [cleanOpts, setCleanOpts] = useState<CleanOpts>(() => mergeCleanOpts(baseline, file.clean ?? {}));
@@ -186,6 +191,10 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
             type: f.type === "MD" ? f.type : (engine.kind ?? f.type),
             stages: engine.stages,
             signatures: engine.signatures ?? f.signatures,
+            // 页级进度(如 PaddleOCR 解析中的 12/417 页):行内显示,别只写进日志。
+            // 只取**当前阶段**的 detail(stage 切换时引擎会把它清掉),不沿用上一段的数字。
+            progressDetail: engine.detail,
+            reused: f.reused || Boolean(engine.reused),
             warning: f.warning || engine.warning,
             error: engine.error ?? f.error,
             // 错误分类与重试状态也只从事件来(界面不猜)
@@ -410,7 +419,11 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
   //  force=true 表示「用户明确要求重新转换」(重试 / 重新入队 / 改用 OCR):
   //  必须把 --force 透传给 CLI,否则已有产物会让它直接 skip —— 界面看起来成功、
   //  其实什么都没发生(retry ≠ new conversion 的根源)。
-  const convertOne = useCallback(async (f: QueueFile, backendOverride?: string, force = false) => {
+  //  noResume=true(可选)表示「重新解析」:不复用 work/ 下已落盘的云端结果
+  //  (--no-resume)。force 只解决「已有 EPUB」,解决不了「解析结果是缓存的」。
+  const convertOne = useCallback(async (
+    f: QueueFile, backendOverride?: string, force = false, noResume = false,
+  ) => {
     if (canceled.current.has(f.id)) return;
     canceled.current.delete(f.id);
     setFiles(prev => prev.map(x => x.id === f.id ? {
@@ -422,12 +435,18 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
       retrying: null,
       warning: false,
       legacy: false,
+      reused: false,
+      progressDetail: undefined,
       log: [],
       lastLog: undefined,
       stages: freshStages(),
       engine: initialEventState(),
     } : x));
     try {
+      // 后端:本次显式指定 > 这一行上次实际用的后端 > 全局偏好(混合型不回填)。
+      // 见 format.ts::resolveCliBackend —— 少了中间那层,行上写着 PADDLE 的重试
+      // 会退回 Auto(config 默认 mineru),用户点了「用 PaddleOCR 重跑」却跑了 MinerU。
+      const backend = resolveCliBackend(backendOverride, f, backendPref);
       const res = await invoke<{
         success: boolean;
         status: string;
@@ -437,7 +456,7 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
       }>("convert_file", {
         filePath: f.path,
         outputDir,
-        backend: backendOverride ?? (backendPref === "auto" ? null : backendPref),
+        backend,
         retries: 1,
         cliPath: cliPath || null,
         taskId: f.id,
@@ -445,6 +464,7 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
         cleanEnable,
         strict: strictVerify,
         force,
+        noResume,
       });
       if (canceled.current.has(f.id)) return;
       // 引擎终态 → 队列状态(completed / skipped / failed,三者互不冒充)
@@ -535,18 +555,30 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
   const [review, setReview] = useState<ReviewSheet | null>(null);
   /** 表里行的最新快照:确认时(点击/Esc)要带出去,不能靠闭包里那份旧 state */
   const reviewRows = useRef<ReviewRow[]>([]);
+  /** 「强制重新解析」勾选:结算时读 ref(闭包里的 review 在 await 之后是旧的) */
+  const reviewNoResume = useRef(false);
   useEffect(() => { reviewRows.current = review?.rows ?? []; }, [review]);
-  /** resolve 的语义:`ReviewRow[]` = 开跑(带上逐行选择),`null` = 取消 */
-  const reviewResolve = useRef<((rows: ReviewRow[] | null) => void) | null>(null);
+  /** resolve 的语义:`ReviewDecision` = 开跑(逐行选择 + 强制重新解析),`null` = 取消 */
+  const reviewResolve = useRef<((decision: ReviewDecision | null) => void) | null>(null);
   const reviewing = useRef(false);
 
   const settleReview = useCallback((start: boolean) => {
     const resolve = reviewResolve.current;
-    const rows = reviewRows.current;
+    if (!resolve) return;
     reviewResolve.current = null;
     reviewing.current = false;
+    // 先把勾选读出来再收表:setReview(null) 之后 ref 会被重置
+    const decision = start
+      ? { rows: reviewRows.current, noResume: reviewNoResume.current }
+      : null;
     setReview(null);
-    resolve?.(start ? rows : null);
+    resolve(decision);
+  }, []);
+
+  /** 用户勾/取消勾「强制重新解析」 */
+  const setReviewNoResume = useCallback((value: boolean) => {
+    reviewNoResume.current = value;
+    setReview(prev => (prev ? { ...prev, noResume: value } : prev));
   }, []);
 
   /** 用户在某一行的 BACKEND 分段控件上换了后端。
@@ -601,22 +633,30 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
    *  检查期间「开始制版」禁用:类型/页数/云端页数还没到,那时按下等于闭着眼睛
    *  花钱(云端 OCR 按页计费)。
    *
-   *  返回 null = 用户取消;返回行数组 = 开跑(force 或无需复核时为空数组) */
+   *  「书库 → 重新转换」也走这张表(`allowForceReparse`):后端本来就是一次性选择 ——
+   *  重转时不能再拿全局偏好替用户决定(旧实现 force 直接跳过复核,于是「选 Paddle、
+   *  实际跑 MinerU」没有任何反悔点)。重转还多一个「强制重新解析」勾选:引擎默认复用
+   *  已落盘的云端结果(不重复计费),勾上才会真的重新 OCR。
+   *
+   *  返回 null = 用户取消;返回 ReviewDecision = 开跑 */
   const requestReview = useCallback(async (
     rows: QueueFile[],
-    force: boolean,
     runCheck: () => Promise<PreflightReport | null>,
-  ): Promise<ReviewRow[] | null> => {
-    // force = 用户已经明确要求「重转」(书库 RE-CONVERT),不必再问一遍
-    if (force || rows.length === 0 || reviewing.current) return [];
+    options: { allowForceReparse?: boolean; initialOverride?: RowBackend } = {},
+  ): Promise<ReviewDecision | null> => {
+    if (rows.length === 0 || reviewing.current) return { rows: [], noResume: false };
     reviewing.current = true;
+    reviewNoResume.current = false;
     // 行先按「未知」建(busy = 正在查):数字到了再填,拿不到就一直是未知,不编造
     const sheetRows: ReviewRow[] = rows.map(f => ({
       id: f.id, name: f.name, path: f.path, known: false, busy: true,
+      // 书库重转时把**这本书上次用的后端**预选上:徽标写着 PADDLE、重跑却按
+      // 全局偏好跑 MinerU,正是「选了 paddleocr 结果用 mineru」的来源。
+      override: options.initialOverride,
     }));
     reviewRows.current = sheetRows;
-    setReview({ rows: sheetRows });
-    const decision = new Promise<ReviewRow[] | null>(resolve => { reviewResolve.current = resolve; });
+    setReview({ rows: sheetRows, allowForceReparse: options.allowForceReparse, noResume: false });
+    const decision = new Promise<ReviewDecision | null>(resolve => { reviewResolve.current = resolve; });
     // 检查与「用户什么时候按下」并行:表已经开着,数字回来就填进去
     void runCheck().then(report => {
       // 检查期间用户已经取消(或切走了屏幕):这批数字没人要了,别把表复活回来
@@ -636,7 +676,7 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
           };
         });
         reviewRows.current = filled;
-        return { rows: filled };
+        return { ...prev, rows: filled };
       });
     });
     const verdict = await decision;
@@ -647,7 +687,17 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
   //  addFiles(force=true) 只用于「明确要求重转」的入口(书库 RE-CONVERT):
   //  常规添加/拖放不加 force —— 已转过的书被跳过是**正确的续跑行为**,
   //  界面会如实显示 SKIPPED(而不是假装成功)。
-  const addFiles = useCallback(async (paths: string[], force = false) => {
+  //  review=false 只给「最近文件 → 加入队列」这类不需要复核的入口用。
+  const addFiles = useCallback(async (
+    paths: string[], force = false, review = true,
+    reviewOptions: {
+      allowForceReparse?: boolean;
+      /** 预选的后端(书库重转:这本书上次实际用的后端) */
+      initialOverride?: RowBackend;
+      /** 预检也要用同一个后端,否则表里的页数/云端页数是另一个后端的计划 */
+      preflightBackend?: string | null;
+    } = {},
+  ) => {
     // pandoc 门槛:缺失时问一次「立即下载 / 取消任务」,取消则整批不入队
     if (!(await ensurePandoc())) return;
     const newFiles: QueueFile[] = paths.map((p, i) => ({
@@ -687,12 +737,19 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
     rememberRecent(fresh.map(f => f.path));
     setScreen("convert");
     // 先把复核表弹出来,检查在表里跑(顺序见 requestReview);确认后再串行转换
-    const decision = await requestReview(fresh, force, () => runPreflight(fresh.map(f => f.path)));
+    const decision: ReviewDecision | null = review
+      ? await requestReview(
+          fresh,
+          () => runPreflight(fresh.map(f => f.path), reviewOptions.preflightBackend ?? undefined),
+          reviewOptions,
+        )
+      : { rows: [], noResume: false };
     if (decision === null) return;
-    // 逐行选择只在**这一批**有效:没动过的行不传 backend,继续听设置里的偏好
-    const chosen = new Map(decision.map(r => [r.id, r.override]));
+    // 逐行选择只在**这一批**有效:没动过的行不传 backend,继续听那一行/全局偏好
+    const chosen = new Map(decision.rows.map(r => [r.id, r.override]));
     for (const f of fresh) {
-      await convertOne(f, rowBackendValue(chosen.get(f.id)) ?? undefined, force);
+      await convertOne(f, rowBackendValue(chosen.get(f.id)) ?? undefined, force,
+                       decision.noResume);
     }
   }, [convertOne, rememberRecent, runPreflight, requestReview, notify, t, ensurePandoc]);
 
@@ -802,7 +859,8 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
 
   const retryFile = useCallback((id: string) => {
     const f = files.find(x => x.id === id);
-    // 重试 = 用户明确要求重跑 → force(失败留下的半成品/已有产物都不能让它变 skip)
+    // 重试 = 用户明确要求重跑 → force(失败留下的半成品/已有产物都不能让它变 skip)。
+    // 后端交给 convertOne 按「这一行上次实际用的」回填,混合型继续走 auto 路由。
     if (f) void convertOne(f, undefined, true);
   }, [files, convertOne]);
 
@@ -954,13 +1012,39 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
     }
   }, [notify, t]);
 
-  // 书库「重新转换」= 用户明确要求重转 → force(否则已有 EPUB 会让它直接 skip,
-  // 界面看起来跑了一遍,其实什么都没发生)
+  // 书库「重新转换」= 用户明确要求重做:走**印前检查**再开跑。
+  //  两个理由:
+  //  1. 后端是一次性选择 —— 旧实现 force 直接跳过复核,重转时只能听全局偏好
+  //     (Auto → config.yaml 的 ocr_backend,默认 mineru),于是「我要 PaddleOCR」
+  //     变成「又跑了一遍 MinerU」,用户唯一能看出差别的地方是产物;
+  //  2. 表里那行「强制重新解析」是**唯一**能表达「别复用上次的解析结果」的入口,
+  //     否则用户只能删 work/ 来猜(然后白付一次 OCR)。
   const reconvert = useCallback((path: string) => {
-    const f = files.find(x => x.path === path);
-    if (f) void convertOne(f, undefined, true);
-    else void addFiles([path], true);
-  }, [files, convertOne, addFiles]);
+    // 同一份文件正在队列里跑:再开一遍会并发写同一个产物(后端只能报 name_conflict)
+    const active = filesRef.current.find(f => normPath(f.path) === normPath(path)
+      && (f.status === "pending" || f.status === "converting"));
+    if (active) {
+      notify(t.toast.duplicate(1), "info");
+      return;
+    }
+    // 这本书上次**实际**用的后端(书库里记的)。预选它 = 「重转沿用这本书的后端」,
+    // 用户仍可在表里改成别的。不预选的话,徽标写着 PADDLE、重跑按全局偏好走
+    // MinerU,两条信息互相矛盾,而用户只能从产物里看出来。
+    //
+    // 只对**扫描书(SCN)**预选:那是「后端真的决定结果」的一类。TXT(本地提取)
+    // 与 HYB(按页路由)的徽标只是计划/主干的名字,拿它当 `--backend` 会把
+    // 「自动路由」变成「强制整本 OCR」,页数、费用、产物都会变。
+    const book = books.find(b => b.path === path);
+    const lastBackend = book?.type === "SCN" ? backendToCli(book.backend) : null;
+    const initialOverride = (lastBackend ?? undefined) as RowBackend | undefined;
+    // 旧行先下线,免得一张表里出现两条同源记录
+    setFiles(prev => prev.filter(f => normPath(f.path) !== normPath(path)));
+    void addFiles([path], true, true, {
+      allowForceReparse: true,
+      initialOverride,
+      preflightBackend: lastBackend,
+    });
+  }, [addFiles, books, notify, t]);
 
   const convertingCount = files.filter(f => f.status === "converting").length;
   const failedCount = files.filter(f => f.status === "failed").length;
@@ -1087,6 +1171,7 @@ export default function App({ initial = { file: {}, baseline: {} } }: { initial?
             onReviewStart={() => settleReview(true)}
             onReviewCancel={() => settleReview(false)}
             onRowBackend={(id, b) => void chooseRowBackend(id, b)}
+            onReviewNoResume={setReviewNoResume}
             onDelete={(id, deleteFile) => void deleteQueueFile(id, deleteFile)}
           />
         )}

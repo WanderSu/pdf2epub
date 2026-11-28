@@ -1,6 +1,6 @@
 [project]
 name = "pdf2epub"
-version = "0.6.1"
+version = "0.6.2"
 description = "PDF → EPUB 电子书转换工具(统一输出高质量 EPUB)"
 requires-python = ">=3.12"
 dependencies = [
@@ -48,6 +48,14 @@ include = [
     "src/pdf2epub/artifacts.py",
     "src/pdf2epub/taskrun.py",
     "src/pdf2epub/backends/*.py",
+    # 标题裁决(章结构)是最容易悄悄退化的模块:目录/证据/正文三路对齐全在这里,
+    # 新增的目录带作者列收缩与就地提升必须过 ruff。其余 ir/* 模块尚未并入(ratchet)。
+    "src/pdf2epub/ir/structure.py",
+    "src/pdf2epub/page_result.py",
+    "tests/test_ir_structure_headings.py",
+    "tests/test_page_marks.py",
+    "tests/test_epubcheck.py",
+    "scripts/install_epubcheck.py",
     "tests/test_mineru_parts.py",
     "tests/test_mineru_http.py",
     "tests/test_mineru_package.py",

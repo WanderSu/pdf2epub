@@ -237,6 +237,10 @@ class MinerUAdapter(Backend):
                       f"(不重新上传、不重新计费): {', '.join(adopted)}")
                 missing = [p for p in missing if p.part_id not in adopted]
         failed: dict[str, str] = {}
+        # 「本次有没有真的调云端」要在**提交之前**定下来:之后 missing 会被重算,
+        # 拿它判会把「续跑取回了一批结果」也当成「什么都没做」(见 batch 的 reuse 事件)。
+        needs_cloud = bool(missing)
+        reused_parts = len(parts) - len(missing)
         if missing:
             task_id, failed = self._submit_missing(pdf_path, work_dir, cache, store, params_fp,
                                                    variant, source, parts, missing, sharded)
@@ -255,6 +259,10 @@ class MinerUAdapter(Backend):
 
         result = self._merge_parts(work_dir, parts, sharded, store, total_pages,
                                    task_id=task_id)
+        # cached:整本都是复用已落盘的段,本次一次云端都没碰 —— 上层据此发 reuse 事件,
+        # 否则界面看到的就是「几百页的书两秒完成」,与「被跳过」无法区分。
+        result.stats["cached"] = not needs_cloud
+        result.stats["reused_parts"] = reused_parts
         cache.clear()
         return result
 

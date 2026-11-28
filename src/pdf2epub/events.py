@@ -18,12 +18,17 @@
 | `stage` | `name`(detect/extract/clean/build/verify)+ `state`(start/done) |
 | `progress` | `stage` / `current` / `total` / `detail` |
 | `shards` | `total` / `ranges`(MinerU 分片的真实页码区间) |
+| `reuse` | `backend` / `pages` / `parts` / `reused_parts`(已落盘的云端结果被直接复用,**本次没有 OCR**) |
 | `verify` | `errors` / `warnings` / `message` |
 | `warning` | `code` / `message` |
 | `retry` | `attempt` / `retries` / `wait` / `message`(第 N 次尝试失败、即将重跑) |
 | `error` | `code` / `message`(见 `error_code()`:GUI 按 code 分类显示) |
 | `skip` | `file` / `epub`(**已有产物,本次未转换** —— 不是 complete) |
-| `complete` | `file` / `epub` / `backend` / `pdf_type` / `seconds` |
+| `complete` | `file` / `epub` / `backend` / `pdf_type` / `cached` / `seconds` |
+
+``reuse`` 是**解释性**事件,不是跳过:云端那一次已经计费,重跑复用它是对的;但界面
+上「417 页的解析两秒就完成」与「弹指间跳过」看起来一模一样,消费者需要一条明确的
+证据来说明「本次没有重新 OCR」。``complete.cached`` 给出同一条事实,便于终态展示。
 
 进度权重之和必须为 1.0(前端按「已完成阶段权重 + 当前阶段权重 × 完成比」算百分比)。
 

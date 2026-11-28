@@ -39,7 +39,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="开启指定清理项(逗号分隔,可重复);覆盖 config 里写死的 false。"
                         "两边都写同一项时以 --clean-disable 为准")
     p.add_argument("--no-resume", action="store_true",
-                   help="不复用云端 OCR 已提交的任务(默认中断后可续跑,不重新上传)")
+                   help="重新解析:不复用 work/ 下已落盘/已提交的云端结果 —— 会重新上传、"
+                        "重新 OCR、重新计费(桌面端「强制重新解析」就是它)")
     p.add_argument("--strict", action="store_true",
                    help="严格模式:内容对照的「疑似缩水」也判失败(默认只告警);"
                         "致命校验错误(结构破损/内容丢失)在任何模式下都判失败")

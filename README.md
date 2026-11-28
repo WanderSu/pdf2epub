@@ -172,6 +172,22 @@ One failing file does not affect the others, and the batch supports:
 - resuming after an interruption
 - checking whether an existing output file is complete
 
+### Conversion report
+
+Every conversion writes a quality report to `work/<book>/report.json`, and the report icon on a
+library row opens it:
+
+- pages, backend, elapsed time, and whether this run reused an already-parsed result (no OCR);
+- verification result (errors / warnings) with the individual issues;
+- clean-up statistics (applied / suggested / failed) plus any notes the clean-up layer left;
+- page coverage (e.g. `415 / 417`) and the content-comparison numbers;
+- **page-level quality**: how many pages are blank, image-only or very short, plus the
+  blank page numbers (a `needs a manual look` hint is logged and reported once blank pages
+  reach 3 or 5% of the book).
+
+The report lives under `work/` only and never affects the EPUB; books converted by older versions
+need one re-conversion to get it.
+
 ### AI proofreading (optional)
 
 Any finished EPUB can be proofread from the Library screen with "AI OPTIMIZE": a model fixes typos, OCR mistakes and spurious line breaks, chapter by chapter.
@@ -195,13 +211,31 @@ Go to:
 
 [GitHub Releases](https://github.com/WanderSu/pdf2epub/releases)
 
-and download the latest Windows archive, for example:
+**Option 1: installer (recommended)**
+
+Download the latest installer, for example:
 
 ```text
-pdf2epub-v0.6.1-win-x64.zip
+pdf2epub-v0.6.2-win-x64-setup.exe
 ```
 
-The version number in the file name changes with each release. Unzip it and run:
+Run it. By default it installs **for the current user only** (into
+`%LOCALAPPDATA%\Programs\pdf2epub`, no UAC prompt), adds a Start Menu shortcut and an entry
+in Settings → Apps (with an uninstaller); the directory can be changed in the wizard.
+Upgrading is just running the newer installer — settings, library and paid parse caches are kept
+(they do not live in the install directory), and uninstalling never deletes your books or data.
+
+Silent install (for scripts / mass deployment):
+
+```powershell
+pdf2epub-v0.6.2-win-x64-setup.exe /S /D=C:\Tools\pdf2epub
+```
+
+`/D=` must come last, and the path must not be quoted.
+
+**Option 2: portable zip**
+
+Download `pdf2epub-v0.6.2-win-x64.zip`, unzip it and run:
 
 ```text
 pdf2epub.exe
@@ -209,21 +243,38 @@ pdf2epub.exe
 
 The desktop build bundles the Python runtime it needs, so no separate Python installation is required.
 
-Keep `pdf2epub.exe`, `cli.exe` and `config/` in the same folder — do not move the exe out on its own.
+Keep `pdf2epub.exe`, `cli/` (the engine directory) and `config/` in the same folder — do not move the exe out on its own.
 
-### Where your settings and library live
+### Where your data lives
 
-Your UI settings and book library are **not** stored in the unzipped folder — they are per Windows
-user:
+UI settings, the book library, and everything the app **writes** (credentials, intermediate files,
+finished EPUBs, bundled Pandoc) live in the per-user data folder, not in the unzipped directory:
 
 ```text
 %LOCALAPPDATA%\pdf2epub\
     settings.json     UI and conversion preferences (theme, output dir, cleanup switches…)
     library.json      the books you have produced
+    apikey.json       cloud OCR / AI credentials (saved from the Settings page)
+    work\             intermediate files; _parts\ holds billed cloud-parse results, reused on re-runs
+    output\           finished EPUBs (configurable in Settings)
+    pandoc\           Pandoc downloaded by the in-app installer
 ```
 
-This keeps them safe across upgrades: unzip a newer build over the same folder and both survive.
-To back up or move to another machine, copy that folder.
+This keeps data safe across upgrades — unzip a newer build over the same folder and settings,
+library and paid parse caches survive — and it also works when the app is installed into a
+read-only location such as `Program Files`. To back up or move to another machine, copy that folder.
+
+> Older versions kept `work/`, `output/`, `apikey.json` and `pandoc/` inside the extracted folder.
+> Those locations still work: if they already exist they are used as-is and are **not** silently
+> moved or cleared.
+>
+> To move them into the user data folder (for example when switching from the portable build to the
+> installer, or when installing under `Program Files`), use **Settings → Converter → data location →
+> MIGRATE**: it moves `work/`, `output/`, `pandoc/` and `apikey.json`, rewrites the library records and
+> the output-dir path that pointed at the old location, and never overwrites something already present
+> at the destination (kept items are listed). Restart the app afterwards. When the install folder is
+> **not writable** (per-machine install), the same migration runs automatically on first start — a
+> writable portable folder is left untouched.
 
 Cleanup switches default to `config/config.yaml` in the unzipped folder: switches you have **not**
 touched follow it, the ones you changed win, and RESET at the bottom of the Settings page hands the
@@ -235,7 +286,7 @@ EPUB files are produced by Pandoc, so Pandoc has to be installed. There are thre
 
 **Option 1: in-app download (recommended)**
 
-When you add files for the first time and Pandoc is missing, the app offers to download it right away — about 43 MB, installed into the app's own folder automatically, no manual steps.
+When you add files for the first time and Pandoc is missing, the app offers to download it right away — about 43 MB, installed into `%LOCALAPPDATA%\pdf2epub\pandoc\` automatically, no manual steps.
 The download is verified against the official SHA256 before extraction and execution; a mismatch is discarded with an error instead of running an unverified exe.
 
 **Option 2: manual install**
@@ -264,7 +315,7 @@ Scanned PDFs additionally need an OCR service, configured in the desktop app und
 03 Settings → OCR & credentials
 ```
 
-You can also create this file in the program folder:
+You can also create this file in the data folder (`%LOCALAPPDATA%\pdf2epub\apikey.json`) or in the program folder:
 
 ```text
 apikey.json
@@ -406,7 +457,7 @@ You only need to fill in the token for the service you actually use.
 
 ### Credentials
 
-In the project root (the program folder for the desktop build) create:
+In the data folder (or the project root when running from a checkout) create:
 
 ```text
 apikey.json
@@ -641,6 +692,13 @@ uv run ebook-converter "my-book.pdf" -o output --force
 
 By default the program skips files that are already done.
 
+`--force` only bypasses the "already built" check. A cloud OCR result that already
+succeeded and was saved under `work/<book>/_parts/` is **reused** (it was already
+billed — a 400-page book finishing in two seconds is not a bug, and the engine says
+so with a `reuse` event). To really parse it again, add `--no-resume` (it re-uploads
+and re-bills). The desktop app exposes the same thing as **RE-PARSE (ignore cached
+OCR)** in the press-check sheet of a library re-convert.
+
 </details>
 
 <details>
@@ -700,7 +758,7 @@ ebook-converter <file-or-dir>... [-o output-dir] [options]
 | `--json` | With `--dry-run`, print the preflight result as JSON |
 | `--json-events` | Emit stage events as JSON Lines (used by the desktop app) |
 | `--dump-ir` | Write a Markdown-to-IR preview to `<work>/<title>/ir/`; does not build an EPUB |
-| `--no-resume` | Do not reuse a cloud OCR task that was already submitted |
+| `--no-resume` | Parse again: do not reuse a cloud OCR result already saved under `work/` (re-uploads, re-bills) |
 | `--log FILE` | Log file, default `logs/batch-<timestamp>.log` |
 | `--no-log` | Do not write a log file |
 | `--verbose, -v` | DEBUG logging |
@@ -711,6 +769,7 @@ Cleanup rules:
 | --- | --- |
 | `page_numbers` | remove standalone page numbers |
 | `running_heads` | remove running heads repeated across pages |
+| `front_matter` | drop the cover/title-page text (the cover is already rendered as an image) and the printed TOC that duplicates the nav |
 | `join_lines` | join lines broken across pages (line structure such as poetry is preserved where possible) |
 | `ocr_spaces` | merge words that OCR split apart |
 | `cjk_spaces` | fix stray spaces inside Chinese text |
@@ -772,7 +831,13 @@ Books with text pages and scanned pages interleaved are merged by real page numb
 
 ### EPUB checking
 
-The project includes checks for the practical problems that affect reading, but EPUB spec compliance has not been verified with EPUBCheck.
+The built-in checks prove the container is coherent and no content was lost, but they are not an EPUB 3 conformance checker. To also run [EPUBCheck](https://github.com/w3c/epubcheck) after every conversion (Java 11+ required):
+
+```powershell
+uv run python scripts/install_epubcheck.py      # downloads into .tools/epubcheck/ (pinned SHA256)
+```
+
+`verify.epubcheck` in `config.yaml` controls it: `auto` (default — run when available, report issues as warnings), `on` (conformance errors fail the conversion), `off` (skip). `PDF2EPUB_EPUBCHECK` overrides it per run. It already caught a real bug: the TOC list was rewritten from `<ol>` to `<ul>` to hide numbering, and EPUBCheck flagged every generated book with `RSC-005`. The list is now kept as `<ol>` and de-numbered with CSS — 0 errors, 0 warnings.
 
 ### UI and other
 

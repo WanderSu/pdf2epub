@@ -30,10 +30,15 @@
 from __future__ import annotations
 
 import re
-from typing import Sequence
+from collections.abc import Sequence
 
 from pdf2epub.ir.model import Block
-from pdf2epub.markdown.textrules import (_is_block_start, _is_catalog_entry, _is_page_mark,                                is_page_number_line)
+from pdf2epub.markdown.textrules import (
+    _is_block_start,
+    _is_catalog_entry,
+    _is_page_mark,
+    is_page_number_line,
+)
 
 #: 标题文本的长度上限(归一化后):超过这个长度基本是一句话,不是标题
 _TITLE_MAX = 40
@@ -43,6 +48,18 @@ _PROMOTE_MIN_CHARS = 2
 
 #: 结构性标签:它们确实是标题,但不是「章」。列进目录只会让导航多一条无意义的项
 _STRUCT_LABELS = frozenset({"目录", "contents", "tableofcontents", "目次"})
+
+#: 卷首版式页的标题(目录/CIP/版权/出版信息)。它们被后端标成了 heading,但**不是章**:
+#: 放进导航会得到「目录」「图书在版编目(CIP)数据」「京新登字 101 号」这种条目
+#: (实测《万延年的足球队》26 章里有 3 个是这种伪章,《中国共产党历史讲义》的
+#: 「目录」独占一章 3766 字)。只认**形态无歧义**的标签,不做语义猜测:
+#: 「目录学」「版权法」这种真章名不在这里(严格整词匹配,不吃前缀)。
+_FRONT_MATTER_LABEL_RE = re.compile(
+    r"^(?:目\s*[录次]|contents|tableofcontents"
+    r"|图书在版编目.*|.*cip\s*数据.*|.*(?:新登字|著作权合同登记).*"
+    r"|isbn[\s:：0-9xX\-]*|出版发行.*|责任编辑.*|责任校对.*"
+    r"|印刷.*|开本.*|字数.*|定价.*|印次.*|版次.*)$"
+)
 
 #: 连续多少行 ``标题 / 页码`` 才算「这一页是目录」——单行可能是正文里的引用
 _TOC_MIN_RUN = 3
@@ -92,10 +109,23 @@ _TOC_LEADER_RE = re.compile(r"[ \t]*(?:[/／]|\.{2,}|…+|·{2,})[ \t]*")
 #: 旧解析只认「标题 …… 页码」,这一页 8 条目录一条都读不出来,目录权威整条失效。
 _TOC_LEADING_PAGE_RE = re.compile(r"^\s*(?P<page>\d{1,4})[ \t]+(?P<title>\S.*?)\s*$")
 
-#: 章内日记的日期标题(``三月十二日`` / ``五月六日``):它比小节再低一级。
+#: 章内日记/年表的日期标题(``三月十二日``):它比小节再低一级。
 #: 后端把日期与 ``2 二哥`` 都标成 text_level=2,导航里就排成一列并列条目。
 _DATE_TITLE_RE = re.compile(
     r"^[〇零一二三四五六七八九十百千\d]{1,4}月[〇零一二三四五六七八九十百千\d]{1,4}日$")
+
+#: 年表/编年体里的「年」标题(``1935年``)。与月日一样是章内小节,不是章。
+_YEAR_TITLE_RE = re.compile(r"^(?:1[89]|20)\d{2}\s*年$")
+
+
+def _date_title_depth(text: str) -> int | None:
+    """日期型标题 → 相对「章」的层级偏移(年=1,月日=2);不是日期返回 None。"""
+    norm = _norm(text)
+    if _YEAR_TITLE_RE.match(norm):
+        return 1
+    if _DATE_TITLE_RE.match(norm):
+        return 2
+    return None
 
 #: 带编号的小节标题(``1 长尾雉的标本`` / ``3 AMERICAN DREAM`` / ``一、历史`` /
 #: ``2 ROLANTO``)。编号是书自己排的章节序列,比字号层级可靠得多。
@@ -500,7 +530,7 @@ def _toc_titles(lines: Sequence[str]) -> tuple[dict[str, _Title], set[str]]:
             pages = [int(p) for _t, _a, p, _raw in run if p.isdigit()]
             widths = [len(p) for _t, _a, p, _raw in run]
             if (len(pages) != len(run) or len(set(widths)) != 1 or min(widths) < 2
-                    or any(a >= b for a, b in zip(pages, pages[1:]))):
+                    or any(a >= b for a, b in zip(pages, pages[1:], strict=False))):
                 run.clear()
                 return
         for title, author, page, _raw in run:
@@ -529,6 +559,71 @@ def _toc_titles(lines: Sequence[str]) -> tuple[dict[str, _Title], set[str]]:
         flush()
 
     return found, authors
+
+
+def _proven_short_title(text: str, lines: Sequence[str],
+                        ev_titles: dict[str, _Title]) -> tuple[str, str] | None:
+    """目录标题里被一并读进来的作者列 → ``(短标题, 被剥下来的尾巴)``。
+
+    弱形式目录行（``最后的牧人 玄基荣 / 001``:标题与作者之间只有空格）在解析阶段
+    **切不开** —— 它和 ``第一章 绪论 35`` 形态完全一样,硬切会造出「标题=第一章、
+    作者=绪论」这种错误。所以这里不按位置猜,只认**被证据证明过的短标题**:
+
+    - 它在证据层里是 ``heading``/``header``(后端标了这个标题),或
+    - 正文里有它独立成段的一行。
+
+    两条都是硬证据;拿不到就原样返回 None,不做「去掉最后一个词」这种猜测。
+    """
+    tokens = [t for t in re.split(r"[ \t]+", text.strip()) if t]
+    for i in range(len(tokens) - 1, 0, -1):
+        candidate = " ".join(tokens[:i])
+        if len(_norm(candidate)) < _PROMOTE_MIN_CHARS:
+            continue
+        key = _title_key(candidate)
+        if not key:
+            continue
+        if key in ev_titles or _standalone_line(lines, key) is not None:
+            return candidate, " ".join(tokens[i:])
+    return None
+
+
+def _reconcile_toc_titles(toc: dict[str, _Title], authors: set[str],
+                          lines: Sequence[str], ev_titles: dict[str, _Title],
+                          ) -> tuple[dict[str, _Title], set[str], bool]:
+    """目录条目带作者列时,把标题改回**正文/证据里真正存在的那个短标题**。
+
+    被钉住的缺陷（实测《黑暗之魂：韩国分断小说选》）:目录印
+    ``最后的牧人 玄基荣 / 001``,弱形式解析把作者并进标题 → toc key 是
+    「最后的牧人玄基荣」;证据层里明明有 ``heading``「最后的牧人」,却因为 key 不等于
+    目录 key 被目录权威过滤掉,正文里独立成段的「最后的牧人」也因为 key 配不上而
+    **提不升**。结果 8 篇小说的短篇集只剩 3 章,其中一章 18 万字 —— 读者拿到的是
+    「一整坨没有目录的正文」。
+
+    这里只对**自己配不上任何落点**的目录条目做收缩(能被证据/正文证明的短前缀),
+    并把剥下来的尾巴记进作者键集合 —— 署名行判据跟着变准。
+    """
+    out: dict[str, _Title] = {}
+    changed = False
+    used = set(toc)
+    for key, entry in toc.items():
+        full_ok = key in ev_titles or _standalone_line(lines, key) is not None
+        got = None if full_ok else _proven_short_title(entry.text, lines, ev_titles)
+        if got is None:
+            out[key] = entry
+            continue
+        candidate, tail = got
+        new_key = _title_key(candidate)
+        if not new_key or new_key in out or new_key in used - {key}:
+            out[key] = entry
+            continue
+        entry.key = new_key
+        entry.text = _clean_title(candidate)
+        out[new_key] = entry
+        used.add(new_key)
+        if tail:
+            authors.update(_author_keys(tail))
+        changed = True
+    return out, authors, changed
 
 
 def _adopt_gap_headings(lines: list[str], toc: dict[str, _Title],
@@ -739,6 +834,32 @@ def _standalone_line(lines: Sequence[str], key: str) -> int | None:
     return None
 
 
+def _standalone_near(lines: Sequence[str], key: str, pos: int, *,
+                     max_nonempty: int = 4) -> int | None:
+    """``pos`` **上方不远处**独立成段的同名行(把「正文里的标题」就地升成标题用)。
+
+    与 :func:`_standalone_line` 的区别只看窗口:更远的同名行往往是别处的引用
+    (前言里提到篇名很常见),拿它当章首会把标题插到人家正文里。
+    """
+    nonempty = 0
+    for j in range(pos - 1, -1, -1):
+        s = lines[j].strip()
+        if not s:
+            continue
+        nonempty += 1
+        if nonempty > max_nonempty:
+            return None
+        if _title_key(s) != key or _HEADING_RE.match(s) or _is_catalog_entry(s):
+            continue
+        before = lines[j - 1].strip() if j > 0 else ""
+        after = lines[j + 1].strip() if j + 1 < len(lines) else ""
+        if before:
+            continue
+        if not after or (len(_norm(after)) <= 20 and after[-1] not in "。！？.!?；;"):
+            return j
+    return None
+
+
 def _split_header_subtitle(header_text: str, title: str) -> str:
     """页眉把「大标题 + 副标题」合成一行时,切出副标题(不进导航)。
 
@@ -829,11 +950,19 @@ def restore_headings(md: str, evidence: Sequence[Block], *,
 
     lines = md.split("\n")
     toc, toc_authors = _toc_titles(lines)
+    toc_authoritative = len(toc) >= _MIN_TITLE_SOURCES
+    ev_titles, mid_page, running_heads = _index_evidence(evidence, set(toc))
+    if toc_authoritative:
+        # 目录行把作者并进标题时(``最后的牧人 玄基荣 / 001``),先用证据/正文里
+        # 真正存在的短标题把作者剥出去;否则这些条目的 key 永远配不上落点,
+        # 证据层的真标题还会被「目录权威」过滤掉(实测短篇集退化成 3 章)。
+        toc, toc_authors, reconciled = _reconcile_toc_titles(
+            toc, toc_authors, lines, ev_titles)
+        if reconciled:
+            # 键变了,书眉判定要按新键重跑一次(重复 ≥3 页才算书眉)
+            ev_titles, mid_page, running_heads = _index_evidence(evidence, set(toc))
     toc_keys = set(toc)
-    toc_authoritative = len(toc_keys) >= _MIN_TITLE_SOURCES
-    ev_titles, mid_page, running_heads = _index_evidence(evidence, toc_keys)
     inline_keys = _inline_display_keys(evidence)
-    hint_key = _key(title_hint) if title_hint else ""
 
     # 内嵌展示文字不进标题候选:否则它们会以「证据层背书」的身份逃过降级
     titles: dict[str, _Title] = {k: v for k, v in ev_titles.items()
@@ -909,6 +1038,8 @@ def restore_headings(md: str, evidence: Sequence[Block], *,
                 pos = _find_line(lines, anchor, cursor, exact=exact)
                 if pos is not None:
                     break
+        # 刚被判定为「别处的同名文字」而降级掉的行:不能在同一次裁决里又被升回来
+        demoted_pos: set[int] = set()
         if pos is not None and entry.key in existing:
             if _heading_near(lines, pos, entry.key):
                 cursor = pos                  # 章首已经有这个标题,不重复插
@@ -918,7 +1049,19 @@ def restore_headings(md: str, evidence: Sequence[Block], *,
                 m = _HEADING_RE.match(line)
                 if m and _title_key(m.group(2)) == entry.key:
                     lines[j] = m.group(2).strip()
+                    demoted_pos.add(j)
             existing.discard(entry.key)
+        if pos is not None and entry.key not in existing:
+            # 标题文字已经独立成段地站在落点上方(只是缺 ``#``):就地升成标题。
+            # 这条比「插一个新标题」优先 —— 插进去会在正文里留下同名的重复段落,
+            # 而且 anchor 是章首第一段,标题常被插到章首配图/作者简介之后。
+            near = _standalone_near(lines, entry.key, pos)
+            if near is not None and near not in demoted_pos:
+                lines[near] = f"# {lines[near].strip()}"
+                existing.add(entry.key)
+                promoted += 1
+                cursor = max(cursor, near)
+                continue
         if pos is None:
             if entry.key in existing:
                 # 正文里已经是同名标题(证据层没给落点、但后端标的标题是对的):
@@ -987,6 +1130,30 @@ def restore_headings(md: str, evidence: Sequence[Block], *,
             if len(m.group(1)) != base:
                 lines[pos] = "#" * base + " " + m.group(2)
 
+    # 日期型标题(年表里的 ``1935年`` / 日记里的 ``三月十二日``)不是章,即使证据层
+    # 把它们和章一起标成 heading(text_level=2)。实测《万延年的足球队》:年表里的
+    # 1935/1955 两个年份成了独立章,导航里与真正的十二讲并列。
+    # 只在「本书还有非日期的真章」时降级 —— 编年体全书都是年份时不动,否则整本
+    # 降成二级、pandoc 连一级标题都找不到,章节切分会全塌成一篇。
+    date_demoted = 0
+    has_real_chapter = any(_date_title_depth(entry.text) is None
+                           for entry in titles.values())
+    if base and has_real_chapter:
+        for pos, line in enumerate(lines):
+            m = _HEADING_RE.match(line)
+            if not m:
+                continue
+            text = m.group(2).strip()
+            if _title_key(text) in toc_keys or _title_key(text) in section_keys:
+                continue                       # 目录点名的就是章
+            depth = _date_title_depth(text)
+            if depth is None:
+                continue
+            target = min(6, base + depth)
+            if len(m.group(1)) < target:
+                lines[pos] = "#" * target + " " + text
+                date_demoted += 1
+
     demoted: list[str] = []
     if len(titles) >= _MIN_TITLE_SOURCES:
         # 后端明确给了 ``text_level`` 的 heading:裸编号(``2``/``3``/``4``)是分节号,
@@ -1052,6 +1219,22 @@ def restore_headings(md: str, evidence: Sequence[Block], *,
                 lines[pos] = text
                 demoted.append(text[:24])
 
+    # 卷首版式页的标签(目录/CIP/版权/出版信息)不论目录是否权威都**不是章**:
+    # 降回正文 —— 不让导航里出现「目录」「图书在版编目(CIP)数据」「京新登字 101 号」,
+    # 也不再让「目录」把整页目录正文切成一章(实测《万延年的足球队》26 章里 3 个伪章、
+    # 《中国共产党历史讲义》「目录」独占 3766 字一章)。只降标题,不动文字。
+    front_labels: list[str] = []
+    for pos, line in enumerate(lines):
+        m = _HEADING_RE.match(line)
+        if not m:
+            continue
+        text = m.group(2).strip()
+        if _title_key(text) in toc_keys:
+            continue                      # 目录自己点名的标题,不是版式标签
+        if _FRONT_MATTER_LABEL_RE.match(_key(text)):
+            lines[pos] = text
+            front_labels.append(text[:24])
+
     adopted: dict[str, str] = {}
     if toc_authoritative:
         # 字形变了但位置对得上的章标题(繁简/异体),按目录顺序补认;必须在**降级之后**
@@ -1111,6 +1294,13 @@ def restore_headings(md: str, evidence: Sequence[Block], *,
             f"标题裁决:{len(missing)} 个标题在正文里找不到落点,未补:"
             + "、".join(missing[:4])
         )
+    if front_labels:
+        notes.append(
+            f"标题裁决:卷首版式标签降级 {len(front_labels)} 个(目录/CIP/版权),不作为章:"
+            + "、".join(front_labels[:3])
+        )
+    if date_demoted:
+        notes.append(f"标题裁决:日期标题降到章内小节 {date_demoted} 个(年表/日记体)")
     return "\n".join(lines), tuple(notes)
 
 

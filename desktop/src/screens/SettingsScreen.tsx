@@ -147,6 +147,8 @@ export function SettingsScreen({
   const [saving, setSaving] = useState(false);
   const [copied, setCopied] = useState(false);
   const [pandocBusy, setPandocBusy] = useState(false);
+  const [migrating, setMigrating] = useState(false);
+  const [migrateNote, setMigrateNote] = useState<string | null>(null);
   const [savedFlash, setSavedFlash] = useState(false);
 
   const snapRef = useRef<SettingsSnapshot>({
@@ -280,6 +282,27 @@ export function SettingsScreen({
     }
   };
 
+  // 旧数据迁移:把安装目录里的 work/output/pandoc/apikey.json 搬到数据目录,
+  // 并改写书库/输出目录里指向旧位置的路径。重启后生效(目录解析在启动时算一次)。
+  const migrateLegacy = async () => {
+    setMigrating(true);
+    setMigrateNote(null);
+    try {
+      const r = await invoke<{ moved: string[]; kept: string[]; library_updated: number }>(
+        "migrate_data", { source: null });
+      if (r.moved.length === 0 && r.kept.length === 0) {
+        setMigrateNote(t.migrateNothing);
+      } else {
+        const kept = r.kept.length ? ` (${r.kept.join(", ")})` : "";
+        setMigrateNote(t.migrated(r.moved.length, r.library_updated) + kept);
+      }
+    } catch (e) {
+      setMigrateNote(String(e));
+    } finally {
+      setMigrating(false);
+    }
+  };
+
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
       <div className="gutter pt-8 shrink-0">
@@ -353,6 +376,37 @@ export function SettingsScreen({
               </div>
             )}
           </div>
+
+          {env?.data_dir && (
+            <div className="mt-4">
+              <div className="font-mono text-[10px] tracking-[0.12em] uppercase text-[var(--muted-foreground)] mb-2">{t.dataLocation}</div>
+              <Rule />
+              <div className="flex items-center gap-3 py-2 border-b border-[var(--border)]">
+                <span className={`text-[11px] text-[var(--foreground)] ${lang === "zh" ? "cjk" : ""}`}>{t.dataDir}</span>
+                <span className="font-mono text-[10px] text-[var(--muted-foreground)] truncate max-w-[420px] selectable">{env.data_dir}</span>
+              </div>
+              {(env.legacy_data?.length ?? 0) > 0 && (
+                <div className="flex items-start gap-4 py-3">
+                  <div className="flex-1">
+                    <p className={`text-[12px] text-[var(--foreground)] ${lang === "zh" ? "cjk" : ""}`}>
+                      {t.legacyDataFound}: <span className="font-mono text-[11px]">{env.legacy_data!.join(", ")}</span>
+                    </p>
+                    <p className={`text-[12px] leading-relaxed text-[var(--muted-foreground)] mt-1 ${lang === "zh" ? "cjk" : ""}`}>{t.migrateHint}</p>
+                  </div>
+                  <button
+                    onClick={() => void migrateLegacy()}
+                    disabled={migrating}
+                    className={`font-mono text-[11px] tracking-[0.08em] uppercase border border-[var(--primary)] text-[var(--primary)] px-4 py-1.5 hover:bg-[var(--primary)] hover:text-[var(--background)] disabled:opacity-50 disabled:pointer-events-none ${lang === "zh" ? "cjk font-sans" : ""}`}
+                  >
+                    {migrating ? "…" : t.migrate}
+                  </button>
+                </div>
+              )}
+              {migrateNote && (
+                <p className={`text-[12px] leading-relaxed mt-2 ${lang === "zh" ? "cjk" : ""} text-[var(--muted-foreground)]`}>{migrateNote}</p>
+              )}
+            </div>
+          )}
         </SectionCard>
         <Rule />
 

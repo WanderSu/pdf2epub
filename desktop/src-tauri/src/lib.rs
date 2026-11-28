@@ -221,6 +221,10 @@ fn failure_message(outcome: &EngineOutcome, stderr_tail: &str, exit_desc: &str) 
 ///
 /// `force=true` = 用户明确要求重转(重试 / 重新入队 / 改用 OCR):必须真的重跑,
 /// 不能被「已有产物」判成已完成而 skip。
+///
+/// `no_resume=true` = 用户明确要求**重新解析**:引擎不复用 work/ 下已落盘的云端
+/// 结果(会重新上传、重新 OCR、重新计费)。与 `force` 是两件事 —— 后者只让引擎
+/// 别把「已有 EPUB」判成已完成,复用路径照样几秒完成、产物一字不差。
 #[tauri::command]
 async fn convert_file(
     app: AppHandle,
@@ -236,6 +240,11 @@ async fn convert_file(
     clean_enable: Option<Vec<String>>,
     strict: Option<bool>,
     force: Option<bool>,
+    //  强制重新解析:不复用 work/ 下已落盘的云端结果(`--no-resume`)。
+    //  与 force 是两件事 —— force 只让引擎别把「已有 EPUB」判成已完成,复用路径
+    //  照样会命中已计费的解析结果(几秒完成、产物一模一样)。用户指着「重新解析」
+    //  要的是真的重跑时必须能表达出来,否则只能靠删 work/ 猜。
+    no_resume: Option<bool>,
 ) -> Result<ConvertResult, String> {
     let state: State<CliConfig> = app.state();
     let cli = match cli_path {
@@ -262,9 +271,17 @@ async fn convert_file(
     cmd.arg(&file_path)
         .arg("-o")
         .arg(&output_dir)
+        // 中间产物目录显式给绝对路径:装到 Program Files 后安装根只读,CLI 默认的
+        // 相对 `work/` 会直接失败;相对路径由 writable_dir 解析到数据根(旧目录优先)。
+        .arg("--work")
+        .arg(writable_dir("work"))
         .arg("--no-log")
         // 结构化事件流:stdout 只走 JSON 事件,人类日志走 stderr(前端据此算真实进度)
         .arg("--json-events");
+    // 首启下载/随包内置的 pandoc 不在 PATH 上:用已支持的显式变量告诉引擎
+    if let Some(pandoc) = bundled_pandoc() {
+        cmd.env("PDF2EPUB_PANDOC", &pandoc);
+    }
     if let Some(b) = backend {
         if !b.is_empty() && b != "auto" {
             cmd.arg("--backend").arg(b);
@@ -287,6 +304,10 @@ async fn convert_file(
     // 用户明确要求重转 → --force(否则 CLI 会因「已有产物」直接 skip,界面却像成功)
     if force.unwrap_or(false) {
         cmd.arg("--force");
+    }
+    // 用户明确要求**重新解析** → --no-resume(忽略已落盘的云端结果;会重新计费)
+    if no_resume.unwrap_or(false) {
+        cmd.arg("--no-resume");
     }
 
     let app2 = app.clone();
@@ -574,7 +595,7 @@ fn cancel_convert(app: AppHandle, task_id: String) -> Result<bool, String> {
 fn infer_epub_path(file_path: &str, output_dir: &str, started: u64) -> Option<String> {
     let path = PathBuf::from(file_path);
     let stem = path.file_stem()?.to_string_lossy().into_owned();
-    let base = resolve_dir(output_dir);
+    let base = resolve_output_dir(output_dir);
     // 1. 新命名 → 2. 旧命名(≤v0.2.1 把空格 sanitize 成下划线)
     for name in [output_stem(&stem), sanitize_name(&stem)] {
         let p = base.join(format!("{name}.epub"));
@@ -611,14 +632,24 @@ fn newest_epub_since(dir: &Path, since: u64) -> Option<PathBuf> {
     best.map(|(_, p)| p)
 }
 
-/// 相对输出目录 → 绝对路径(GUI 与 CLI 子进程 cwd 一致时等价于 CLI 的解析)。
-fn resolve_dir(dir: &str) -> PathBuf {
+/// 相对输出目录 → 绝对路径。
+///
+/// **相对路径的基准是数据根,不是进程 cwd**:cwd 取决于用户从哪启动(快捷方式的「起始
+/// 位置」、双击 exe 的目录、从终端启动),拿它当输出基准会让同一台机器上的产物散落各处;
+/// 装到 `Program Files` 时 cwd 还可能正好是只读的安装目录,直接写失败。
+///
+/// 兼容旧位置:安装根下的同名目录**已经存在**就继续用它(阶段 1 不搬运数据,
+/// 升级用户不会被突然改道);否则落到 `%LOCALAPPDATA%\pdf2epub\<dir>`。
+fn resolve_output_dir(dir: &str) -> PathBuf {
+    resolve_output_in(dir, &app_data_dir(), install_root().as_deref())
+}
+
+fn resolve_output_in(dir: &str, data_root: &Path, install: Option<&Path>) -> PathBuf {
     let p = PathBuf::from(dir);
     if p.is_absolute() {
-        p
-    } else {
-        std::env::current_dir().unwrap_or_default().join(p)
+        return p;
     }
+    writable_dir_in(install, data_root, dir)
 }
 
 // ---------- 用户数据落点:%LOCALAPPDATA%\pdf2epub\ ----------
@@ -627,7 +658,56 @@ fn resolve_dir(dir: &str) -> PathBuf {
 //  每次升级都得靠人工保留(此前 apikey.json / library.json / work / output / logs
 //  全靠人记着)。设置与书库搬到用户目录之后,升级只替换文件,数据一律不动。
 //
-//  仍然留在安装目录的是 `work/` 与 `output/`:它们是**产物**,跟着安装目录走才对。
+//  `work/`、`output/`、`apikey.json`、`pandoc/` 是**会被程序写**的东西:装到
+//  `Program Files` 之后安装目录只读,所以新写入一律走数据根;旧位置已存在的沿用
+//  (阶段 1),迁移规则见 docs/windows-install.md §5。
+
+/// 安装根(壳 exe 所在目录)。v0.6+ onedir:壳、`cli/`、`config/` 平级。
+fn install_root() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf))
+}
+
+/// 「会写的目录」落点:安装根下的旧目录已存在 → 沿用;否则数据根。
+///
+/// 阶段 1 只做「新装用户不再往安装目录写」,不搬运既有数据:升级用户的 `work/`
+/// (含已计费的 `_parts/` 云端结果)留在原地,行为与升级前完全一致。
+fn writable_dir(name: &str) -> PathBuf {
+    writable_dir_in(install_root().as_deref(), &app_data_dir(), name)
+}
+
+fn writable_dir_in(install: Option<&Path>, data_root: &Path, name: &str) -> PathBuf {
+    if let Some(root) = install {
+        let legacy = root.join(name);
+        if legacy.is_dir() {
+            return legacy;
+        }
+    }
+    data_root.join(name)
+}
+
+/// 默认输出目录:旧安装目录里有 `output/` 就沿用,否则数据根下的 `output/`。
+fn default_output_dir() -> PathBuf {
+    writable_dir("output")
+}
+
+/// 默认目录(前端启动时取一次,避免把 `%LOCALAPPDATA%` 写死进界面)。
+#[derive(serde::Serialize, Clone)]
+struct DefaultDirs {
+    output: String,
+    work: String,
+    data: String,
+}
+
+#[tauri::command]
+fn default_dirs() -> DefaultDirs {
+    DefaultDirs {
+        output: default_output_dir().to_string_lossy().into_owned(),
+        work: writable_dir("work").to_string_lossy().into_owned(),
+        data: app_data_dir().to_string_lossy().into_owned(),
+    }
+}
 
 /// 用户数据目录。接收 base 而不是直接读环境变量,是为了让测试能在临时目录里跑,
 /// 不去碰真实用户数据。
@@ -903,6 +983,249 @@ fn norm_path(p: &str) -> String {
 
 fn same_path(a: &str, b: &str) -> bool {
     norm_path(a) == norm_path(b)
+}
+
+// ------------------------------------------------ 阶段 1b:旧数据搬家到用户目录
+//
+// 目标:安装根**可写**时(绿色版)保持原样,不做任何搬运;安装根**不可写**
+// (Program Files / per-machine 安装)时,把 `work/`(含已计费的云端结果)、
+// `output/`、`pandoc/`、`apikey.json` 搬到 `%LOCALAPPDATA%\pdf2epub\` 下,
+// 并把 `library.json` / `settings.json` 里指向旧位置的路径改写到新位置。
+// 只搬「目标不存在」的项:两边都有时保留旧数据并报告,绝不覆盖。
+
+/// 安装根下会被程序写的旧位置(与 [`writable_dir`] 的名单一致)。
+const LEGACY_WRITABLE: [&str; 4] = ["work", "output", "pandoc", "apikey.json"];
+
+#[derive(serde::Serialize, Default, Debug, PartialEq)]
+struct MigrationReport {
+    /// 真正搬走的项(work/output/pandoc/apikey.json)
+    moved: Vec<String>,
+    /// 目标已存在、因此保留在旧位置的项
+    kept: Vec<String>,
+    /// 库记录里被改写的条目数
+    library_updated: usize,
+    library_path: String,
+    settings_updated: bool,
+    /// 迁移标记文件(layout.json)路径
+    marker: String,
+}
+
+fn split_components(p: &str) -> Vec<&str> {
+    p.split(['\\', '/']).filter(|s| !s.is_empty()).collect()
+}
+
+/// `value` 在 `from` 之下 → 换成 `to` 下的同名路径;不在之下返回 None。
+fn rebase_path(value: &str, from: &Path, to: &Path) -> Option<String> {
+    let from_s = from.to_string_lossy();
+    let from_parts = split_components(&from_s);
+    let value_parts = split_components(value);
+    if from_parts.is_empty() || value_parts.len() < from_parts.len() {
+        return None;
+    }
+    if !from_parts
+        .iter()
+        .zip(value_parts.iter())
+        .all(|(a, b)| a.eq_ignore_ascii_case(b))
+    {
+        return None;
+    }
+    let to_s = to.to_string_lossy().trim_end_matches(['\\', '/']).to_string();
+    let sep = std::path::MAIN_SEPARATOR;
+    let rest = value_parts[from_parts.len()..].join(&sep.to_string());
+    Some(if rest.is_empty() {
+        to_s
+    } else {
+        format!("{to_s}{sep}{rest}")
+    })
+}
+
+fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if src.is_dir() {
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            copy_tree(&entry.path(), &dst.join(entry.file_name()))?;
+        }
+        Ok(())
+    } else {
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(src, dst).map(|_| ())
+    }
+}
+
+/// 先试改名(同盘、瞬时);失败(跨盘 / 被占用)再复制 + 删除。
+fn move_path(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    match std::fs::rename(src, dst) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            copy_tree(src, dst)?;
+            if src.is_dir() {
+                std::fs::remove_dir_all(src)
+            } else {
+                std::fs::remove_file(src)
+            }
+        }
+    }
+}
+
+/// 数据根可写探测:写一个探针文件再删掉。
+fn data_dir_writable(data: &Path) -> bool {
+    std::fs::create_dir_all(data).is_ok()
+        && std::fs::write(data.join(".write-probe"), b"1").is_ok()
+        && std::fs::remove_file(data.join(".write-probe")).is_ok()
+}
+
+/// 把库记录里指向旧安装目录的 `path` / `source` 改写为数据目录下的同名位置。
+fn rewrite_library_paths_at(library: &Path, install: &Path, data: &Path) -> usize {
+    let Ok(text) = std::fs::read_to_string(library) else {
+        return 0;
+    };
+    let Ok(mut entries) = serde_json::from_str::<Vec<LibraryEntry>>(&text) else {
+        return 0;
+    };
+    let mut changed = 0;
+    for entry in entries.iter_mut() {
+        // 只改 **产物** 路径(EPUB 在 output/ 下,跟着搬了)。
+        // `source` 是用户的源 PDF,不做搬迁:它若恰好在安装目录里,改写到数据目录
+        // 反而会把「重新转换」指向一个不存在的文件。
+        if let Some(new) = rebase_path(&entry.path, install, data) {
+            entry.path = new;
+            changed += 1;
+        }
+    }
+    if changed > 0 {
+        if let Ok(json) = serde_json::to_string_pretty(&entries) {
+            let _ = std::fs::write(library, json);
+        }
+    }
+    changed
+}
+
+/// `settings.json` 里的绝对输出目录若指向旧位置,改写到数据目录。
+fn rewrite_settings_paths_at(settings: &Path, install: &Path, data: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(settings) else {
+        return false;
+    };
+    let Ok(mut cfg) = serde_json::from_str::<SettingsFile>(&text) else {
+        return false;
+    };
+    let Some(dir) = cfg.output_dir.clone() else {
+        return false;
+    };
+    let Some(new) = rebase_path(&dir, install, data) else {
+        return false;
+    };
+    cfg.output_dir = Some(new);
+    match serde_json::to_string_pretty(&cfg) {
+        Ok(json) => std::fs::write(settings, json).is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// 执行一次迁移。`library` / `settings` 显式传入 —— 测试在临时目录里跑,不碰真实数据。
+fn migrate_data_layout_at(
+    install: &Path,
+    data: &Path,
+    library: &Path,
+    settings: &Path,
+) -> Result<MigrationReport, String> {
+    if same_path(&install.to_string_lossy(), &data.to_string_lossy()) {
+        return Err("安装目录就是数据目录,无需迁移".into());
+    }
+    let marker = data.join("layout.json");
+    if marker.is_file() {
+        return Ok(MigrationReport {
+            marker: marker.display().to_string(),
+            ..MigrationReport::default()
+        });
+    }
+    if !data_dir_writable(data) {
+        return Err(format!("数据目录不可写: {}", data.display()));
+    }
+    let mut report = MigrationReport {
+        library_path: library.display().to_string(),
+        ..MigrationReport::default()
+    };
+    for name in LEGACY_WRITABLE {
+        let src = install.join(name);
+        if !src.exists() {
+            continue;
+        }
+        let dst = data.join(name);
+        if dst.exists() {
+            report.kept.push(name.to_string());   // 两边都有:保留旧数据,不覆盖
+            continue;
+        }
+        move_path(&src, &dst).map_err(|e| format!("迁移 {name} 失败: {e}"))?;
+        report.moved.push(name.to_string());
+    }
+    if report.moved.is_empty() && report.kept.is_empty() {
+        return Err(format!(
+            "{} 下没有可迁移的 work/output/pandoc/apikey.json",
+            install.display()
+        ));
+    }
+    report.library_updated = rewrite_library_paths_at(library, install, data);
+    report.settings_updated = rewrite_settings_paths_at(settings, install, data);
+    let payload = serde_json::json!({
+        "schema": 1,
+        "migrated_at": now_secs(),
+        "from": install.display().to_string(),
+        "moved": report.moved.clone(),
+    });
+    std::fs::write(&marker, serde_json::to_string_pretty(&payload).unwrap_or_default())
+        .map_err(|e| format!("写迁移标记失败: {e}"))?;
+    report.marker = marker.display().to_string();
+    Ok(report)
+}
+
+/// 命令行/界面入口:把 `source`(默认安装根)下的旧数据搬到数据目录。
+#[tauri::command]
+fn migrate_data(source: Option<String>) -> Result<MigrationReport, String> {
+    let install = source
+        .as_deref()
+        .map(PathBuf::from)
+        .or_else(install_root)
+        .ok_or_else(|| "拿不到程序目录,无法确定要迁移的旧位置".to_string())?;
+    migrate_data_layout_at(&install, &app_data_dir(), &library_db_path(), &settings_path())
+}
+
+/// 该不该在启动时自动搬家:只有「安装根不可写 + 还有旧数据 + 没搬过」三个条件
+/// 同时成立才动。可写(绿色版)一律不动 —— 用户把数据放在程序旁边是他的选择。
+fn should_auto_migrate(install: &Path, data: &Path, install_writable: bool) -> bool {
+    !same_path(&install.to_string_lossy(), &data.to_string_lossy())
+        && !data.join("layout.json").is_file()
+        && LEGACY_WRITABLE.iter().any(|name| install.join(name).exists())
+        && !install_writable
+}
+
+/// 启动时:安装根**不可写**且还有旧数据 → 自动搬家(可写就不动,尊重绿色版用户)。
+fn auto_migrate_if_needed() {
+    let Some(install) = install_root() else {
+        return;
+    };
+    let data = app_data_dir();
+    let probe = install.join(".write-probe");
+    let install_writable = std::fs::write(&probe, b"1").is_ok();
+    if install_writable {
+        let _ = std::fs::remove_file(&probe);
+    }
+    if !should_auto_migrate(&install, &data, install_writable) {
+        return;
+    }
+    match migrate_data_layout_at(&install, &data, &library_db_path(), &settings_path()) {
+        Ok(report) => eprintln!(
+            "[pdf2epub] 安装目录不可写,已把旧数据迁到 {}: {:?}",
+            data.display(),
+            report.moved
+        ),
+        Err(e) => eprintln!("[pdf2epub] 数据迁移失败,仍按旧位置运行: {e}"),
+    }
 }
 
 /// 书目上显示的日期(秒):优先「本机转换时间」,其次「首次入库时间」。
@@ -1238,6 +1561,57 @@ fn work_roots() -> Vec<PathBuf> {
     roots
 }
 
+/// 工作目录根:数据根(新布局)优先,再兼容 exe 同级/cwd 下的旧 work/(绿色版升级)。
+fn report_roots() -> Vec<PathBuf> {
+    let mut roots = vec![writable_dir("work")];
+    for r in work_roots() {
+        if !roots.contains(&r) {
+            roots.push(r);
+        }
+    }
+    roots
+}
+
+/// 读一次转换写下的质量报告(`work/<书名>/report.json`,见 batch._write_report)。
+///
+/// 先按「EPUB 文件名 → 工作目录名」直连(正常路径),再退化为扫描各工作目录的
+/// report.json 比对 `epub` 字段(产物被手工改名时也能找到)。
+#[tauri::command]
+fn conversion_report(epub: String) -> Result<serde_json::Value, String> {
+    conversion_report_in(&report_roots(), &epub)
+}
+
+fn conversion_report_in(roots: &[PathBuf], epub: &str) -> Result<serde_json::Value, String> {
+    let path = Path::new(epub);
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let stem = path
+        .file_stem()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let work_name = sanitize_work_name(&stem);
+    for root in roots {
+        let mut candidates = vec![root.join(&work_name).join("report.json")];
+        if let Ok(rd) = std::fs::read_dir(root) {
+            candidates.extend(rd.flatten().map(|e| e.path().join("report.json")));
+        }
+        for candidate in candidates {
+            let Ok(text) = std::fs::read_to_string(&candidate) else {
+                continue;
+            };
+            let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+                continue;
+            };
+            if json.get("epub").and_then(|v| v.as_str()) == Some(name.as_str()) {
+                return Ok(json);
+            }
+        }
+    }
+    Err("还没有转换报告:重新转换一次,或这份产物不是本版本生成的".into())
+}
+
 /// 从 `work/<工作目录名>/ir/meta.json` 的 `source` 字段找回源文件路径。
 fn recover_source_from_work(epub_path: &str) -> Option<String> {
     recover_source_from_roots(&work_roots(), epub_path)
@@ -1288,7 +1662,7 @@ fn library_sync(output_dir: String) -> Vec<LibraryEntry> {
         e.source = resolve_entry_source(e);
     }
     // 2. 扫描输出目录
-    let dir = resolve_dir(&output_dir);
+    let dir = resolve_output_dir(&output_dir);
     if let Ok(rd) = std::fs::read_dir(&dir) {
         for entry in rd.flatten() {
             let p = entry.path();
@@ -1409,7 +1783,7 @@ fn library_delete(path: String) -> Result<Vec<LibraryEntry>, String> {
 /// 变成「删任意 .epub」的入口。返回删除后的书库(供界面立刻刷新)。
 #[tauri::command]
 fn delete_book_output(epub: String, output_dir: String) -> Result<Vec<LibraryEntry>, String> {
-    let dir = resolve_dir(&output_dir);
+    let dir = resolve_output_dir(&output_dir);
     remove_epub_file(&epub, Some(&dir))?;
     let mut entries = load_library();
     take_library_entry(&mut entries, &epub);
@@ -1486,7 +1860,7 @@ fn open_epub(path: String) -> Result<(), String> {
 /// 目录还不存在(还没转过任何书)时也要能打开 —— 先建再开。
 #[tauri::command]
 fn open_output_dir(output_dir: String) -> Result<String, String> {
-    let dir = resolve_dir(&output_dir);
+    let dir = resolve_output_dir(&output_dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败 {}: {e}", dir.display()))?;
     tauri_plugin_opener::open_path(&dir, None::<&str>).map_err(|e| e.to_string())?;
     Ok(dir.to_string_lossy().into_owned())
@@ -1566,26 +1940,35 @@ fn apikey_candidate_dirs(cli_path: Option<&str>) -> Vec<PathBuf> {
 }
 
 /// 解析 apikey.json 的目标路径:
-/// 1. 已有的 apikey.json(优先更新用户现有文件,与 Python 侧查找顺序一致)
-/// 2. 含 config/ 的目录(= 项目根或发布目录)新建
-/// 3. 兜底:cwd
+/// 1. 数据目录里已有 → 用它(新装的唯一位置)
+/// 2. 旧位置(安装根 / 项目根)已有 → **继续用旧文件**,不制造第二份凭证
+///    (Python 侧按 cwd/exe 查找,两份文件只会让「设置页保存了、引擎读不到」)
+/// 3. 开发检出(有 `pyproject.toml`/`.venv` 且含 `config/`)→ 写项目根:
+///    开发机在项目里直接跑 CLI 时按 cwd 找凭证
+/// 4. 其余(打包安装)→ 数据目录
 fn apikey_target(cli_path: Option<&str>) -> PathBuf {
-    let dirs = apikey_candidate_dirs(cli_path);
-    for d in &dirs {
+    apikey_target_in(&app_data_dir(), &apikey_candidate_dirs(cli_path))
+}
+
+fn apikey_target_in(data_root: &Path, dirs: &[PathBuf]) -> PathBuf {
+    let data_file = data_root.join("apikey.json");
+    if data_file.is_file() {
+        return data_file;
+    }
+    for d in dirs {
         let f = d.join("apikey.json");
         if f.is_file() {
             return f;
         }
     }
-    for d in &dirs {
-        if d.join("config").is_dir() {
+    for d in dirs {
+        if (d.join("pyproject.toml").is_file() || d.join(".venv").is_dir())
+            && d.join("config").is_dir()
+        {
             return d.join("apikey.json");
         }
     }
-    dirs.into_iter()
-        .next()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("apikey.json")
+    data_file
 }
 
 /// 合并凭证到 apikey.json 文本:token 为空 → 删除该键(留给调用方决定写盘)。
@@ -1629,7 +2012,7 @@ fn harden_apikey_permissions(target: &std::path::Path) {
     };
     let _ = std::process::Command::new("icacls")
         .arg(target.to_string_lossy().to_string())
-        .args(["/inheritance:r", "/grant:r", &format!("{principal}:(R,W)")])
+        .args(["/inheritance:r", "/grant:r", &format!("{principal}:(F)")])   // (F):属主仍要能改名/删除/迁移
         .creation_flags(CREATE_NO_WINDOW)
         .output();
 }
@@ -2574,16 +2957,25 @@ struct EnvCheckResult {
     apikey_path: Option<String>,
     /// 凭证文件权限是否已收紧(None = 还没有凭证文件;Some(false) = 收紧失败)
     apikey_perms_ok: Option<bool>,
+    /// 数据根(`%LOCALAPPDATA%\pdf2epub`),设置页展示并作为迁移目标
+    data_dir: String,
+    /// 安装目录里还存在、可迁移的旧数据项
+    legacy_data: Vec<String>,
 }
 
-/// 随包内置 pandoc 的候选位置(安装根的 pandoc/ 子目录;新旧布局都查)。
+/// 随包内置 pandoc 的候选位置:数据根(`%LOCALAPPDATA%\pdf2epub\pandoc\`,首启下载目标)
+/// 优先,其次是安装根的 `pandoc/` 子目录(旧绿色版/手工放置)。
 fn bundled_pandoc() -> Option<PathBuf> {
+    let data_dir = app_data_dir().join("pandoc");
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
+    let install_dir = dir.join("pandoc");
     // v0.6+ onedir 布局:exe、cli/、pandoc/ 平级;旧布局:cli.exe 与 pandoc/ 平级
-    for p in [dir.join("pandoc").join("pandoc.exe"), dir.join("pandoc").join("pandoc")] {
-        if p.is_file() {
-            return Some(p);
+    for base in [&data_dir, &install_dir] {
+        for p in [base.join("pandoc.exe"), base.join("pandoc")] {
+            if p.is_file() {
+                return Some(p);
+            }
         }
     }
     None
@@ -2674,20 +3066,28 @@ fn parse_curl_percent(frame: &str) -> Option<u32> {
     digits.parse::<f64>().ok().map(|v| v.clamp(0.0, 100.0) as u32)
 }
 
-/// 下载并内置 pandoc 到安装根的 pandoc/(幂等:已内置时直接返回路径)。
+/// 下载并内置 pandoc 到**数据目录**的 pandoc/(幂等:已内置时直接返回路径)。
+///
+/// 装到 `Program Files` 后安装根只读,下载目标必须落在 `%LOCALAPPDATA%\pdf2epub\pandoc`;
+/// 引擎侧通过 `PDF2EPUB_PANDOC` 显式拿到这个路径(见 convert_file),不依赖 PATH。
 ///
 /// 下载用系统自带的 curl.exe(Windows 10 1803+),避免为了一次性下载引入
 /// HTTP 客户端依赖;解压复用已有的 zip crate。进度通过 `pandoc-install`
 /// 事件推给前端(downloading 带 percent)。
 #[tauri::command]
 async fn install_pandoc(app: AppHandle) -> Result<String, String> {
-    let exe = std::env::current_exe().map_err(|e| format!("无法定位应用目录: {e}"))?;
-    let root = exe.parent().ok_or("无法定位应用目录")?.to_path_buf();
+    // 旧位置(安装根 pandoc/)已经有就直接用,不重复下载
+    if let Some(existing) = bundled_pandoc() {
+        return Ok(existing.to_string_lossy().into_owned());
+    }
+    let root = app_data_dir();
     let pandoc_dir = root.join("pandoc");
     let target = pandoc_dir.join("pandoc.exe");
     if target.is_file() {
         return Ok(target.to_string_lossy().into_owned());
     }
+    std::fs::create_dir_all(&pandoc_dir)
+        .map_err(|e| format!("无法创建 pandoc 目录 {}: {e}", pandoc_dir.display()))?;
     let tmp_zip = root.join("pandoc-download.zip");
 
     // ---- 1. 下载(curl 的进度条走 stderr,\r 分帧) ----
@@ -2978,6 +3378,16 @@ fn check_env(app: AppHandle) -> EnvCheckResult {
         ai_configured,
         apikey_path,
         apikey_perms_ok,
+        data_dir: app_data_dir().display().to_string(),
+        legacy_data: install_root()
+            .map(|root| {
+                LEGACY_WRITABLE
+                    .iter()
+                    .filter(|name| root.join(name).exists())
+                    .map(|name| name.to_string())
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 
@@ -2985,6 +3395,9 @@ fn check_env(app: AppHandle) -> EnvCheckResult {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 安装根不可写(per-machine 安装)时先把旧数据搬到用户目录,再建窗口 ——
+    // 否则首屏读到的还是「空书库」,用户以为数据丢了。
+    auto_migrate_if_needed();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -3005,10 +3418,13 @@ pub fn run() {
             ai_apply_preview,
             library_sync,
             epub_cover,
+            conversion_report,
+            migrate_data,
             library_set_meta,
             library_delete,
             delete_book_output,
             load_settings,
+            default_dirs,
             save_settings,
             clean_baseline,
             open_epub,
@@ -3327,34 +3743,213 @@ mod tests {
     }
 
     #[test]
-    fn apikey_target_falls_back_to_project_root() {
-        // 无 apikey.json 时选「含 config/ 的目录」(= 项目根/发布目录)。
-        // 若本机 cwd 或 exe 目录已存在 apikey.json(开发机可能如此),
-        // 「已有文件优先」会先命中,该断言不适用 → 跳过。
-        let cwd_has = std::env::current_dir()
-            .map(|d| d.join("apikey.json").is_file())
-            .unwrap_or(false);
-        let exe_has = std::env::current_exe()
-            .ok()
-            .and_then(|e| e.parent().map(|d| d.join("apikey.json").is_file()))
-            .unwrap_or(false);
-        if cwd_has || exe_has {
-            return;
-        }
-        let base = std::env::temp_dir().join(format!("pdf2epub-ak-{}", std::process::id()));
-        let proj = base.join("proj");
-        std::fs::create_dir_all(proj.join("config")).unwrap();
-        let cli = proj.join(".venv/Scripts/ebook-converter.exe");
+    fn writable_dirs_prefer_legacy_install_layout() {
+        // 阶段 1 的迁移策略:旧位置存在就沿用,不存在才落到数据根。
+        let base = std::env::temp_dir().join(format!("pdf2epub-wd-{}", std::process::id()));
+        let install = base.join("install");
+        let data = base.join("data");
+        std::fs::create_dir_all(&install).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        assert_eq!(writable_dir_in(Some(&install), &data, "work"), data.join("work"));
+        std::fs::create_dir_all(install.join("output")).unwrap();
         assert_eq!(
-            apikey_target(Some(&cli.to_string_lossy())),
-            proj.join("apikey.json")
+            writable_dir_in(Some(&install), &data, "output"),
+            install.join("output")
         );
-        // 已存在的 apikey.json 优先于新建(与 Python 侧查找顺序一致)
-        let existing = proj.join(".venv/Scripts/apikey.json");
-        std::fs::create_dir_all(existing.parent().unwrap()).unwrap();
-        std::fs::write(&existing, "{}").unwrap();
-        assert_eq!(apikey_target(Some(&cli.to_string_lossy())), existing);
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn relative_output_uses_data_root_not_cwd() {
+        // 相对输出目录不能按进程 cwd 解析:快捷方式的「起始位置」不可控。
+        let base = std::env::temp_dir().join(format!("pdf2epub-out-{}", std::process::id()));
+        let data = base.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        assert_eq!(resolve_output_in("output", &data, None), data.join("output"));
+        let abs = if cfg!(windows) { "C:\\books" } else { "/books" };
+        assert_eq!(resolve_output_in(abs, &data, None), PathBuf::from(abs));
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn apikey_prefers_data_dir_then_legacy_then_dev_checkout() {
+        let base = std::env::temp_dir().join(format!("pdf2epub-ak-{}", std::process::id()));
+        let data = base.join("data");
+        let install = base.join("install");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(install.join("config")).unwrap();
+
+        // 1. 打包安装(安装根只有 config/):新凭证写数据目录
+        assert_eq!(apikey_target_in(&data, &[install.clone()]), data.join("apikey.json"));
+        // 2. 旧位置已有凭证 → 继续用旧文件,不制造第二份
+        std::fs::write(install.join("apikey.json"), "{}").unwrap();
+        assert_eq!(
+            apikey_target_in(&data, &[install.clone()]),
+            install.join("apikey.json")
+        );
+        // 3. 数据目录已有 → 数据目录优先
+        std::fs::write(data.join("apikey.json"), "{}").unwrap();
+        assert_eq!(apikey_target_in(&data, &[install.clone()]), data.join("apikey.json"));
+
+        // 4. 开发检出(有 pyproject.toml + config/)→ 写项目根:
+        //    引擎在项目里直接跑时按 cwd 找凭证,写到用户目录会「设置页保存了、CLI 读不到」。
+        let dev = base.join("dev");
+        std::fs::create_dir_all(dev.join("config")).unwrap();
+        std::fs::write(dev.join("pyproject.toml"), "").unwrap();
+        let data2 = base.join("data2");
+        std::fs::create_dir_all(&data2).unwrap();
+        assert_eq!(apikey_target_in(&data2, &[dev.clone()]), dev.join("apikey.json"));
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn conversion_report_is_found_by_work_dir_and_by_scan() {
+        let base = std::env::temp_dir().join(format!("pdf2epub-report-{}", std::process::id()));
+        let work = base.join("work");
+        let dir = work.join(sanitize_work_name("报告书"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let report = serde_json::json!({"epub": "报告书.epub", "pages": 12, "schema": 1});
+        std::fs::write(dir.join("report.json"), serde_json::to_string(&report).unwrap()).unwrap();
+
+        // 正常路径:EPUB 名 → 工作目录名直连
+        let got = conversion_report_in(&[work.clone()], "C:/out/报告书.epub").unwrap();
+        assert_eq!(got["pages"], 12);
+        // 产物被手工改名:直连找不到,靠 report 里的 epub 字段扫描兜底
+        std::fs::create_dir_all(work.join("别的工作目录")).unwrap();
+        std::fs::write(
+            work.join("别的工作目录").join("report.json"),
+            serde_json::to_string(&serde_json::json!({"epub": "改过名的.epub", "pages": 3}))
+                .unwrap(),
+        )
+        .unwrap();
+        let renamed = conversion_report_in(&[work.clone()], "C:/out/改过名的.epub").unwrap();
+        assert_eq!(renamed["pages"], 3);
+        // 没有报告 → 明确报错(界面据此提示「重新转换一次」)
+        assert!(conversion_report_in(&[work], "C:/out/没有报告.epub").is_err());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn rebase_path_only_rewrites_paths_under_the_old_root() {
+        let from = std::env::temp_dir().join("pdf2epub-rebase-inst");
+        let to = std::env::temp_dir().join("pdf2epub-rebase-data");
+        let hit = from.join("output").join("a.epub");
+        let expect = to.join("output").join("a.epub");
+        assert_eq!(
+            rebase_path(&hit.to_string_lossy(), &from, &to),
+            Some(expect.to_string_lossy().into_owned())
+        );
+        // 只是前缀相同的兄弟目录:不能误伤
+        let sibling = format!("{}-other", from.display());
+        assert_eq!(rebase_path(&sibling, &from, &to), None);
+        assert_eq!(rebase_path(&to.to_string_lossy(), &from, &to), None);
+    }
+
+    #[test]
+    fn auto_migration_only_runs_for_read_only_installs_with_legacy_data() {
+        let base = std::env::temp_dir().join(format!("pdf2epub-auto-mig-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let install = base.join("install");
+        let data = base.join("data");
+        std::fs::create_dir_all(install.join("work")).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+
+        // 安装根可写(绿色版)→ 不动
+        assert!(!should_auto_migrate(&install, &data, true));
+        // 不可写且有旧数据 → 搬
+        assert!(should_auto_migrate(&install, &data, false));
+        // 已经搬过(标记在)→ 不再搬
+        std::fs::write(data.join("layout.json"), "{}").unwrap();
+        assert!(!should_auto_migrate(&install, &data, false));
+        std::fs::remove_file(data.join("layout.json")).unwrap();
+        // 没有旧数据 → 没有可搬的
+        std::fs::remove_dir_all(install.join("work")).unwrap();
+        assert!(!should_auto_migrate(&install, &data, false));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn migrate_data_moves_legacy_items_and_rewrites_records() {
+        let base = std::env::temp_dir().join(format!("pdf2epub-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let install = base.join("install");
+        let data = base.join("data");
+        std::fs::create_dir_all(install.join("work").join("book")).unwrap();
+        std::fs::write(install.join("work").join("book").join("book.md"), "x").unwrap();
+        std::fs::create_dir_all(install.join("output")).unwrap();
+        std::fs::write(install.join("output").join("书.epub"), "epub").unwrap();
+        std::fs::write(install.join("apikey.json"), "{}").unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        let library = data.join("library.json");
+        let settings = data.join("settings.json");
+        std::fs::write(
+            &library,
+            serde_json::json!([{
+                "path": install.join("output").join("书.epub").display().to_string(),
+                "title": "书", "author": "", "size": 4, "mtime": 1, "added_at": 1,
+                "source": install.join("原书.pdf").display().to_string(),
+            }])
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            &settings,
+            serde_json::json!({"output_dir": install.join("output").display().to_string()})
+                .to_string(),
+        )
+        .unwrap();
+
+        let report = migrate_data_layout_at(&install, &data, &library, &settings).unwrap();
+        assert_eq!(report.moved, vec!["work", "output", "apikey.json"]);
+        assert!(report.kept.is_empty());
+        assert!(data.join("work").join("book").join("book.md").is_file());
+        assert!(data.join("output").join("书.epub").is_file());
+        assert!(!install.join("work").exists());
+        assert!(!install.join("apikey.json").exists());
+        assert!(data.join("layout.json").is_file());
+        assert_eq!(report.library_updated, 1);
+
+        let entries: Vec<LibraryEntry> =
+            serde_json::from_str(&std::fs::read_to_string(&library).unwrap()).unwrap();
+        assert_eq!(Path::new(&entries[0].path), data.join("output").join("书.epub"));
+        // 不在旧安装根下的路径(源 PDF 在别处)一个字节都不改
+        assert_eq!(
+            Path::new(entries[0].source.as_deref().unwrap()),
+            install.join("原书.pdf")
+        );
+        let cfg: SettingsFile =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(Path::new(cfg.output_dir.as_deref().unwrap()), data.join("output"));
+
+        // 幂等:标记已写 → 再跑不搬、不报错
+        let again = migrate_data_layout_at(&install, &data, &library, &settings).unwrap();
+        assert!(again.moved.is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn migrate_data_keeps_items_already_present_at_destination() {
+        let base = std::env::temp_dir().join(format!("pdf2epub-migrate2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let install = base.join("install");
+        let data = base.join("data");
+        std::fs::create_dir_all(install.join("work")).unwrap();
+        std::fs::write(install.join("work").join("old.md"), "old").unwrap();
+        std::fs::create_dir_all(data.join("work")).unwrap();
+        std::fs::write(data.join("work").join("new.md"), "new").unwrap();
+        let library = data.join("library.json");
+        let settings = data.join("settings.json");
+        std::fs::write(&library, "[]").unwrap();
+        std::fs::write(&settings, "{}").unwrap();
+
+        let report = migrate_data_layout_at(&install, &data, &library, &settings).unwrap();
+        assert_eq!(report.kept, vec!["work"]);
+        assert!(report.moved.is_empty());
+        assert!(install.join("work").join("old.md").is_file(), "旧数据不能被覆盖/删除");
+        assert!(data.join("work").join("new.md").is_file());
+        assert!(data.join("layout.json").is_file());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

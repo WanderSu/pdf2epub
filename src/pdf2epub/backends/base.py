@@ -406,13 +406,60 @@ def _read_json(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+#: 原始 HTML 图片标签(后端常把版面原样抄进 Markdown)
+_IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
+_IMG_SIZE_ATTR_RE = re.compile(r'\s(width|height)="([^"]*)"', re.IGNORECASE)
+#: XHTML 的 width/height 只接受整数;百分比/带单位/auto 一律不合法
+_IMG_SIZE_VALUE_RE = re.compile(r"(\d+(?:\.\d+)?)(%|px|em|rem|pt|cm|mm|in)?", re.IGNORECASE)
+
+
+def fix_img_size_attrs(md: str) -> str:
+    """把 ``<img width="52%">`` 里的非法尺寸挪进 ``style``。
+
+    EPUB 3(XHTML)的 ``width`` / ``height`` 属性**只接受整数**:后端把版面原样抄成
+    ``<img alt="Image" width="52%">`` 时,pandoc 会原样透传,EPUBCheck 对整本书报
+    ``RSC-005: value of attribute "width" is invalid; must be an integer``。百分比
+    本身是合法 CSS,所以挪进 ``style="width:52%"`` 即可,不动 src/alt。
+    读不出来的值(比如 ``auto`` 以外的怪字符串)直接丢掉 —— 宁可没尺寸,不留非法属性。
+    """
+    def fix_tag(match: re.Match[str]) -> str:
+        tag = match.group(0)
+        moved: list[str] = []
+
+        def fix_attr(attr: re.Match[str]) -> str:
+            value = attr.group(2).strip()
+            if value.isdigit():                      # 纯整数:合法,原样保留
+                return attr.group(0)
+            if _IMG_SIZE_VALUE_RE.fullmatch(value):
+                moved.append(f"{attr.group(1).lower()}:{value}")
+            return ""
+
+        new_tag = _IMG_SIZE_ATTR_RE.sub(fix_attr, tag)
+        if not moved:
+            return new_tag
+        style = "; ".join(moved)
+        if re.search(r'\sstyle="', new_tag, re.IGNORECASE):
+            return re.sub(r'(\sstyle=")', rf'\1{style}; ', new_tag, count=1,
+                          flags=re.IGNORECASE)
+        # 自闭合 ``<img ... />`` 必须插在 ``/>`` 之前:插到最末尾会变成
+        # ``<img ... / style="...">`` —— 属性被打断,pandoc 认不出这是图片,
+        # 整本书的插图会静默消失(实测《夜行货车》两张图丢了)。
+        if new_tag.endswith("/>"):
+            return new_tag[:-2].rstrip() + f' style="{style}" />'
+        return new_tag[:-1] + f' style="{style}"' + ">"
+
+    return _IMG_TAG_RE.sub(fix_tag, md)
+
+
 def normalize_image_refs(md: str, images_abs: Path, images_dir: str = "images") -> str:
-    """把 Markdown 中的图片引用前缀规范化为相对 images/。
+    """把 Markdown 中的图片引用前缀规范化为相对 images/,并修掉非法尺寸属性。
 
     不同后端输出的引用前缀不同(绝对路径 / 相对路径 / 相对 cwd / 正反斜杠),
-    统一替换为 "images/xxx"(相对 work_dir)。
+    统一替换为 "images/xxx"(相对 work_dir)。尺寸属性见 :func:`fix_img_size_attrs`。
     """
     import os
+
+    md = fix_img_size_attrs(md)
 
     prefixes = {
         str(images_abs),

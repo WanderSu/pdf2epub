@@ -9,6 +9,14 @@ ocr_backend: mineru
 #           检测不出时回退 zh-CN。CLI --lang 优先级更高。
 language: ""
 
+# 产物校验(在项目自带的「结构 + 内容」校验之外,可选再跑一次 EPUBCheck)
+# off  = 不跑;auto = 装了 Java + epubcheck.jar 就跑(问题只记警告,不判失败);
+# on   = 跑,且规范错误判转换失败。
+# Jar 的获取: uv run python scripts/install_epubcheck.py
+# 环境变量 PDF2EPUB_EPUBCHECK 可临时覆盖这一项。
+verify:
+  epubcheck: auto
+
 # MinerU Cloud 参数(凭证:环境变量 MINERU_API_TOKEN)
 mineru:
   model_version: vlm        # pipeline | vlm(推荐) | MinerU-HTML

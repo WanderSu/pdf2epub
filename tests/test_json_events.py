@@ -328,9 +328,12 @@ def test_preflight_backend_matches_auto_conversion(tmp_path: Path, capsys) -> No
 
 
 def test_preflight_backend_matches_backend_override(tmp_path: Path, capsys) -> None:
-    """`--backend pymupdf`(桌面端设置里的后端偏好):预检与实际转换都必须是它,
-    而且实际转换**不发 plan 事件**(壳按带 backend 的阶段事件显示徽标)——
-    两边对不上就会出现「UI 显示 local、实际用 cloud」。"""
+    """`--backend pymupdf`(桌面端设置里的后端偏好):预检与实际转换都必须是它。
+
+    而且实际转换**也要发 plan**:桌面的进度条拿 plan/detect 里的页数当分母,
+    手动指定后端这条分支以前一条 plan 都不发 —— 「整本 417 页在 OCR」在界面上
+    就成了「没有页数、没有进度」,看起来像被直接跳过了。
+    """
     pdf = make_pdf(tmp_path / "本地书.pdf", pages=3)
     plan = _preflight_plan(capsys, "--backend", "pymupdf", str(pdf))
     assert plan["backend"] == "pymupdf" and plan["kind"] == "pdf-text"
@@ -339,7 +342,9 @@ def test_preflight_backend_matches_backend_override(tmp_path: Path, capsys) -> N
                    "--no-log", "--json-events", "--backend", "pymupdf"])
     assert rc == 0
     items = parse_json_lines(capsys.readouterr().out)
-    assert events_of(items, "plan") == [], "显式指定后端时不发 plan(避免与预检口径分叉)"
+    runtime = events_of(items, "plan")[0]
+    assert runtime["backend"] == plan["backend"], "预检与实跑不能各说一套"
+    assert runtime["pages"] == 3 and runtime["ocr_pages"] == 0
     backends = {i["backend"] for i in events_of(items, "stage") if "backend" in i}
     assert backends == {"pymupdf"}, backends
 
@@ -432,6 +437,48 @@ def test_mineru_reports_shards_and_progress(tmp_path: Path, monkeypatch, capsys)
     assert shards["ranges"] == ["1-200", "201-400", "401-450"]
     prog = events_of(items, "progress")
     assert [p["current"] for p in prog] == [1, 2, 3] and all(p["total"] == 3 for p in prog)
+
+
+def test_reusing_cached_ocr_is_reported_not_silent(tmp_path: Path, monkeypatch) -> None:
+    """第二次跑(桌面端「重新解析」)直接复用已计费的云端结果 → 必须发 `reuse`。
+
+    被钉住的缺陷:复用路径一条事件都不发 —— 一本几百页的书两秒就「完成」,
+    与「被跳过、直接拿旧产物」在界面上完全一样。用户唯一的验证办法是删掉 work/
+    重跑,而那会再付一次云端 OCR 的钱。
+    """
+    from pdf2epub.backends import mineru_backend
+    from pdf2epub.batch import process_batch
+    from test_ocr_sharding_resume import install_fake_cloud
+
+    fake = install_fake_cloud(monkeypatch)      # 假 MinerU:替换 requests/sleep
+    monkeypatch.setattr(mineru_backend, "load_api_key", lambda *a, **k: "fake-token")
+    pdf = make_paged_pdf(tmp_path / "扫描书.pdf", 8)
+    kwargs = dict(
+        config={"ocr_backend": "mineru", "mineru": {"max_pages_per_task": 200}},
+        work_root=tmp_path / "work", output_dir=tmp_path / "out",
+        backend_override="mineru", force=True,
+    )
+
+    first = io.StringIO()
+    events.configure(stream=first)
+    assert process_batch([pdf], **kwargs)[0].status == "done"
+    first_items = parse_json_lines(first.getvalue())
+    assert events_of(first_items, "reuse") == [], "第一次真的调了云端,不该说复用"
+    assert events_of(first_items, "complete")[0]["cached"] is False
+    # 手动指定后端也要报页数(界面的进度分母 / 「页数」列)
+    assert events_of(first_items, "plan")[0]["pages"] == 8
+
+    submitted = len(fake.batches)
+    second = io.StringIO()
+    events.configure(stream=second)
+    assert process_batch([pdf], **kwargs)[0].status == "done"
+    second_items = parse_json_lines(second.getvalue())
+    reuse = events_of(second_items, "reuse")
+    assert len(reuse) == 1, "复用已落盘的解析结果必须明说"
+    assert (reuse[0]["backend"], reuse[0]["pages"], reuse[0]["reused_parts"]) == \
+        ("mineru", 8, 1)
+    assert len(fake.batches) == submitted, "复用不能重新提交云端任务(不重复计费)"
+    assert events_of(second_items, "complete")[0]["cached"] is True
 
 
 def test_progress_window_rescales_inner_reports(capsys) -> None:

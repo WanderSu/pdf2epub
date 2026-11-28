@@ -3,8 +3,8 @@
 import type { StageNode, StageState } from "./events";
 import {
   CLEAN_DEFAULTS, CLEAN_KEYS, LEGACY_KEYS, MAX_RECENT,
-  type Backend, type CleanKey, type CleanOpts, type FileType, type RecentEntry,
-  type ReviewRow, type RowBackend, type SettingsFile,
+  type Backend, type BackendPref, type CleanKey, type CleanOpts, type FileType,
+  type RecentEntry, type ReviewRow, type RowBackend, type SettingsFile,
 } from "./types";
 
 // ── LOG PARSERS(legacy 兜底:仅在事件流缺失时使用)────────────────────────────
@@ -112,6 +112,44 @@ export function backendFromPlan(b: string): Backend {
   if (/paddle/.test(b)) return "PaddleOCR";
   if (/mineru/.test(b)) return "MinerU";
   return "Auto";
+}
+
+/** 徽标 → CLI 的 `--backend` 值。`null` = 不传(听检测与全局偏好)。
+ *
+ *  重试 / 重新入队 / 书库重新转换都必须带上**这一行实际用过的后端**:
+ *  行上写着 PADDLE、重跑却退回全局偏好(Auto → config.yaml 的 `ocr_backend`,
+ *  默认 mineru),用户点了「用 PaddleOCR 重跑」却跑了一遍 MinerU,界面上还看不出
+ *  来 —— 因为徽标停在 PADDLE。后端是这一行的属性,不是一次性的选择。
+ */
+export function backendToCli(b: Backend | undefined): string | null {
+  if (b === "MinerU") return "mineru";
+  if (b === "PaddleOCR") return "paddleocr";
+  if (b === "Local") return "pymupdf";
+  return null;
+}
+
+/** 一次转换**实际**要传给 CLI 的 `--backend`(null = 不传,由引擎按检测+配置决定)。
+ *
+ *  优先级:本次显式指定 > 这一行上次实际用的后端 > 设置里的全局偏好。
+ *
+ *  - `current` 有值(复核表里逐行选过 / 改用 OCR)→ 就是它;
+ *  - `current === null`(表里选了「自动」)→ 听全局偏好,不再拿徽标回填;
+ *  - `current === undefined`(重试 / 重新入队这类「照旧再来一遍」)→ 回填这一行
+ *    上次用的后端,但**混合型(HYB)/ Markdown 除外**:hybrid 的徽标取的是 ocr
+ *    主干(`hybrid(mineru)` → MinerU),拿它当 `--backend mineru` 会把「按页路由」
+ *    变成「整本 OCR」—— 页数、费用、产物全变。
+ */
+export function resolveCliBackend(
+  current: string | null | undefined,
+  row: { backend: Backend; type?: FileType },
+  pref: BackendPref,
+): string | null {
+  if (typeof current === "string" && current !== "auto") return current;
+  if (current === undefined && row.type !== "HYB" && row.type !== "MD") {
+    const own = backendToCli(row.backend);
+    if (own) return own;
+  }
+  return pref === "auto" ? null : pref;
 }
 
 // ── 复核表的逐行后端 ──────────────────────────────────────────────────────────

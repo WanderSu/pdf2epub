@@ -1,14 +1,18 @@
-"""项目路径解析(兼容源码运行与打包后运行)。
+r"""项目路径解析(兼容源码运行与打包后运行)。
 
 config/ 查找顺序:
   1. 环境变量 PDF2EPUB_HOME(项目根)
   2. 当前工作目录下的 config/(CLI 在项目根运行)
   3. **exe 同级 config/**(旧绿色版:解压目录即根)
   4. **exe 上级 config/**(v0.6+ onedir 布局:引擎在 cli/ 子目录,config/ 在安装根)
-  5. 模块相对位置(源码开发模式)
+  5. 用户数据目录(`%LOCALAPPDATA%\pdf2epub`,桌面端新布局)
+  6. 模块相对位置(源码开发模式)
 
-apikey.json 同理(工作目录 → exe 同级 → exe 上级 → 项目根),与桌面端 Rust 侧的
-候选顺序保持一致,避免「设置页保存了凭证、引擎却读不到」。
+apikey.json 同理(工作目录 → exe 同级 → exe 上级 → 用户数据目录 → 项目根),
+与桌面端 Rust 侧的候选顺序保持一致,避免「设置页保存了凭证、引擎却读不到」。
+**用户数据目录这一条是必须的**:桌面端 0.6.2 起把凭证写在 `%LOCALAPPDATA%\pdf2epub`
+(安装目录可能只读),壳调用引擎时 cwd 是安装根 —— 少了它,设置页显示「已配置」,
+转换却报「缺少 Token」(装到 Program Files 后必然踩到)。
 """
 from __future__ import annotations
 
@@ -46,6 +50,19 @@ def _module_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def data_root() -> Path | None:
+    r"""桌面端的用户数据目录(`%LOCALAPPDATA%\pdf2epub`)。
+
+    优先读 ``PDF2EPUB_DATA``(测试/便携部署可覆盖),否则 Windows 用 LOCALAPPDATA。
+    其他平台没有这个约定时返回 None —— 命令行用户把 apikey.json 放在 cwd 即可。
+    """
+    env = os.environ.get("PDF2EPUB_DATA")
+    if env:
+        return Path(env)
+    local = os.environ.get("LOCALAPPDATA")
+    return (Path(local) / "pdf2epub") if local else None
+
+
 def _roots() -> list[Path]:
     """按优先级排列的候选根目录(cwd → exe 同级 → exe 上级 → 源码根)。
 
@@ -57,6 +74,9 @@ def _roots() -> list[Path]:
     if exe is not None:
         roots.append(exe)
         roots.append(exe.parent)
+    data = data_root()
+    if data is not None:
+        roots.append(data)
     roots.append(_module_root())
     return roots
 
@@ -123,7 +143,10 @@ def _tighten_windows(target: Path) -> bool:
         return False
     domain = os.environ.get("USERDOMAIN", "").strip()
     principal = f"{domain}\\{user}" if domain else user
-    grant = f"{principal}:(R,W)"
+    # 属主给 (F) 而不是 (R,W):凭证是用户自己的文件,只有读写权限的话
+    # 连删除/改名/迁移都做不了(实测:删除旧安装目录时 apikey.json 报 Access denied,
+    # 阶段 1b 的搬家同样会失败)。「仅属主可访问」的语义由 /inheritance:r 保证。
+    grant = f"{principal}:(F)"
     creation_flags = 0x08000000  # CREATE_NO_WINDOW:不闪黑窗
     try:
         # /inheritance:r 去掉父目录继承来的条目,/grant:r 覆盖旧的显式条目

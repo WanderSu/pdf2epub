@@ -154,6 +154,16 @@ def corrupt_zip_member(path: Path) -> Path:
     return path
 
 
+@pytest.fixture(autouse=True)
+def _no_epubcheck_in_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    """测试里默认关掉 EPUBCheck:它依赖本机 java + jar,每次转换都起一个 JVM。
+
+    默认配置是 `verify.epubcheck: auto`,开发机装了 jar 时会让整套用例慢一倍以上,
+    而且结果依赖环境。需要验证接线的用例自己 monkeypatch(见 test_epubcheck.py)。
+    """
+    monkeypatch.setenv("PDF2EPUB_EPUBCHECK", "off")
+
+
 @pytest.fixture(scope="session")
 def sample_epub(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """一份结构完整的 EPUB(含图片 + MathML 公式)。"""

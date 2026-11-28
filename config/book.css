@@ -550,21 +550,22 @@ li p {
 
 /* ------------------------------------------------------------
    目录页(EPUB nav.xhtml)
-   产物侧已把 pandoc 的 <ol class="toc"> 换成 <ul class="toc">:
-   目录不需要 1./2./3. 数字序号,一个圆点标识 + 层级缩进就够了。
-   嵌套目录单独收敛缩进,避免每深一层就多压 2em。
+   **必须保留 <ol class="toc">**:EPUB 3 规定 toc 导航里是有序列表,换成 <ul>
+   会被 EPUBCheck 判 RSC-005(整本书不合规)。编号由这里用 CSS 去掉,
+   层级缩进收敛一下,避免每深一层就多压 2em。
    ------------------------------------------------------------ */
-ul.toc {
-  list-style-type: disc;
+ol.toc {
+  list-style-type: none;
   padding-left: 1.4em;
 }
 
-ul.toc ul.toc {
+ol.toc ol.toc {
   margin: 0.15em 0 0;
   padding-left: 1.3em;
+  list-style-type: none;
 }
 
-ul.toc > li {
+ol.toc > li {
   margin-bottom: 0.35em;
 }
 

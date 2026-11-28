@@ -115,7 +115,7 @@ SKIP_REASONS: tuple[str, ...] = (
 CONFIDENCES: tuple[str, ...] = ("explicit", "derived", "heuristic")
 RISKS: tuple[str, ...] = ("low", "medium", "high")
 EVIDENCE_SOURCES: tuple[str, ...] = (
-    "evidence_block", "md_block", "geometry", "text_rule", "unknown",
+    "evidence_block", "md_block", "geometry", "text_rule", "continuity", "unknown",
 )
 
 RULE_ID_SET = frozenset(RULE_IDS)

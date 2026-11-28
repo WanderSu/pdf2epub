@@ -289,7 +289,7 @@ console.log("[终态:complete / skip / error]");
 // ── 6. 后端一致性(Case E):override 下没有 plan 事件也要显示真实后端 ────────
 console.log("[backend override 一致性]");
 {
-  // 手动指定 mineru:引擎不发 plan,只有带 backend 的 extract 阶段
+  // 老版引擎:手动指定 mineru 时不发 plan,只有带 backend 的 extract 阶段
   const { st } = feed([
     `{"event":"stage","name":"detect","state":"done","skipped":true}`,
     `{"event":"stage","name":"extract","state":"start","backend":"mineru"}`,
@@ -306,6 +306,52 @@ console.log("[backend override 一致性]");
   // 与 CLI `--dry-run --json` 的 backend 字段同源:hybrid 取主干括号里的后端
   const { st: hybrid } = feed([`{"event":"plan","backend":"hybrid(paddleocr)","pages":9,"shards":1}`]);
   check("hybrid(paddleocr) → PaddleOCR", hybrid.backend === "PaddleOCR", String(hybrid.backend));
+}
+
+// ── 7. 手动后端的页数/页级进度,以及「复用已落盘结果」────────────────────────
+//  被钉住的两个界面症状:
+//   a) 手动指定后端时引擎不发 plan → 页数空着、进度条没有分母 → 看起来像跳过;
+//   b) OCR 结果从 _parts/ 复用时一条事件都不发 → 几百页的书两秒「完成」,
+//      与「跳过、直接拿旧产物」在界面上完全一样(用户只能删 work/ 来验证)。
+console.log("[手动后端 plan / 缓存复用]");
+{
+  const { st, progress } = feed([
+    `{"event":"stage","name":"detect","state":"done","skipped":true}`,
+    `{"event":"plan","backend":"paddleocr","pages":417,"ocr_pages":417,"ocr_runs":1,"shards":1}`,
+    `{"event":"stage","name":"extract","state":"start","backend":"paddleocr"}`,
+    `{"event":"progress","stage":"extract","current":12,"total":417,"detail":"paddleocr"}`,
+    `{"event":"progress","stage":"extract","current":200,"total":417,"detail":"paddleocr"}`,
+  ]);
+  check("手动后端也报页数(进度分母)", st.pages === 417, String(st.pages));
+  check("页级进度进入 detail(行内显示 12/417)",
+    st.detail?.current === 200 && st.detail?.total === 417, JSON.stringify(st.detail));
+  // 阶段刚开始的猜测值(ACTIVE_GUESS=25%)会压住很小的真实页数(12/417),这是
+  // 「进度只许前进」的既有口径;过了猜测值之后必须按真实页数走。
+  check("页数超过猜测值后按真实页数算进度",
+    progress[3] === 20 && progress[4] === Math.round((0.05 + 0.6 * (200 / 417)) * 100),
+    progress.join(","));
+}
+{
+  const { st, progress } = feed([
+    `{"event":"stage","name":"detect","state":"done","skipped":true}`,
+    `{"event":"plan","backend":"mineru","pages":417,"ocr_pages":417,"ocr_runs":1,"shards":1}`,
+    `{"event":"stage","name":"extract","state":"start","backend":"mineru"}`,
+    `{"event":"reuse","backend":"mineru","pages":417,"parts":1,"reused_parts":1}`,
+    `{"event":"stage","name":"extract","state":"done","backend":"mineru"}`,
+    `{"event":"stage","name":"clean","state":"start"}`,
+    `{"event":"stage","name":"clean","state":"done"}`,
+    `{"event":"stage","name":"build","state":"start"}`,
+    `{"event":"stage","name":"build","state":"done"}`,
+    `{"event":"stage","name":"verify","state":"start"}`,
+    `{"event":"stage","name":"verify","state":"done"}`,
+    `{"event":"complete","file":"书.pdf","epub":"书.epub","backend":"mineru","pdf_type":"manual","cached":true,"seconds":2.1}`,
+  ]);
+  check("复用已落盘结果被标出(不是静默跳过)", st.reused === true);
+  check("复用不伪造页级进度(没有 OCR 就没有 n/总)", st.detail === undefined,
+    JSON.stringify(st.detail));
+  check("复用照样是 complete(不是 skip),阶段全部完成",
+    st.done === true && st.skipped !== true && st.error === undefined);
+  check("complete.cached 同样标出复用", st.reused === true);
 }
 
 console.log(failures === 0 ? "\n全部通过" : `\n${failures} 项失败`);

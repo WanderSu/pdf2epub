@@ -95,13 +95,15 @@ function BackendPicker({ row, lang, env, onPick }: {
  * 必须有这么一道闸门,不是形式:本地转换不花钱,云端 OCR 是要按页结算的,
  * 而 drop-and-forget 的界面在几十页扫描件上按回车之前没有任何反悔机会。
  */
-function ReviewTable({ sheet, lang, env, onCancel, onStart, onRowBackend }: {
+function ReviewTable({ sheet, lang, env, onCancel, onStart, onRowBackend, onNoResume }: {
   sheet: ReviewSheet;
   lang: Lang;
   env: EnvState | null;
   onCancel: () => void;
   onStart: () => void;
   onRowBackend: (id: string, b: RowBackend) => void;
+  /** 「强制重新解析」:不复用已落盘的云端结果(会重新计费) */
+  onNoResume: (v: boolean) => void;
 }) {
   const t = T[lang].review;
   // 总额按行求和:逐行换过后端之后,「这笔要花多少钱」必须跟着变
@@ -152,6 +154,22 @@ function ReviewTable({ sheet, lang, env, onCancel, onStart, onRowBackend }: {
             {checking ? t.checkingHint : totalOcr > 0 ? t.estimate(totalOcr) : t.estimateLocal}
           </div>
           <div className="font-mono text-[10px] text-[var(--muted-foreground)] mt-1">{t.pipeline}</div>
+          {/* 只有「从书库重新转换」才给这个勾选:新导入没有旧缓存可复用,摆在那里只是噪音。
+              引擎默认复用已落盘的云端结果(不重复计费),勾上才会真的重新 OCR。 */}
+          {sheet.allowForceReparse && (
+            <label className="mt-3 flex items-start gap-2 cursor-pointer" title={t.reparseHint}>
+              <input
+                type="checkbox"
+                checked={Boolean(sheet.noResume)}
+                onChange={e => onNoResume(e.target.checked)}
+                className="mt-0.5 accent-[var(--primary)]"
+              />
+              <span className="min-w-0">
+                <span className={`text-[12px] text-[var(--foreground)] ${lang === "zh" ? "cjk" : "font-mono"}`}>{t.reparse}</span>
+                <span className={`block text-[10px] text-[var(--muted-foreground)] mt-0.5 ${lang === "zh" ? "cjk" : "font-mono"}`}>{t.reparseHint}</span>
+              </span>
+            </label>
+          )}
         </div>
 
         <div className="flex items-center justify-end gap-5 px-8 py-4 border-t border-[var(--border)] bg-[var(--background)]">
@@ -178,7 +196,7 @@ export function ConvertScreen({
   composingExpanded, setComposingExpanded, consoleLines, review, env,
   onPick, onCancel, onRetry, onClearDone, onRetryFailed, onCancelAll, onUseOcr,
   onPreflight, onPreflightRecent, onAddRecent, onForgetRecent, onMoveTop, onStartQueue,
-  onReviewStart, onReviewCancel, onRowBackend, onDelete,
+  onReviewStart, onReviewCancel, onRowBackend, onReviewNoResume, onDelete,
 }: {
   lang: Lang;
   files: QueueFile[];
@@ -213,6 +231,8 @@ export function ConvertScreen({
   onReviewCancel: () => void;
   /** 在复核表某一行上换后端(换完 App 会重跑这一行的预检) */
   onRowBackend: (id: string, b: RowBackend) => void;
+  /** 复核表里的「强制重新解析」勾选(只对书库重新转换出现;缺省 = 不显示勾选) */
+  onReviewNoResume?: (value: boolean) => void;
   /** 删除一条队列记录;deleteFile 为真时连生成的 EPUB 一起删 */
   onDelete: (id: string, deleteFile: boolean) => void;
 }) {
@@ -553,6 +573,13 @@ export function ConvertScreen({
                   <div className={`border-b border-[var(--border)] overflow-hidden transition-all duration-[180ms] ${isExpanded ? "" : "py-1"}`}>
                     <div className="flex items-center gap-4 py-1.5">
                       <StageStepper stages={file.stages} signatures={file.signatures} lang={lang} />
+                      {/* 页级进度:引擎 progress 事件给了 current/total 就显示「12/417 页」。
+                          OCR 阶段唯一的「还活着」的证据 —— 只打进日志等于没报进度。 */}
+                      {file.status === "converting" && file.progressDetail && file.progressDetail.total > 0 && (
+                        <span className="font-mono text-[10px] tabular-nums text-[var(--primary)] shrink-0">
+                          {t.pageProgress(file.progressDetail.current, file.progressDetail.total)}
+                        </span>
+                      )}
                       <div className="flex-1 min-w-0">
                         {isExpanded && file.log.length > 0 ? (
                           <pre className="font-mono text-[10px] leading-relaxed text-[var(--muted-foreground)] whitespace-pre-wrap">{file.log.slice(-12).join("\n")}</pre>
@@ -566,6 +593,12 @@ export function ConvertScreen({
                         ) : file.status === "skipped" ? (
                           <span className={`text-[10px] text-[var(--info)] truncate block ${lang === "zh" ? "cjk" : "font-mono"}`}>
                             {t.skippedHint}
+                          </span>
+                        ) : file.status === "done" && file.reused ? (
+                          // 复用已落盘的解析结果:几秒完成不是「跳过」,是省了一次计费。
+                          // 不说清楚,用户只会以为引擎没干活,然后删 work/ 重跑再付一次钱。
+                          <span className={`text-[10px] text-[var(--info)] truncate block ${lang === "zh" ? "cjk" : "font-mono"}`}>
+                            {t.reused}
                           </span>
                         ) : file.lastLog ? (
                           <span className="font-mono text-[10px] text-[var(--muted-foreground)] truncate block selectable">{file.lastLog}</span>
@@ -607,6 +640,7 @@ export function ConvertScreen({
           onCancel={onReviewCancel}
           onStart={onReviewStart}
           onRowBackend={onRowBackend}
+          onNoResume={onReviewNoResume ?? (() => { /* 没接这个入口(测试/旧壳) */ })}
         />
       )}
 
